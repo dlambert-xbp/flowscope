@@ -27,6 +27,10 @@ Environment variable overrides (also honored inside the Docker image): `FLOWSCOP
 
 `FLOWSCOPE_AUTH_TOKEN` (optional): when set, every `/api/*` request must include `X-Auth-Token: <value>`. Unset = no auth (current behavior). The static dashboard shell is not gated; the browser prompts for the token on first 401 and caches it in `sessionStorage`. Token comparison is constant-time. Does not provide TLS — terminate TLS at a reverse proxy.
 
+`FLOWSCOPE_SNMP_KEY` (required for v3 SNMP profiles): master key for AES-256-GCM encryption of v3 passphrases at rest. HKDF-SHA256 derives a 32-byte key from this string. **The value MUST stay constant across restarts** — change it and existing v3 profiles cannot decrypt. Generate with `python -c "import secrets; print(secrets.token_urlsafe(32))"`.
+
+`FLOWSCOPE_SNMP_MOCK` (optional, dev-only): set to `1` to use the deterministic mock SNMP client instead of pysnmp-lextudio. Mock returns synthetic ifDescr/ifAlias/ifSpeed and ignores credentials. Default off.
+
 ## Architecture
 
 FlowScope is **two single-file programs** (`app.py` backend, `web/index.html` frontend) plus an optional traffic synthesizer (`synth_flows.py`). Keep this shape — the project's stated goal is a self-contained collector with no agents, no external dashboard, and no build pipeline.

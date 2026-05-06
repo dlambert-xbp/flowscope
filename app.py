@@ -26,6 +26,7 @@ from ipaddress import ip_address
 
 from flask import Flask, jsonify, request, send_from_directory, make_response
 
+import snmp_crypto
 import snmp_mock
 
 # ---------------------------------------------------------------------------
@@ -82,6 +83,23 @@ interface_labels = {}  # (exporter_ip, ifindex) -> str
 folders          = {}  # folder_id -> {"name", "sort_order"}
 folder_members   = {}  # folder_id -> set(exporter_ip)
 folder_of        = {}  # exporter_ip -> folder_id (inverse index for fast lookup)
+
+# SNMP profiles (named credential sets) and their bindings.
+# All access under state_lock. v3 passphrases live decrypted in memory once
+# loaded; only ciphertext goes to SQLite (snmp_crypto.encrypt/decrypt).
+# A profile dict has all the fields from the snmp_profiles table; '_pt'
+# suffix on v3_auth_pass / v3_priv_pass holds plaintext for poll use.
+snmp_profiles_mem = {}   # name -> {version, community, v3_username, v3_security_level,
+                         #         v3_auth_proto, v3_auth_pass, v3_priv_proto, v3_priv_pass,
+                         #         v3_context, port, timeout_s, retries, created_ts, updated_ts}
+snmp_bindings_mem = {}   # (scope, scope_id) -> {profile, poll_interval_s, enabled}
+                         #   scope ∈ {'global','folder','device'}
+                         #   scope_id: '' (global), str(folder_id) (folder), exporter_ip (device)
+snmp_poll_status  = {}   # exporter -> {last_poll_ts, last_ok_ts, last_error,
+                         #              iface_count, consecutive_failures}
+
+DEFAULT_POLL_INTERVAL_S = 60
+SNMP_DEFAULT_PORT       = 161
 
 # NetFlow v9 / IPFIX templates, keyed by (exporter, source_id, template_id)
 templates = {}
@@ -165,6 +183,53 @@ def db_init():
         CREATE UNIQUE INDEX IF NOT EXISTS idx_folder_members_exporter
         ON folder_members(exporter)
     """)
+    # SNMP profiles (named credential sets). v3 passphrases are stored
+    # ENCRYPTED via snmp_crypto.encrypt; never plaintext on disk.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS snmp_profiles (
+            name              TEXT PRIMARY KEY,
+            version           TEXT NOT NULL,
+            community         TEXT,
+            v3_username       TEXT,
+            v3_security_level TEXT,
+            v3_auth_proto     TEXT,
+            v3_auth_pass_enc  BLOB,
+            v3_priv_proto     TEXT,
+            v3_priv_pass_enc  BLOB,
+            v3_context        TEXT,
+            port              INTEGER NOT NULL DEFAULT 161,
+            timeout_s         REAL    NOT NULL DEFAULT 2.0,
+            retries           INTEGER NOT NULL DEFAULT 1,
+            created_ts        REAL    NOT NULL,
+            updated_ts        REAL    NOT NULL
+        )
+    """)
+    # SNMP bindings: which profile applies at which scope, with optional
+    # per-scope overrides for poll interval and enabled flag. Resolution
+    # walks device -> folder -> global.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS snmp_bindings (
+            scope           TEXT NOT NULL CHECK(scope IN ('global','folder','device')),
+            scope_id        TEXT NOT NULL,
+            profile         TEXT,
+            poll_interval_s INTEGER,
+            enabled         INTEGER,
+            PRIMARY KEY (scope, scope_id),
+            FOREIGN KEY (profile) REFERENCES snmp_profiles(name) ON DELETE SET NULL
+        )
+    """)
+    # Per-device poll telemetry. Survives restart so the dashboard "last
+    # error" / "consecutive failures" counters don't reset on bounce.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS snmp_poll_status (
+            exporter             TEXT PRIMARY KEY,
+            last_poll_ts         REAL,
+            last_ok_ts           REAL,
+            last_error           TEXT,
+            iface_count          INTEGER,
+            consecutive_failures INTEGER NOT NULL DEFAULT 0
+        )
+    """)
     for row in conn.execute("SELECT exporter, label FROM exporter_labels"):
         exporter_labels[row[0]] = row[1]
     for row in conn.execute("SELECT exporter, ifindex, label FROM interface_labels"):
@@ -175,6 +240,60 @@ def db_init():
     for row in conn.execute("SELECT folder_id, exporter FROM folder_members"):
         folder_members.setdefault(row[0], set()).add(row[1])
         folder_of[row[1]] = row[0]
+    # SNMP profiles: decrypt v3 passphrases up front. If the master key isn't
+    # configured but encrypted blobs exist, leave the passphrases as None and
+    # log; the poller will skip those profiles rather than mis-decrypt.
+    snmp_unlock_warnings = []
+    for row in conn.execute("""
+        SELECT name, version, community, v3_username, v3_security_level,
+               v3_auth_proto, v3_auth_pass_enc, v3_priv_proto, v3_priv_pass_enc,
+               v3_context, port, timeout_s, retries, created_ts, updated_ts
+        FROM snmp_profiles
+    """):
+        (name, version, community, v3_user, v3_sec, v3_ap, v3_apass_enc,
+         v3_pp, v3_ppass_enc, v3_ctx, port, timeout, retries, c_ts, u_ts) = row
+        v3_apass = v3_ppass = None
+        if v3_apass_enc or v3_ppass_enc:
+            if not snmp_crypto.is_configured():
+                snmp_unlock_warnings.append(name)
+            else:
+                try:
+                    v3_apass = snmp_crypto.decrypt(v3_apass_enc) if v3_apass_enc else None
+                    v3_ppass = snmp_crypto.decrypt(v3_ppass_enc) if v3_ppass_enc else None
+                except snmp_crypto.CryptoBadInput as e:
+                    snmp_unlock_warnings.append(f"{name} ({e})")
+        snmp_profiles_mem[name] = {
+            "name": name, "version": version, "community": community,
+            "v3_username": v3_user, "v3_security_level": v3_sec,
+            "v3_auth_proto": v3_ap, "v3_auth_pass": v3_apass,
+            "v3_priv_proto": v3_pp, "v3_priv_pass": v3_ppass,
+            "v3_context": v3_ctx, "port": port,
+            "timeout_s": timeout, "retries": retries,
+            "created_ts": c_ts, "updated_ts": u_ts,
+            "_has_auth_pass": bool(v3_apass_enc),
+            "_has_priv_pass": bool(v3_ppass_enc),
+        }
+    if snmp_unlock_warnings:
+        print(f"[snmp] WARNING: could not decrypt {len(snmp_unlock_warnings)} profile(s); "
+              f"set FLOWSCOPE_SNMP_KEY to the same value used when they were created. "
+              f"Affected: {', '.join(snmp_unlock_warnings)}")
+    for row in conn.execute("""
+        SELECT scope, scope_id, profile, poll_interval_s, enabled FROM snmp_bindings
+    """):
+        snmp_bindings_mem[(row[0], row[1])] = {
+            "profile": row[2],
+            "poll_interval_s": row[3],
+            "enabled": row[4],
+        }
+    for row in conn.execute("""
+        SELECT exporter, last_poll_ts, last_ok_ts, last_error,
+               iface_count, consecutive_failures FROM snmp_poll_status
+    """):
+        snmp_poll_status[row[0]] = {
+            "last_poll_ts": row[1], "last_ok_ts": row[2],
+            "last_error":   row[3], "iface_count": row[4],
+            "consecutive_failures": row[5],
+        }
     conn.commit()
     return conn
 
@@ -241,6 +360,158 @@ def rdns_loop():
         except Exception as e:
             print(f"[rdns] error: {e}")
         time.sleep(30)
+
+
+# ---------------------------------------------------------------------------
+# SNMP poll dispatcher + scheduler
+# ---------------------------------------------------------------------------
+# walk_iftable_dispatch picks between the mock client (Phase 2 + opt-in
+# testing in later phases) and the real pysnmp client (Phase 3+). The
+# scheduler thread wakes once per second, walks `devices`, resolves each
+# one's effective binding, and runs polls whose interval has elapsed.
+# Counter-samples-win invariant (CLAUDE.md): we never overwrite a non-zero
+# speed_bps already learned from sFlow.
+
+SNMP_USE_MOCK = os.environ.get("FLOWSCOPE_SNMP_MOCK", "0") in ("1", "true", "True", "yes")
+
+
+def walk_iftable_dispatch(profile, host, ifindexes):
+    """Run an SNMP iftable walk against `host` using `profile`.
+
+    Returns {ifindex: {"name", "alias", "speed_bps"}}. Raises on transport
+    or auth errors so the caller can record `last_error`."""
+    if SNMP_USE_MOCK:
+        client = snmp_mock.MockSNMPClient(
+            community=profile.get("community") or "public",
+            version=profile.get("version") or "2c",
+        )
+        return client.walk_iftable(host, ifindexes)
+    # Phase 3: real pysnmp-lextudio client lives in snmp_client.py.
+    try:
+        import snmp_client
+    except ImportError:
+        # The real client module isn't there yet (Phase 2 deploy without
+        # FLOWSCOPE_SNMP_MOCK=1). Surface a clear error rather than crash.
+        raise RuntimeError(
+            "real SNMP client not available; set FLOWSCOPE_SNMP_MOCK=1 "
+            "to use the mock, or install pysnmp-lextudio (Phase 3)")
+    return snmp_client.walk_iftable(profile, host, ifindexes)
+
+
+def _run_poll(exporter, profile, ifindexes):
+    """Execute one poll and update interface_stats + snmp_poll_status.
+    Returns None on success, error string on failure."""
+    err_msg = None
+    walk = {}
+    try:
+        walk = walk_iftable_dispatch(profile, exporter, ifindexes)
+    except Exception as e:
+        err_msg = f"{type(e).__name__}: {e}"
+
+    now = time.time()
+    with state_lock:
+        if walk:
+            for ifindex, info in walk.items():
+                k = (exporter, ifindex)
+                s = interface_stats.get(k)
+                if s is None:
+                    continue
+                s["name"]  = info.get("name")  or s.get("name")
+                s["alias"] = info.get("alias") or s.get("alias")
+                # Counter-samples-win: don't clobber a non-zero speed already
+                # learned from sFlow if_counters.
+                if not s.get("speed_bps") and info.get("speed_bps"):
+                    s["speed_bps"] = info["speed_bps"]
+        st = snmp_poll_status.setdefault(exporter, {
+            "last_poll_ts": None, "last_ok_ts": None, "last_error": None,
+            "iface_count": 0, "consecutive_failures": 0,
+        })
+        st["last_poll_ts"] = now
+        if err_msg:
+            st["last_error"]           = err_msg
+            st["consecutive_failures"] = (st.get("consecutive_failures") or 0) + 1
+        else:
+            st["last_error"]           = None
+            st["last_ok_ts"]           = now
+            st["iface_count"]          = len(walk)
+            st["consecutive_failures"] = 0
+
+    # Persist status outside state_lock (db_lock allowed).
+    try:
+        with db_lock:
+            db_conn.execute("""
+                INSERT INTO snmp_poll_status
+                  (exporter, last_poll_ts, last_ok_ts, last_error,
+                   iface_count, consecutive_failures)
+                VALUES (?,?,?,?,?,?)
+                ON CONFLICT(exporter) DO UPDATE SET
+                  last_poll_ts=excluded.last_poll_ts,
+                  last_ok_ts=COALESCE(excluded.last_ok_ts, snmp_poll_status.last_ok_ts),
+                  last_error=excluded.last_error,
+                  iface_count=COALESCE(excluded.iface_count, snmp_poll_status.iface_count),
+                  consecutive_failures=excluded.consecutive_failures
+            """, (
+                exporter, now,
+                now if not err_msg else None,
+                err_msg,
+                len(walk) if not err_msg else None,
+                snmp_poll_status[exporter]["consecutive_failures"],
+            ))
+            db_conn.commit()
+    except Exception as e:
+        print(f"[snmp] status persist error: {e}")
+    return err_msg
+
+
+def snmp_scheduler_loop():
+    """Tick once per second; poll each device whose interval has elapsed.
+
+    Sequential within a tick — fine for the scale FlowScope targets (a few
+    hundred devices, each polled every minute). If we ever need parallelism
+    here, add a small ThreadPoolExecutor; nothing else needs to change."""
+    while True:
+        tick_started = time.time()
+        try:
+            with state_lock:
+                exporters = list(devices.keys())
+                # Snapshot of ifindex sets so we don't iterate interface_stats
+                # outside the lock.
+                per_host_ifs = {}
+                for (exp, ifindex) in interface_stats.keys():
+                    per_host_ifs.setdefault(exp, []).append(ifindex)
+
+            for exporter in exporters:
+                try:
+                    eff = resolve_snmp(exporter)
+                    if not eff.get("profile"):
+                        continue
+                    # enabled semantics: 0 = explicit off, 1 = explicit on,
+                    # None = inherit. With a profile bound we default to on,
+                    # so only skip when something in the chain set 0.
+                    if eff.get("enabled") == 0:
+                        continue
+                    interval = eff.get("poll_interval_s") or DEFAULT_POLL_INTERVAL_S
+
+                    with state_lock:
+                        st   = snmp_poll_status.get(exporter)
+                        prof = snmp_profiles_mem.get(eff["profile"])
+                    if prof is None:
+                        continue
+                    last = st["last_poll_ts"] if st and st.get("last_poll_ts") else 0
+                    if tick_started - last < interval:
+                        continue
+
+                    ifs = per_host_ifs.get(exporter, [])
+                    if not ifs:
+                        continue
+                    _run_poll(exporter, prof, ifs)
+                except Exception as e:
+                    print(f"[snmp] poll error for {exporter}: {e}")
+        except Exception as e:
+            print(f"[snmp] scheduler error: {e}")
+        # Honest 1-Hz tick (avoid drift if a poll batch took >1s).
+        elapsed = time.time() - tick_started
+        time.sleep(max(0, 1.0 - elapsed))
 
 
 # ---------------------------------------------------------------------------
@@ -1124,11 +1395,552 @@ def api_protocols():
     return jsonify(rows)
 
 
+# ---------------------------------------------------------------------------
+# SNMP profiles, bindings, resolution, polling
+# ---------------------------------------------------------------------------
+# A profile is a named credential set (v2c community OR v3 user/auth/priv).
+# A binding attaches a profile to a scope (global / folder / device) and may
+# override poll interval and enabled flag. Resolution for a given exporter
+# walks device -> folder -> global, with later tiers overriding earlier ones
+# field-by-field. Poll telemetry is in snmp_poll_status, persisted to SQLite.
+#
+# v3 passphrases live encrypted-at-rest (snmp_crypto). Decrypted plaintext
+# only exists in memory for the running process; API responses never return
+# cleartext — they return "***set***" / "***unset***" markers instead.
+
+V3_AUTH_PROTOS = {"MD5", "SHA", "SHA224", "SHA256", "SHA384", "SHA512"}
+V3_PRIV_PROTOS = {"DES", "3DES", "AES128", "AES192", "AES256"}
+V3_SEC_LEVELS  = {"noAuthNoPriv", "authNoPriv", "authPriv"}
+
+
+def _redact_profile(p):
+    """Return the profile dict with v3 passphrases redacted for API output."""
+    if p is None:
+        return None
+    out = {
+        "name":              p["name"],
+        "version":           p["version"],
+        "community":         p.get("community"),
+        "v3_username":       p.get("v3_username"),
+        "v3_security_level": p.get("v3_security_level"),
+        "v3_auth_proto":     p.get("v3_auth_proto"),
+        "v3_priv_proto":     p.get("v3_priv_proto"),
+        "v3_context":        p.get("v3_context"),
+        "v3_auth_pass":      "***set***" if p.get("_has_auth_pass") else "***unset***",
+        "v3_priv_pass":      "***set***" if p.get("_has_priv_pass") else "***unset***",
+        "port":              p.get("port", SNMP_DEFAULT_PORT),
+        "timeout_s":         p.get("timeout_s"),
+        "retries":           p.get("retries"),
+        "created_ts":        p.get("created_ts"),
+        "updated_ts":        p.get("updated_ts"),
+    }
+    return out
+
+
+def _validate_profile_payload(payload, partial=False):
+    """Validate fields in a POST or PATCH body. Returns (cleaned_dict, error_or_None)."""
+    out = {}
+    if "version" in payload:
+        v = str(payload["version"]).strip()
+        if v not in ("2c", "3"):
+            return None, "version must be '2c' or '3'"
+        out["version"] = v
+    elif not partial:
+        return None, "version is required"
+
+    # Optional / version-specific fields
+    if "community" in payload:
+        c = payload["community"]
+        out["community"] = (str(c).strip() or None) if c is not None else None
+    for k in ("v3_username", "v3_context"):
+        if k in payload:
+            v = payload[k]
+            out[k] = (str(v).strip() or None) if v is not None else None
+    if "v3_security_level" in payload:
+        v = payload["v3_security_level"]
+        if v is not None and v not in V3_SEC_LEVELS:
+            return None, f"v3_security_level must be one of {sorted(V3_SEC_LEVELS)}"
+        out["v3_security_level"] = v
+    if "v3_auth_proto" in payload:
+        v = payload["v3_auth_proto"]
+        if v is not None and v not in V3_AUTH_PROTOS:
+            return None, f"v3_auth_proto must be one of {sorted(V3_AUTH_PROTOS)}"
+        out["v3_auth_proto"] = v
+    if "v3_priv_proto" in payload:
+        v = payload["v3_priv_proto"]
+        if v is not None and v not in V3_PRIV_PROTOS:
+            return None, f"v3_priv_proto must be one of {sorted(V3_PRIV_PROTOS)}"
+        out["v3_priv_proto"] = v
+    # Passphrases: empty string clears, missing key leaves alone, None clears.
+    for k in ("v3_auth_pass", "v3_priv_pass"):
+        if k in payload:
+            v = payload[k]
+            out[k] = None if (v is None or v == "") else str(v)
+    if "port" in payload:
+        try:
+            p = int(payload["port"])
+        except (TypeError, ValueError):
+            return None, "port must be an integer"
+        if not (1 <= p <= 65535):
+            return None, "port out of range"
+        out["port"] = p
+    if "timeout_s" in payload:
+        try:
+            t = float(payload["timeout_s"])
+        except (TypeError, ValueError):
+            return None, "timeout_s must be a number"
+        if t <= 0 or t > 60:
+            return None, "timeout_s out of range (0, 60]"
+        out["timeout_s"] = t
+    if "retries" in payload:
+        try:
+            r = int(payload["retries"])
+        except (TypeError, ValueError):
+            return None, "retries must be an integer"
+        if r < 0 or r > 10:
+            return None, "retries out of range [0, 10]"
+        out["retries"] = r
+    return out, None
+
+
+def _persist_profile(name, p, is_create):
+    """Write the in-memory profile back to SQLite. Caller holds db_lock + state_lock."""
+    auth_enc = snmp_crypto.encrypt(p.get("v3_auth_pass")) if p.get("v3_auth_pass") else None
+    priv_enc = snmp_crypto.encrypt(p.get("v3_priv_pass")) if p.get("v3_priv_pass") else None
+    if is_create:
+        db_conn.execute("""
+            INSERT INTO snmp_profiles
+            (name, version, community, v3_username, v3_security_level,
+             v3_auth_proto, v3_auth_pass_enc, v3_priv_proto, v3_priv_pass_enc,
+             v3_context, port, timeout_s, retries, created_ts, updated_ts)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """, (
+            name, p["version"], p.get("community"),
+            p.get("v3_username"), p.get("v3_security_level"),
+            p.get("v3_auth_proto"), auth_enc,
+            p.get("v3_priv_proto"), priv_enc,
+            p.get("v3_context"),
+            p.get("port", SNMP_DEFAULT_PORT),
+            p.get("timeout_s", 2.0),
+            p.get("retries", 1),
+            p["created_ts"], p["updated_ts"],
+        ))
+    else:
+        db_conn.execute("""
+            UPDATE snmp_profiles SET
+                version=?, community=?, v3_username=?, v3_security_level=?,
+                v3_auth_proto=?, v3_auth_pass_enc=?, v3_priv_proto=?,
+                v3_priv_pass_enc=?, v3_context=?, port=?, timeout_s=?,
+                retries=?, updated_ts=?
+            WHERE name=?
+        """, (
+            p["version"], p.get("community"), p.get("v3_username"),
+            p.get("v3_security_level"), p.get("v3_auth_proto"), auth_enc,
+            p.get("v3_priv_proto"), priv_enc, p.get("v3_context"),
+            p.get("port", SNMP_DEFAULT_PORT),
+            p.get("timeout_s", 2.0), p.get("retries", 1),
+            p["updated_ts"], name,
+        ))
+    db_conn.commit()
+    p["_has_auth_pass"] = bool(auth_enc)
+    p["_has_priv_pass"] = bool(priv_enc)
+
+
+@app.route("/api/snmp/profiles", methods=["GET", "POST"])
+def api_snmp_profiles():
+    if request.method == "GET":
+        with state_lock:
+            out = [_redact_profile(p) for p in snmp_profiles_mem.values()]
+        out.sort(key=lambda x: x["name"].lower())
+        return jsonify(out)
+
+    # POST: create. Body must include "name" + at minimum "version".
+    payload = request.get_json(silent=True) or {}
+    name = (payload.get("name") or "").strip()
+    if not name:
+        return jsonify({"ok": False, "error": "name required"}), 400
+    cleaned, err = _validate_profile_payload(payload, partial=False)
+    if err:
+        return jsonify({"ok": False, "error": err}), 400
+    # If a v3 passphrase was supplied but crypto isn't configured, fail fast.
+    if (cleaned.get("v3_auth_pass") or cleaned.get("v3_priv_pass")) \
+            and not snmp_crypto.is_configured():
+        return jsonify({"ok": False,
+                        "error": f"{snmp_crypto.ENV_KEY} must be set to store v3 passphrases"}), 400
+    try:
+        with db_lock, state_lock:
+            if name in snmp_profiles_mem:
+                return jsonify({"ok": False, "error": "profile name already exists"}), 409
+            now = time.time()
+            p = {
+                "name":              name,
+                "version":           cleaned["version"],
+                "community":         cleaned.get("community"),
+                "v3_username":       cleaned.get("v3_username"),
+                "v3_security_level": cleaned.get("v3_security_level"),
+                "v3_auth_proto":     cleaned.get("v3_auth_proto"),
+                "v3_auth_pass":      cleaned.get("v3_auth_pass"),
+                "v3_priv_proto":     cleaned.get("v3_priv_proto"),
+                "v3_priv_pass":      cleaned.get("v3_priv_pass"),
+                "v3_context":        cleaned.get("v3_context"),
+                "port":              cleaned.get("port", SNMP_DEFAULT_PORT),
+                "timeout_s":         cleaned.get("timeout_s", 2.0),
+                "retries":           cleaned.get("retries", 1),
+                "created_ts":        now,
+                "updated_ts":        now,
+                "_has_auth_pass":    False,
+                "_has_priv_pass":    False,
+            }
+            _persist_profile(name, p, is_create=True)
+            snmp_profiles_mem[name] = p
+            return jsonify(_redact_profile(p)), 201
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/snmp/profiles/<name>", methods=["GET", "PATCH", "DELETE"])
+def api_snmp_profile(name):
+    if request.method == "GET":
+        with state_lock:
+            p = snmp_profiles_mem.get(name)
+            if not p:
+                return jsonify({"ok": False, "error": "not found"}), 404
+            return jsonify(_redact_profile(p))
+
+    if request.method == "DELETE":
+        try:
+            with db_lock, state_lock:
+                if name not in snmp_profiles_mem:
+                    return jsonify({"ok": False, "error": "not found"}), 404
+                # Bindings that referenced this profile have ON DELETE SET NULL,
+                # so they remain but lose their profile pointer. Mirror that in
+                # memory so resolve_snmp sees the change immediately.
+                db_conn.execute("DELETE FROM snmp_profiles WHERE name = ?", (name,))
+                db_conn.commit()
+                snmp_profiles_mem.pop(name, None)
+                for b in snmp_bindings_mem.values():
+                    if b.get("profile") == name:
+                        b["profile"] = None
+            return ("", 204)
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)}), 500
+
+    # PATCH: partial update. Cannot change name (it's the PK).
+    payload = request.get_json(silent=True) or {}
+    cleaned, err = _validate_profile_payload(payload, partial=True)
+    if err:
+        return jsonify({"ok": False, "error": err}), 400
+    if (cleaned.get("v3_auth_pass") or cleaned.get("v3_priv_pass")) \
+            and not snmp_crypto.is_configured():
+        return jsonify({"ok": False,
+                        "error": f"{snmp_crypto.ENV_KEY} must be set to store v3 passphrases"}), 400
+    try:
+        with db_lock, state_lock:
+            p = snmp_profiles_mem.get(name)
+            if not p:
+                return jsonify({"ok": False, "error": "not found"}), 404
+            for k, v in cleaned.items():
+                p[k] = v
+            p["updated_ts"] = time.time()
+            _persist_profile(name, p, is_create=False)
+            return jsonify(_redact_profile(p))
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/snmp/profiles/<name>/test", methods=["POST"])
+def api_snmp_profile_test(name):
+    """Trial-walk a profile against a target. In Phase 2 with the mock
+    client this always returns success with synthetic data; Phase 3 will
+    perform a real SNMP walk."""
+    payload = request.get_json(silent=True) or {}
+    exporter = (payload.get("exporter") or "").strip()
+    if not exporter:
+        return jsonify({"ok": False, "error": "exporter required"}), 400
+    with state_lock:
+        p = snmp_profiles_mem.get(name)
+        if not p:
+            return jsonify({"ok": False, "error": "profile not found"}), 404
+        # Ifindexes the test should ask about: anything FlowScope already saw
+        # for this exporter. Falls back to a few synthetic ones if unknown.
+        ifs = sorted({i for (e, i) in interface_stats.keys() if e == exporter})
+    if not ifs:
+        ifs = [1, 2, 3]
+    try:
+        result = walk_iftable_dispatch(p, exporter, ifs)
+        return jsonify({"ok": True, "profile": name, "exporter": exporter,
+                        "ifaces": [{"ifindex": i, **info} for i, info in result.items()]})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+# ----- Bindings -----
+
+def _binding_to_dict(scope, scope_id, b):
+    return {
+        "scope":           scope,
+        "scope_id":        scope_id,
+        "profile":         b.get("profile"),
+        "poll_interval_s": b.get("poll_interval_s"),
+        "enabled":         b.get("enabled"),
+    }
+
+
+def _validate_binding_payload(payload):
+    out = {}
+    if "profile" in payload:
+        v = payload["profile"]
+        out["profile"] = (str(v).strip() or None) if v is not None else None
+    if "poll_interval_s" in payload:
+        v = payload["poll_interval_s"]
+        if v is None:
+            out["poll_interval_s"] = None
+        else:
+            try:
+                iv = int(v)
+            except (TypeError, ValueError):
+                return None, "poll_interval_s must be an integer or null"
+            if iv < 5 or iv > 86400:
+                return None, "poll_interval_s out of range [5, 86400]"
+            out["poll_interval_s"] = iv
+    if "enabled" in payload:
+        v = payload["enabled"]
+        if v is None:
+            out["enabled"] = None
+        else:
+            out["enabled"] = 1 if bool(v) else 0
+    return out, None
+
+
+def _upsert_binding(scope, scope_id, fields):
+    """Caller holds db_lock + state_lock."""
+    existing = snmp_bindings_mem.get((scope, scope_id))
+    if existing is None:
+        db_conn.execute("""
+            INSERT INTO snmp_bindings(scope, scope_id, profile, poll_interval_s, enabled)
+            VALUES(?,?,?,?,?)
+        """, (scope, scope_id, fields.get("profile"),
+              fields.get("poll_interval_s"), fields.get("enabled")))
+        snmp_bindings_mem[(scope, scope_id)] = {
+            "profile":         fields.get("profile"),
+            "poll_interval_s": fields.get("poll_interval_s"),
+            "enabled":         fields.get("enabled"),
+        }
+    else:
+        for k in ("profile", "poll_interval_s", "enabled"):
+            if k in fields:
+                existing[k] = fields[k]
+        db_conn.execute("""
+            UPDATE snmp_bindings SET profile=?, poll_interval_s=?, enabled=?
+            WHERE scope=? AND scope_id=?
+        """, (existing["profile"], existing["poll_interval_s"],
+              existing["enabled"], scope, scope_id))
+    db_conn.commit()
+
+
+def _delete_binding(scope, scope_id):
+    db_conn.execute("DELETE FROM snmp_bindings WHERE scope=? AND scope_id=?",
+                    (scope, scope_id))
+    db_conn.commit()
+    snmp_bindings_mem.pop((scope, scope_id), None)
+
+
+@app.route("/api/snmp/bindings", methods=["GET"])
+def api_snmp_bindings():
+    with state_lock:
+        out = [_binding_to_dict(s, sid, b) for (s, sid), b in snmp_bindings_mem.items()]
+    return jsonify(out)
+
+
+def _binding_endpoint(scope, scope_id):
+    """Shared GET/PUT/DELETE for the three binding routes."""
+    if request.method == "GET":
+        with state_lock:
+            b = snmp_bindings_mem.get((scope, scope_id))
+            if not b:
+                return jsonify({"ok": False, "error": "not found"}), 404
+            return jsonify(_binding_to_dict(scope, scope_id, b))
+    if request.method == "DELETE":
+        try:
+            with db_lock, state_lock:
+                if (scope, scope_id) not in snmp_bindings_mem:
+                    return ("", 204)   # idempotent
+                _delete_binding(scope, scope_id)
+            return ("", 204)
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)}), 500
+    # PUT
+    payload = request.get_json(silent=True) or {}
+    cleaned, err = _validate_binding_payload(payload)
+    if err:
+        return jsonify({"ok": False, "error": err}), 400
+    # Validate referenced profile (if any) exists.
+    if cleaned.get("profile") is not None:
+        with state_lock:
+            if cleaned["profile"] not in snmp_profiles_mem:
+                return jsonify({"ok": False, "error": "referenced profile does not exist"}), 400
+    # For folder scope, validate the folder id.
+    if scope == "folder":
+        try:
+            fid = int(scope_id)
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "folder id must be an integer"}), 400
+        with state_lock:
+            if fid not in folders:
+                return jsonify({"ok": False, "error": "folder not found"}), 404
+    try:
+        with db_lock, state_lock:
+            _upsert_binding(scope, scope_id, cleaned)
+            return jsonify(_binding_to_dict(scope, scope_id,
+                                            snmp_bindings_mem[(scope, scope_id)]))
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/snmp/bindings/global", methods=["GET", "PUT", "DELETE"])
+def api_snmp_binding_global():
+    return _binding_endpoint("global", "")
+
+
+@app.route("/api/snmp/bindings/folder/<int:fid>", methods=["GET", "PUT", "DELETE"])
+def api_snmp_binding_folder(fid):
+    return _binding_endpoint("folder", str(fid))
+
+
+@app.route("/api/snmp/bindings/device/<exporter>", methods=["GET", "PUT", "DELETE"])
+def api_snmp_binding_device(exporter):
+    return _binding_endpoint("device", exporter)
+
+
+# ----- Resolution -----
+
+def resolve_snmp(exporter):
+    """Walk device -> folder -> global, merging fields from each tier.
+    Each tier overrides the previous tier's value for any field it sets to
+    non-None. Returns a dict with effective profile + interval + enabled,
+    and a per-field source map. Caller may hold state_lock or not — we
+    take it locally since this is read-only."""
+    with state_lock:
+        eff = {"profile": None, "poll_interval_s": None, "enabled": None}
+        sources = {"profile": None, "poll_interval_s": None, "enabled": None}
+        chain = []
+        # Tier 1: global.
+        b = snmp_bindings_mem.get(("global", ""))
+        if b is not None:
+            chain.append("global")
+            for k in eff:
+                if b.get(k) is not None:
+                    eff[k] = b[k]
+                    sources[k] = "global"
+        # Tier 2: folder.
+        fid = folder_of.get(exporter)
+        if fid is not None:
+            b = snmp_bindings_mem.get(("folder", str(fid)))
+            if b is not None:
+                tag = f"folder:{fid}"
+                chain.append(tag)
+                for k in eff:
+                    if b.get(k) is not None:
+                        eff[k] = b[k]
+                        sources[k] = tag
+        # Tier 3: device.
+        b = snmp_bindings_mem.get(("device", exporter))
+        if b is not None:
+            chain.append("device")
+            for k in eff:
+                if b.get(k) is not None:
+                    eff[k] = b[k]
+                    sources[k] = "device"
+        return {
+            "exporter":        exporter,
+            "profile":         eff["profile"],
+            "poll_interval_s": eff["poll_interval_s"],
+            "enabled":         eff["enabled"],
+            "sources":         sources,
+            "chain":           chain,
+        }
+
+
+@app.route("/api/snmp/effective/<exporter>")
+def api_snmp_effective(exporter):
+    return jsonify(resolve_snmp(exporter))
+
+
+# ----- Status & manual poll -----
+
 @app.route("/api/snmp/status")
 def api_snmp_status():
-    """Report SNMP poller state. Currently always reports mock=true; the
-    field exists so the frontend can warn that names/speeds are synthetic."""
-    return jsonify(snmp_mock.poller_status())
+    """Aggregate poll telemetry plus a tiny config snapshot."""
+    exporter_filter = request.args.get("exporter")
+    now = time.time()
+    with state_lock:
+        rows = []
+        ok = stale = err = 0
+        for ip, s in snmp_poll_status.items():
+            if exporter_filter and ip != exporter_filter:
+                continue
+            eff = None
+            # Lightweight inline resolution to avoid double-locking; reuses
+            # the same dicts under the lock.
+            d = snmp_bindings_mem.get(("device", ip))
+            f = snmp_bindings_mem.get(("folder", str(folder_of.get(ip)))) \
+                if folder_of.get(ip) is not None else None
+            g = snmp_bindings_mem.get(("global", ""))
+            interval = None
+            for src in (g, f, d):
+                if src and src.get("poll_interval_s") is not None:
+                    interval = src["poll_interval_s"]
+            interval = interval or DEFAULT_POLL_INTERVAL_S
+            row = {
+                "exporter":             ip,
+                "last_poll_ts":         s.get("last_poll_ts"),
+                "last_ok_ts":           s.get("last_ok_ts"),
+                "last_error":           s.get("last_error"),
+                "iface_count":          s.get("iface_count"),
+                "consecutive_failures": s.get("consecutive_failures", 0),
+            }
+            # Bucket: ok / stale / err
+            if s.get("consecutive_failures", 0) >= 3:
+                err += 1; row["health"] = "error"
+            elif s.get("last_ok_ts") and (now - s["last_ok_ts"]) <= 2 * interval:
+                ok += 1; row["health"] = "ok"
+            else:
+                stale += 1; row["health"] = "stale"
+            rows.append(row)
+        rows.sort(key=lambda r: (r["health"] != "error", r["health"] != "stale",
+                                  r["exporter"]))
+        return jsonify({
+            "summary": {
+                "ok":    ok,
+                "stale": stale,
+                "error": err,
+                "total": ok + stale + err,
+            },
+            "config": {
+                "mock":          SNMP_USE_MOCK,
+                "key_configured": snmp_crypto.is_configured(),
+                "default_interval_s": DEFAULT_POLL_INTERVAL_S,
+            },
+            "devices": rows,
+        })
+
+
+@app.route("/api/snmp/poll/<exporter>", methods=["POST"])
+def api_snmp_poll(exporter):
+    """Trigger an immediate poll for one exporter, ignoring its scheduled
+    cadence. Returns the same shape as the scheduler would record."""
+    eff = resolve_snmp(exporter)
+    if not eff.get("profile"):
+        return jsonify({"ok": False, "error": "no profile bound for this device"}), 400
+    with state_lock:
+        p = snmp_profiles_mem.get(eff["profile"])
+        if not p:
+            return jsonify({"ok": False, "error": "bound profile no longer exists"}), 400
+        ifs = sorted({i for (e, i) in interface_stats.keys() if e == exporter})
+    if not ifs:
+        return jsonify({"ok": False, "error": "no known interfaces for this exporter"}), 400
+    err = _run_poll(exporter, p, ifs)
+    return jsonify({"ok": err is None, "error": err, "exporter": exporter})
 
 
 @app.route("/api/timeseries")
@@ -1224,8 +2036,11 @@ def main():
     threading.Thread(target=sflow_listener,   daemon=True).start()
     threading.Thread(target=db_prune_loop,    daemon=True).start()
     threading.Thread(target=rdns_loop,        daemon=True).start()
-    snmp_mock.start_snmp_poller(devices, interface_stats, state_lock)
+    threading.Thread(target=snmp_scheduler_loop, daemon=True, name="snmp-sched").start()
 
+    mode = "mock" if SNMP_USE_MOCK else "real"
+    crypto_state = "configured" if snmp_crypto.is_configured() else "no key set"
+    print(f"[snmp]   scheduler running ({mode}; FLOWSCOPE_SNMP_KEY: {crypto_state})")
     print(f"[web]    http://0.0.0.0:{WEB_PORT}")
     app.run(host=WEB_HOST, port=WEB_PORT, threaded=True, use_reloader=False)
 
