@@ -104,6 +104,14 @@ SNMP_DEFAULT_PORT       = 161
 # NetFlow v9 / IPFIX templates, keyed by (exporter, source_id, template_id)
 templates = {}
 
+# Endpoint reverse-DNS cache. Public src/dst IPs harvested from record_flow get
+# resolved by endpoint_rdns_loop. Values: None = queued, "" = negative cache,
+# anything else = resolved hostname. Has its own lock so the worker doesn't
+# contend with the UDP parsers writing to recent_flows.
+endpoint_dns = {}
+endpoint_dns_lock = threading.Lock()
+ENDPOINT_DNS_MAX = 10000
+
 # Counters
 stats = {
     "netflow_packets": 0,
@@ -362,6 +370,51 @@ def rdns_loop():
         time.sleep(30)
 
 
+def _is_resolvable_public(ip):
+    """True only for globally routable addresses worth a PTR lookup.
+
+    Filters out RFC1918, loopback, link-local, multicast, reserved, and
+    unspecified — they almost never have public PTRs and querying them
+    leaks internal addresses to the system resolver.
+    """
+    try:
+        a = ip_address(ip)
+    except (ValueError, TypeError):
+        return False
+    if a.is_private or a.is_loopback or a.is_link_local:
+        return False
+    if a.is_multicast or a.is_reserved or a.is_unspecified:
+        return False
+    return True
+
+
+def endpoint_rdns_loop():
+    """Best-effort reverse DNS for endpoint (src/dst) IPs harvested from flows.
+
+    Mirrors rdns_loop but reads from endpoint_dns. Items are inserted by
+    record_flow with value None (queued); we resolve them and write back the
+    hostname or "" (negative cache). Per-tick batch size is bounded so a
+    startup flood can't peg the resolver.
+    """
+    BATCH = 50
+    while True:
+        try:
+            with endpoint_dns_lock:
+                need = [ip for ip, v in endpoint_dns.items() if v is None][:BATCH]
+            for ip in need:
+                hn = ""
+                try:
+                    hn = socket.gethostbyaddr(ip)[0]
+                except Exception:
+                    pass
+                with endpoint_dns_lock:
+                    if ip in endpoint_dns:
+                        endpoint_dns[ip] = hn
+        except Exception as e:
+            print(f"[endpoint-rdns] error: {e}")
+        time.sleep(5)
+
+
 # ---------------------------------------------------------------------------
 # SNMP poll dispatcher + scheduler
 # ---------------------------------------------------------------------------
@@ -557,6 +610,14 @@ def record_flow(rec):
             interface_stats[k]["egress_bytes"]    += b
             interface_stats[k]["egress_packets"]  += p
             interface_stats[k]["last_seen"]       = rec["ts"]
+
+    # Queue public src/dst IPs for PTR lookup. Done outside state_lock so the
+    # endpoint_dns_lock ordering stays consistent (UDP parsers never hold both).
+    for ip in (rec.get("src_ip"), rec.get("dst_ip")):
+        if ip and _is_resolvable_public(ip):
+            with endpoint_dns_lock:
+                if ip not in endpoint_dns and len(endpoint_dns) < ENDPOINT_DNS_MAX:
+                    endpoint_dns[ip] = None
 
     db_insert_flow(rec)
 
@@ -1318,6 +1379,8 @@ def api_recent_flows():
         ifindex_filter = int(ifindex_filter)
     with state_lock:
         flows = list(recent_flows)
+    with endpoint_dns_lock:
+        dns = dict(endpoint_dns)
     flows.reverse()
     out = []
     for f in flows:
@@ -1329,6 +1392,8 @@ def api_recent_flows():
         out.append({
             **f,
             "protocol_name": proto_name(f.get("protocol", 0)),
+            "src_host": dns.get(f.get("src_ip")) or "",
+            "dst_host": dns.get(f.get("dst_ip")) or "",
         })
         if len(out) >= limit:
             break
@@ -1352,7 +1417,15 @@ def api_top_talkers():
         agg[key]["bytes"]   += f.get("bytes", 0) or 0
         agg[key]["packets"] += f.get("packets", 0) or 0
         agg[key]["flows"]   += 1
-    rows = [{"src_ip": k[0], "dst_ip": k[1], **v} for k, v in agg.items()]
+    with endpoint_dns_lock:
+        dns = dict(endpoint_dns)
+    rows = [{
+        "src_ip":   k[0],
+        "dst_ip":   k[1],
+        "src_host": dns.get(k[0]) or "",
+        "dst_host": dns.get(k[1]) or "",
+        **v,
+    } for k, v in agg.items()]
     rows.sort(key=lambda r: r["bytes"], reverse=True)
     return jsonify(rows[:limit])
 
@@ -2036,6 +2109,7 @@ def main():
     threading.Thread(target=sflow_listener,   daemon=True).start()
     threading.Thread(target=db_prune_loop,    daemon=True).start()
     threading.Thread(target=rdns_loop,        daemon=True).start()
+    threading.Thread(target=endpoint_rdns_loop, daemon=True).start()
     threading.Thread(target=snmp_scheduler_loop, daemon=True, name="snmp-sched").start()
 
     mode = "mock" if SNMP_USE_MOCK else "real"

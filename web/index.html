@@ -505,6 +505,10 @@ th.sort-active   { color: var(--accent); }
 }
 .device-row .actions:hover { color: var(--accent); }
 
+/* Endpoint cell: hostname over dim IP, used in Top Talkers + Live Flows */
+.endpoint .host { display: block; color: var(--text); }
+.endpoint .ip   { display: block; color: var(--text-dim); font-size: 10px; }
+
 /* Footer live indicator */
 footer .live-ok    { color: var(--accent); }
 footer .live-stale { color: var(--danger); }
@@ -1053,6 +1057,21 @@ function escapeHtml(s) {
     return String(s).replace(/[&<>"']/g, c => ({
         "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
     }[c]));
+}
+
+// Endpoint cell: hostname (when known) over dim IP. Falls back to IP-only.
+// `port` is optional; if given it's appended to the line that holds the IP.
+function endpointHtml(ip, host, port) {
+    const ipPort = (ip || "?") + (port ? ":" + port : "");
+    if (host) {
+        return `<span class="endpoint">
+            <span class="host">${escapeHtml(host)}</span>
+            <span class="ip">${escapeHtml(ipPort)}</span>
+        </span>`;
+    }
+    return `<span class="endpoint">
+        <span class="host">${escapeHtml(ipPort)}</span>
+    </span>`;
 }
 
 // ===== API =====
@@ -1911,9 +1930,11 @@ function renderTopTalkersTable() {
     const max = (rows[0] && rows[0].bytes) || 1;
     return makeTable("top-talkers", [
         { key: "src_ip", label: "Source",
-          render: r => `<td>${escapeHtml(r.src_ip)}</td>` },
+          value: r => r.src_host || r.src_ip,
+          render: r => `<td>${endpointHtml(r.src_ip, r.src_host)}</td>` },
         { key: "dst_ip", label: "Destination",
-          render: r => `<td>${escapeHtml(r.dst_ip)}</td>` },
+          value: r => r.dst_host || r.dst_ip,
+          render: r => `<td>${endpointHtml(r.dst_ip, r.dst_host)}</td>` },
         { key: "bytes", label: "Bytes", cls: "num",
           render: r => `<td class="num ingress">${bytesHuman(r.bytes)}</td>` },
         { key: "packets", label: "Packets", cls: "num",
@@ -2167,9 +2188,9 @@ function renderFlows() {
           render: r => `<td class="dim">${escapeHtml(r.exporter)}</td>` },
         { key: "src", label: "Src → Dst", value: r => r.src + " → " + r.dst,
           render: r => `<td>
-              <span>${escapeHtml(r.src)}</span>
+              ${endpointHtml(r.src_ip, r.src_host, r.src_port)}
               <span class="dim"> → </span>
-              <span>${escapeHtml(r.dst)}</span>
+              ${endpointHtml(r.dst_ip, r.dst_host, r.dst_port)}
           </td>` },
         { key: "protocol_name", label: "Proto",
           render: r => `<td class="proto">${escapeHtml(r.protocol_name || "")}</td>` },
