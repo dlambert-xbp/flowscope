@@ -624,14 +624,19 @@ def proto_name(num):
             51: "AH", 58: "ICMPv6", 89: "OSPF", 132: "SCTP"}.get(num, str(num))
 
 
-def record_flow(rec):
-    """Record one flow (NetFlow record or sFlow sampled flow) into all stores."""
+def record_flow(rec, _hydrate=False):
+    """Record one flow (NetFlow record or sFlow sampled flow) into all stores.
+
+    _hydrate=True replays a row already on disk back through the in-memory
+    aggregates without re-inserting it or bumping the since-start counter.
+    """
     rec["ts"] = rec.get("ts", time.time())
     exporter = rec["exporter"]
 
     with state_lock:
         recent_flows.append(rec)
-        stats["flows_recorded"] += 1
+        if not _hydrate:
+            stats["flows_recorded"] += 1
 
         # Update device tracking. Note: "hostname" key is intentionally absent
         # on first sight — its absence is the signal rdns_loop uses to know it
@@ -667,7 +672,36 @@ def record_flow(rec):
                 if ip not in endpoint_dns and len(endpoint_dns) < ENDPOINT_DNS_MAX:
                     endpoint_dns[ip] = None
 
-    db_insert_flow(rec)
+    if not _hydrate:
+        db_insert_flow(rec)
+
+
+def db_hydrate_recent():
+    """Replay the most recent ~RING_SIZE flows from SQLite into the in-memory
+    ring + aggregates so top talkers / top ports / protocols / interfaces
+    aren't blank after a process restart. Live Flows view will also pre-fill
+    with these — that's fine; they were the most recent flows on disk.
+    """
+    fields = ("ts", "exporter", "proto_name", "src_ip", "dst_ip",
+              "src_port", "dst_port", "protocol", "input_if",
+              "output_if", "bytes", "packets", "tcp_flags")
+    try:
+        with db_lock:
+            rows = db_conn.execute(
+                f"SELECT {', '.join(fields)} FROM flows "
+                "ORDER BY ts DESC LIMIT ?",
+                (RING_SIZE,)
+            ).fetchall()
+    except Exception as e:
+        print(f"[db] hydrate query failed: {e}")
+        return
+
+    # Newest-first from SQLite; reverse so the deque mirrors live chronological order.
+    rows.reverse()
+    for row in rows:
+        rec = {k: v for k, v in zip(fields, row) if v is not None}
+        record_flow(rec, _hydrate=True)
+    print(f"[db] hydrated {len(rows)} flows from disk")
 
 
 # ===========================================================================
@@ -2152,6 +2186,8 @@ def main():
     WEB_PORT     = args.web_port
     NETFLOW_PORT = args.netflow_port
     SFLOW_PORT   = args.sflow_port
+
+    db_hydrate_recent()
 
     threading.Thread(target=netflow_listener, daemon=True).start()
     threading.Thread(target=sflow_listener,   daemon=True).start()
