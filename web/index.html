@@ -820,6 +820,31 @@ footer .live-stale { color: var(--danger); }
 .device-row .health.error { background: #e54848; }
 .device-row .health.none  { background: transparent; border: 1px solid var(--text-dim); }
 
+/* Decommission indicator: red X shown when an exporter hasn't sent a flow
+ * record in 5+ minutes. Cleared automatically when traffic resumes. */
+.device-row .decom {
+    color: var(--danger);
+    font-weight: 700;
+    margin-right: 6px;
+    font-family: "JetBrains Mono", monospace;
+}
+.device-row.decommissioned .label-text { color: var(--text-dim); }
+
+/* Sidebar refresh countdown — shows how long until the next data refresh.
+ * Lives in the "Exporters" section header so it's always visible without
+ * adding chrome. */
+.refresh-countdown {
+    font-size: 9px;
+    color: var(--text-faint);
+    letter-spacing: 1px;
+    font-weight: 400;
+}
+aside h3.sidebar-h-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
 /* Inline error / success toast under a form (no popups). */
 .snmp-msg { padding: 6px 10px; margin-top: 6px; font-size: 12px; border-left: 2px solid var(--text-dim); }
 .snmp-msg.err { color: #e54848; border-color: #e54848; background: rgba(229,72,72,0.06); }
@@ -854,7 +879,11 @@ footer .live-stale { color: var(--danger); }
 
     <main>
         <aside>
-            <h3>Exporters</h3>
+            <h3 class="sidebar-h-row">
+                <span>Exporters</span>
+                <span id="refresh-countdown" class="refresh-countdown"
+                      title="Time until next data refresh"></span>
+            </h3>
             <div id="device-list">
                 <div class="empty-state">
                     No flow exporters detected yet.<br><br>
@@ -1151,8 +1180,13 @@ function buildParams(extra = {}) {
 }
 
 // ===== Polling =====
-async function refreshAll() {
-    if (state.paused) return;
+const REFRESH_INTERVAL_MS = 3000;
+state.nextRefreshAt = 0;
+
+// Fetch every API endpoint we care about and store results in state.* slots.
+// Returns false when fetch was suppressed (paused) so callers can skip render.
+async function fetchAllData() {
+    if (state.paused) return false;
     // Interfaces and devices ignore ifindex; flows + timeseries honor it.
     const exporterOnly = state.selectedExporter
         ? `?exporter=${encodeURIComponent(state.selectedExporter)}`
@@ -1192,7 +1226,211 @@ async function refreshAll() {
         state.lastError = String(anyErr);
         console.warn("refresh failed:", anyErr);
     }
+    return anyOk;
+}
+
+// User-initiated refresh: full DOM re-render. Used by click handlers (tab
+// switch, exporter select, label edit, …) where structural changes are
+// expected and a clean rebuild is desirable.
+async function refreshAll() {
+    const ok = await fetchAllData();
+    if (!ok) return;
     preserveFocus(() => render());
+}
+
+// Background tick: pulls new data and updates only the parts of the page that
+// actually carry time-varying values — header counters, sidebar device meta,
+// the active tab's graphs and table bodies, and the footer. The sidebar
+// structure, tab chrome, SNMP forms, and modals are all left untouched so
+// they don't flicker, lose hover state, or steal focus mid-keystroke.
+async function autoRefresh() {
+    state.nextRefreshAt = Date.now() + REFRESH_INTERVAL_MS;
+    const ok = await fetchAllData();
+    if (!ok) return;
+    const safe = (name, fn) => { try { fn(); } catch (e) {
+        console.error(`autoRefresh:${name} failed`, e);
+    } };
+    safe("snmp-index", () => {
+        state.snmpStatusByExporter = {};
+        const devs = state.snmpStatus && state.snmpStatus.devices || [];
+        devs.forEach(r => { state.snmpStatusByExporter[r.exporter] = r; });
+    });
+    safe("snmp-chip", updateSnmpChip);
+    safe("header",  renderHeader);
+    safe("sidebar", softUpdateSidebar);
+    safe("tab",     softUpdateActiveTab);
+    safe("footer",  renderFooter);
+}
+
+function updateSnmpChip() {
+    const chip = document.getElementById("snmp-chip");
+    if (!chip) return;
+    const summ = state.snmpStatus && state.snmpStatus.summary;
+    if (!summ || !summ.total) {
+        chip.className = "snmp-chip empty";
+        chip.textContent = "";
+    } else if (summ.error > 0) {
+        chip.className = "snmp-chip health-error";
+        chip.textContent = `${summ.error} err`;
+    } else if (summ.stale > 0) {
+        chip.className = "snmp-chip health-stale";
+        chip.textContent = `${summ.stale} stale`;
+    } else {
+        chip.className = "snmp-chip health-ok";
+        chip.textContent = `${summ.ok}/${summ.total}`;
+    }
+}
+
+// Sidebar in-place update. Rather than reflow innerHTML on every tick (which
+// kills hover state, scroll position, and click responsiveness), we walk the
+// existing rows and update only their data. Falls back to a full renderSidebar
+// when the device set has changed (new/removed exporter or folder
+// add/remove/rename) — those are user-initiated and rare enough that the
+// occasional full rebuild is fine.
+function softUpdateSidebar() {
+    const list = document.getElementById("device-list");
+    if (!list) return;
+    if (!state.devices.length && !state.folders.length) return;
+
+    // Compute the device set we expect to be in the DOM right now (excludes
+    // members of collapsed folders). If it doesn't match what's actually
+    // there, fall back to a full sidebar render so the structure catches up.
+    const ipToFolder = {};
+    (state.folders || []).forEach(f => {
+        (f.deviceIps || []).forEach(ip => { ipToFolder[ip] = f.id; });
+    });
+    const expected = new Set();
+    (state.devices || []).forEach(d => {
+        const fid = ipToFolder[d.exporter];
+        if (fid != null) {
+            const folder = state.folders.find(f => f.id === fid);
+            if (folder && folder.collapsed) return;
+        }
+        expected.add(d.exporter);
+    });
+    const inDom = new Set();
+    list.querySelectorAll(".device-row").forEach(r => {
+        if (r.dataset.exporter) inDom.add(r.dataset.exporter);
+    });
+    if (expected.size !== inDom.size) { renderSidebar(); return; }
+    for (const exp of expected) {
+        if (!inDom.has(exp)) { renderSidebar(); return; }
+    }
+
+    // Same set of rows present — update each one in place.
+    const byIp = {};
+    (state.devices || []).forEach(d => { byIp[d.exporter] = d; });
+    list.querySelectorAll(".device-row").forEach(row => {
+        const d = byIp[row.dataset.exporter];
+        if (d) updateDeviceRowInPlace(row, d);
+    });
+}
+
+function updateDeviceRowInPlace(row, d) {
+    // Health dot — class can change as SNMP poll status moves between
+    // ok / stale / error / none.
+    const healthSpan = row.querySelector(".health");
+    if (healthSpan) {
+        const h = snmpHealth(d.exporter);
+        const desired = "health " + h;
+        if (healthSpan.className !== desired) healthSpan.className = desired;
+    }
+    // Decommission state. Toggle the row class + insert/remove the ✕ icon.
+    const stale = isDecommissioned(d);
+    row.classList.toggle("decommissioned", stale);
+    const ip = row.querySelector(".ip");
+    if (ip) {
+        let decom = ip.querySelector(".decom");
+        if (stale && !decom) {
+            decom = document.createElement("span");
+            decom.className = "decom";
+            decom.title = "No flows in 5+ minutes — possibly decommissioned";
+            decom.textContent = "✕";
+            ip.insertBefore(decom, ip.firstChild);
+        } else if (!stale && decom) {
+            decom.remove();
+        }
+    }
+    // Meta line: ifs / flows count / last-seen text. Rebuilding the inner
+    // HTML of the meta div is cheap and keeps the markup identical to what
+    // deviceRowHtml emits — no chance of the two paths drifting.
+    const meta = row.querySelector(".meta");
+    if (meta) {
+        const next = `<span class="badge ${d.type}">${escapeHtml(d.type)}</span>
+            ${d.interface_count} ifs · ${numHuman(d.flow_count)} flows ·
+            <span class="time-ago" data-last-seen="${d.last_seen}">${timeAgo(d.last_seen)}</span>`;
+        // Compare-and-set avoids unnecessary reflows when nothing changed.
+        if (meta.innerHTML !== next) meta.innerHTML = next;
+    }
+}
+
+// Update only the active tab's data-bearing parts. The panel chrome (head,
+// chips, controls, table headers) stays put — only canvases redraw and only
+// table tbodies are replaced.
+function softUpdateActiveTab() {
+    const root = document.getElementById("tab-content");
+    if (!root) return;
+    const tab = state.activeTab;
+    if (tab === "snmp") {
+        updateSnmpInPlace();
+        return;
+    }
+    if (tab === "setup") return;
+    if (tab === "overview") {
+        // If the overview chrome isn't on screen (e.g. setup-card was rendered
+        // because devices was empty), let the regular path catch up.
+        if (!document.getElementById("ts-canvas")) { renderTab(); return; }
+        drawTimeseries();
+        softReplaceTable("top-talkers", renderTopTalkersTable());
+        softReplaceTable("top-ports",   renderTopPortsTable());
+        softReplaceTable("protocols",   renderProtocolTable());
+        return;
+    }
+    if (tab === "interfaces") {
+        if (!document.querySelector('.table-wrap[data-table="interfaces"]')) {
+            renderTab(); return;
+        }
+        if (softReplaceTable("interfaces", renderInterfaces())) {
+            // Tbody was rebuilt — old <a class="iface-view"> nodes are gone,
+            // re-attach click handlers to the fresh ones. (renderTab also
+            // calls wireInterfaceTable, so we only do it on the soft path.)
+            wireInterfaceTable();
+        } else {
+            renderTab();
+        }
+        return;
+    }
+    if (tab === "flows") {
+        if (!document.querySelector('.table-wrap[data-table="flows"]')) {
+            renderTab(); return;
+        }
+        if (!softReplaceTable("flows", renderFlows())) renderTab();
+        return;
+    }
+}
+
+// Soft-replace a table's tbody (and the "rows" counter) without rebuilding
+// its surrounding chrome. The fullHtml argument can be either a bare
+// .table-wrap (e.g. from makeTable) or a wider chunk that contains one — we
+// extract by data-table id either way.
+function softReplaceTable(id, fullHtml) {
+    const wrap = document.querySelector(`.table-wrap[data-table="${id}"]`);
+    if (!wrap) return false;
+    const tmp = document.createElement("div");
+    tmp.innerHTML = fullHtml;
+    const newWrap = tmp.querySelector(`.table-wrap[data-table="${id}"]`);
+    if (!newWrap) return false;
+    const newTbody = newWrap.querySelector("tbody");
+    const oldTbody = wrap.querySelector("tbody");
+    if (newTbody && oldTbody && newTbody.innerHTML !== oldTbody.innerHTML) {
+        oldTbody.innerHTML = newTbody.innerHTML;
+    }
+    const newMeta = newWrap.querySelector(".table-meta");
+    const oldMeta = wrap.querySelector(".table-meta");
+    if (newMeta && oldMeta && newMeta.textContent !== oldMeta.textContent) {
+        oldMeta.textContent = newMeta.textContent;
+    }
+    return true;
 }
 
 // Save and restore focus / cursor on a focused .table-filter input across
@@ -1557,6 +1795,15 @@ function renderFooter() {
         new Date().toISOString().replace("T"," ").slice(0,19) + " UTC";
 }
 
+// Treat a device as decommissioned when it hasn't reported a flow record in
+// 5+ minutes. Returns false for devices we've never seen so a brand-new
+// dashboard load doesn't immediately mark everything stale.
+const DECOM_THRESHOLD_S = 300;
+function isDecommissioned(d) {
+    if (!d || !d.last_seen) return false;
+    return (Date.now() / 1000 - d.last_seen) > DECOM_THRESHOLD_S;
+}
+
 function deviceRowHtml(d) {
     const display = exporterDisplayName(d);
     const showIp = display !== d.exporter;
@@ -1565,10 +1812,15 @@ function deviceRowHtml(d) {
                       : health === "stale" ? "SNMP poll stale"
                       : health === "error" ? "SNMP poll failing"
                       : "SNMP not configured";
+    const stale = isDecommissioned(d);
+    const cls = ["device-row"];
+    if (state.selectedExporter === d.exporter) cls.push("active");
+    if (stale) cls.push("decommissioned");
     return `
-    <div class="device-row ${state.selectedExporter === d.exporter ? "active" : ""}"
+    <div class="${cls.join(" ")}"
          data-exporter="${escapeHtml(d.exporter)}">
         <div class="ip">
+            ${stale ? `<span class="decom" title="No flows in 5+ minutes — possibly decommissioned">✕</span>` : ""}
             <span class="health ${health}" title="${healthTitle}"></span>
             <span class="actions move" data-move-exporter="${escapeHtml(d.exporter)}"
                   title="Move to folder">⤴</span>
@@ -2175,11 +2427,26 @@ function renderFlows() {
         </div>`;
     }
 
+    // Interface name lookup so the In/Out columns can show the SNMP-resolved
+    // ifDescr (or user label) instead of a bare ifindex. Falls back to the
+    // numeric ifindex for any interface we haven't learned a name for yet.
+    const ifaceLookup = {};
+    (state.interfaces || []).forEach(i => {
+        ifaceLookup[i.exporter + "|" + i.ifindex] =
+            i.label || (i.name && !/^if\d+$/.test(i.name) ? i.name : "");
+    });
+    const ifaceDisplay = (exporter, ifindex) => {
+        if (ifindex == null || ifindex === "") return "";
+        const name = ifaceLookup[exporter + "|" + ifindex];
+        return name || String(ifindex);
+    };
     const rows = state.flows.map(f => ({
         ...f,
         time_local: new Date((f.ts || 0) * 1000).toLocaleTimeString(),
         src: (f.src_ip || "?") + (f.src_port ? ":" + f.src_port : ""),
         dst: (f.dst_ip || "?") + (f.dst_port ? ":" + f.dst_port : ""),
+        in_if_disp:  ifaceDisplay(f.exporter, f.input_if),
+        out_if_disp: ifaceDisplay(f.exporter, f.output_if),
     }));
     const tableHtml = makeTable("flows", [
         { key: "ts", label: "Time",
@@ -2194,10 +2461,12 @@ function renderFlows() {
           </td>` },
         { key: "protocol_name", label: "Proto",
           render: r => `<td class="proto">${escapeHtml(r.protocol_name || "")}</td>` },
-        { key: "input_if", label: "In if", cls: "num",
-          render: r => `<td class="num ingress">${r.input_if ?? ""}</td>` },
-        { key: "output_if", label: "Out if", cls: "num",
-          render: r => `<td class="num egress">${r.output_if ?? ""}</td>` },
+        { key: "in_if_disp", label: "In if", cls: "num",
+          value: r => r.in_if_disp,
+          render: r => `<td class="num ingress">${escapeHtml(r.in_if_disp)}</td>` },
+        { key: "out_if_disp", label: "Out if", cls: "num",
+          value: r => r.out_if_disp,
+          render: r => `<td class="num egress">${escapeHtml(r.out_if_disp)}</td>` },
         { key: "bytes", label: "Bytes", cls: "num",
           render: r => `<td class="num">${bytesHuman(r.bytes)}</td>` },
         { key: "packets", label: "Packets", cls: "num",
@@ -2950,22 +3219,58 @@ document.addEventListener("focusout", (ev) => {
 // ===== Boot =====
 bootstrapFolders();
 refreshAll();
-setInterval(refreshAll, 3000);
-// Independent 1s heartbeat keeps the live/stale indicator and the
-// "X seconds ago" sidebar timestamps current even while polling is paused
-// or in flight. Update time-ago spans in place — re-rendering the whole
-// sidebar every second blew away scroll position, hover state, and made
-// the column visibly twitch.
+setInterval(autoRefresh, REFRESH_INTERVAL_MS);
+// Independent 1s heartbeat keeps time-derived UI current — "X seconds ago"
+// sidebar timestamps, the live/stale footer indicator, the refresh-countdown
+// chip in the sidebar header, and the per-device decommission marker (which
+// can cross the 5-minute threshold without any new data arriving). Doing
+// this in-place prevents the sidebar from twitching once a second.
 setInterval(() => {
     renderFooter();
-    document.querySelectorAll("#device-list .time-ago").forEach(el => {
-        const ts = parseFloat(el.dataset.lastSeen);
-        if (!isNaN(ts)) {
-            const next = timeAgo(ts);
-            if (el.textContent !== next) el.textContent = next;
+    updateRefreshCountdown();
+    const byIp = {};
+    (state.devices || []).forEach(d => { byIp[d.exporter] = d; });
+    document.querySelectorAll("#device-list .device-row").forEach(row => {
+        const d = byIp[row.dataset.exporter];
+        if (!d) return;
+        // Time-ago text
+        row.querySelectorAll(".time-ago").forEach(el => {
+            const ts = parseFloat(el.dataset.lastSeen);
+            if (!isNaN(ts)) {
+                const next = timeAgo(ts);
+                if (el.textContent !== next) el.textContent = next;
+            }
+        });
+        // Decommission marker — purely time-based, so the second-tick is
+        // where we catch the boundary crossing.
+        const stale = isDecommissioned(d);
+        if (stale !== row.classList.contains("decommissioned")) {
+            row.classList.toggle("decommissioned", stale);
+            const ip = row.querySelector(".ip");
+            if (ip) {
+                let decom = ip.querySelector(".decom");
+                if (stale && !decom) {
+                    decom = document.createElement("span");
+                    decom.className = "decom";
+                    decom.title = "No flows in 5+ minutes — possibly decommissioned";
+                    decom.textContent = "✕";
+                    ip.insertBefore(decom, ip.firstChild);
+                } else if (!stale && decom) {
+                    decom.remove();
+                }
+            }
         }
     });
 }, 1000);
+
+function updateRefreshCountdown() {
+    const el = document.getElementById("refresh-countdown");
+    if (!el) return;
+    if (state.paused) { el.textContent = "PAUSED"; return; }
+    if (!state.nextRefreshAt) { el.textContent = ""; return; }
+    const remaining = Math.max(0, Math.ceil((state.nextRefreshAt - Date.now()) / 1000));
+    el.textContent = remaining > 0 ? `↻ ${remaining}s` : "↻ now";
+}
 window.addEventListener("resize", drawTimeseries);
 </script>
 </body>

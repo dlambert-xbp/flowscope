@@ -238,6 +238,21 @@ def db_init():
             consecutive_failures INTEGER NOT NULL DEFAULT 0
         )
     """)
+    # Persisted interface metadata so SNMP-discovered names survive restarts
+    # without re-polling. Populated by _run_poll on success; loaded into
+    # interface_stats below so the dashboard shows the saved names from the
+    # moment the process is up.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS interface_meta (
+            exporter   TEXT NOT NULL,
+            ifindex    INTEGER NOT NULL,
+            name       TEXT,
+            alias      TEXT,
+            speed_bps  INTEGER,
+            updated_ts REAL NOT NULL,
+            PRIMARY KEY (exporter, ifindex)
+        )
+    """)
     for row in conn.execute("SELECT exporter, label FROM exporter_labels"):
         exporter_labels[row[0]] = row[1]
     for row in conn.execute("SELECT exporter, ifindex, label FROM interface_labels"):
@@ -302,6 +317,15 @@ def db_init():
             "last_error":   row[3], "iface_count": row[4],
             "consecutive_failures": row[5],
         }
+    # Restore SNMP-discovered interface names/alias/speed from previous runs.
+    # These pre-create interface_stats entries with zeroed counters; the next
+    # flow record (or sFlow counter sample) overwrites the counters as usual.
+    for row in conn.execute(
+            "SELECT exporter, ifindex, name, alias, speed_bps FROM interface_meta"):
+        s = interface_stats[(row[0], row[1])]
+        s["name"]      = row[2]
+        s["alias"]     = row[3]
+        s["speed_bps"] = row[4]
     conn.commit()
     return conn
 
@@ -510,6 +534,22 @@ def _run_poll(exporter, profile, ifindexes):
                 len(walk) if not err_msg else None,
                 snmp_poll_status[exporter]["consecutive_failures"],
             ))
+            # Persist the iface meta we just learned so names survive restart.
+            # Skipped on failure (walk is empty) and on individual rows that
+            # didn't return an ifDescr.
+            for ifindex, info in walk.items():
+                db_conn.execute("""
+                    INSERT INTO interface_meta
+                        (exporter, ifindex, name, alias, speed_bps, updated_ts)
+                    VALUES (?,?,?,?,?,?)
+                    ON CONFLICT(exporter, ifindex) DO UPDATE SET
+                        name=excluded.name,
+                        alias=excluded.alias,
+                        speed_bps=COALESCE(excluded.speed_bps, interface_meta.speed_bps),
+                        updated_ts=excluded.updated_ts
+                """, (exporter, ifindex,
+                      info.get("name"), info.get("alias"),
+                      info.get("speed_bps"), now))
             db_conn.commit()
     except Exception as e:
         print(f"[snmp] status persist error: {e}")
@@ -549,6 +589,14 @@ def snmp_scheduler_loop():
                         st   = snmp_poll_status.get(exporter)
                         prof = snmp_profiles_mem.get(eff["profile"])
                     if prof is None:
+                        continue
+                    # One-shot auto-poll: once we've had a single successful
+                    # walk, never auto-poll this device again. The user
+                    # explicitly opts in to a re-poll via "Poll Now" on the
+                    # SNMP tab (/api/snmp/poll/<exporter>). Failed polls still
+                    # retry on the configured interval so a transient outage
+                    # doesn't permanently strand a device.
+                    if st and st.get("last_ok_ts"):
                         continue
                     last = st["last_poll_ts"] if st and st.get("last_poll_ts") else 0
                     if tick_started - last < interval:
