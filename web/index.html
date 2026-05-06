@@ -182,6 +182,9 @@ aside h3:first-child { margin-top: 0; }
     font-size: 10px;
     color: var(--text-dim);
     margin-top: 2px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 .device-row .badge {
     display: inline-block;
@@ -884,11 +887,11 @@ function numHuman(n) {
 function timeAgo(ts) {
     if (!ts) return "—";
     const s = Math.floor(Date.now()/1000 - ts);
-    if (s < 2)    return "now";
-    if (s < 60)   return s + "s ago";
-    if (s < 3600) return Math.floor(s/60) + "m ago";
-    if (s < 86400) return Math.floor(s/3600) + "h ago";
-    return Math.floor(s/86400) + "d ago";
+    if (s < 2)     return "now";
+    if (s < 60)    return s + "s";
+    if (s < 3600)  return Math.floor(s/60)   + "m";
+    if (s < 86400) return Math.floor(s/3600) + "h";
+    return Math.floor(s/86400) + "d";
 }
 function uptimeHuman(s) {
     const h = Math.floor(s / 3600);
