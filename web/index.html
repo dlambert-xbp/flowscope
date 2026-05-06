@@ -1026,7 +1026,16 @@ function renderSidebar() {
             // Clear interface filter when changing exporter so we don't end
             // up filtering by an ifindex that belongs to a different exporter.
             state.ifindexFilter = null;
-            refreshAll();
+            // Drop view-scoped data so we don't paint the wrong scope while
+            // the next fetch is in flight.
+            state.flows = [];
+            state.timeseries = null;
+            state.topTalkers = [];
+            state.topPorts   = [];
+            state.protocols  = [];
+            state.interfaces = [];
+            render();      // immediate: highlight, chips, scope label
+            refreshAll();  // background: real data
         });
     });
 }
@@ -1034,6 +1043,13 @@ function renderSidebar() {
 document.getElementById("clear-filter").addEventListener("click", () => {
     state.selectedExporter = null;
     state.ifindexFilter = null;
+    state.flows = [];
+    state.timeseries = null;
+    state.topTalkers = [];
+    state.topPorts   = [];
+    state.protocols  = [];
+    state.interfaces = [];
+    render();
     refreshAll();
 });
 
@@ -1065,7 +1081,11 @@ function wireOverviewControls() {
             if (!ALLOWED_RANGE_SECONDS.includes(s)) return;
             state.timeseriesSeconds = s;
             localStorage.setItem(RANGE_KEY, String(s));
-            refreshAll();
+            // Drop stale chart data so the user doesn't see old pixels under
+            // the new title/buttons until the fetch lands.
+            state.timeseries = null;
+            renderTab();           // immediate: active button + cleared chart
+            refreshAll();           // background: real data
         });
     });
 }
@@ -1190,12 +1210,13 @@ function renderProtocolTable() {
 
 function drawTimeseries() {
     const c = document.getElementById("ts-canvas");
-    if (!c || !state.timeseries) return;
+    if (!c) return;
     const ctx = c.getContext("2d");
     // Adapt to actual displayed width
     const cw = c.clientWidth, ch = c.clientHeight;
     if (c.width !== cw || c.height !== ch) { c.width = cw; c.height = ch; }
     ctx.clearRect(0, 0, cw, ch);
+    if (!state.timeseries) return;   // canvas already cleared above
 
     const css = getComputedStyle(document.documentElement);
     const cssVar = (name) => css.getPropertyValue(name).trim();
@@ -1325,10 +1346,13 @@ function wireInterfaceTable() {
             state.selectedExporter = exp;
             state.ifindexFilter = idx;
             state.activeTab = "flows";
+            // Clear so we don't briefly show the un-filtered flow list.
+            state.flows = [];
             document.querySelectorAll(".tab").forEach(t => {
                 t.classList.toggle("active", t.dataset.tab === "flows");
             });
-            refreshAll();
+            render();      // immediate: tab swap, sidebar selection, chips
+            refreshAll();  // background: filtered flow data
         });
     });
     // Pencil = edit label
@@ -1419,6 +1443,8 @@ function wireFlowsControls() {
             const w = el.dataset.clear;
             if (w === "exporter") state.selectedExporter = null;
             if (w === "ifindex")  state.ifindexFilter   = null;
+            state.flows = [];
+            render();
             refreshAll();
         });
     });
