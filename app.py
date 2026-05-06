@@ -719,8 +719,11 @@ NF5_REC  = struct.Struct("!IIIHHIIIIHHBBBBHHBBH")
 def parse_netflow_v5(data, exporter):
     if len(data) < NF5_HDR.size:
         return
-    version, count, _uptime, secs, _nsecs, _seq, _et, _eid, _samp = \
+    version, count, _uptime, secs, _nsecs, _seq, _et, _eid, samp = \
         NF5_HDR.unpack_from(data, 0)
+    # v5 sampling header: top 2 bits = mode, bottom 14 bits = N (1:N).
+    # 0 means sampling not configured at the exporter — treat as 1:1.
+    samp_rate = (samp & 0x3FFF) or 1
     off = NF5_HDR.size
     for _ in range(count):
         if off + NF5_REC.size > len(data):
@@ -740,8 +743,8 @@ def parse_netflow_v5(data, exporter):
             "protocol":   prot,
             "input_if":   input_if,
             "output_if":  output_if,
-            "bytes":      dOctets,
-            "packets":    dPkts,
+            "bytes":      dOctets * samp_rate,
+            "packets":    dPkts   * samp_rate,
             "tcp_flags":  tcp_flags,
         }
         record_flow(rec)
@@ -769,6 +772,7 @@ NF9_FIELDS = {
     14:  ("output_if", None),   # OUTPUT_SNMP
     27:  ("src_ip",    "ipv6"), # IPV6_SRC_ADDR
     28:  ("dst_ip",    "ipv6"), # IPV6_DST_ADDR
+    34:  ("sampling_interval", None),  # SAMPLING_INTERVAL — applied + dropped at parse time
 }
 
 
@@ -834,6 +838,15 @@ def parse_netflow_v9(data, exporter):
                         else:
                             rec[name] = _read_int(body, p, flen)
                     p += flen
+                # If the template carried per-record sampling_interval (field 34),
+                # scale bytes/packets to estimate actual traffic and drop the key
+                # so it doesn't leak into the recorded flow / DB row.
+                samp = rec.pop("sampling_interval", None)
+                if samp and samp > 1:
+                    if "bytes" in rec:
+                        rec["bytes"]   = (rec["bytes"]   or 0) * samp
+                    if "packets" in rec:
+                        rec["packets"] = (rec["packets"] or 0) * samp
                 record_flow(rec)
         flowsets_seen += 1
 
@@ -900,8 +913,13 @@ def parse_sflow_v5(data, exporter):
 
 
 def parse_sflow_flow_sample(body, exporter, expanded=False):
-    """Parse a flow_sample. We extract input/output ifindex and the sampled
-    raw packet header to get src/dst IP and ports."""
+    """Parse a flow_sample. We extract input/output ifindex, the sampled
+    raw packet header (for src/dst IP and ports), and the sampling rate.
+
+    The sampling rate is critical: an sFlow flow_sample represents one
+    packet out of N (samp_rate). The byte count from the raw header is
+    therefore the size of that single sampled packet — to estimate the
+    actual traffic on the wire we multiply both bytes and packets by N."""
     o = 0
     try:
         _seq  = struct.unpack_from("!I", body, o)[0]; o += 4
@@ -910,7 +928,7 @@ def parse_sflow_flow_sample(body, exporter, expanded=False):
             _src_index = struct.unpack_from("!I", body, o)[0]; o += 4
         else:
             o += 4   # source_id (type<<24 | index)
-        _samp_rate = struct.unpack_from("!I", body, o)[0]; o += 4
+        samp_rate  = struct.unpack_from("!I", body, o)[0]; o += 4
         _samp_pool = struct.unpack_from("!I", body, o)[0]; o += 4
         _drops     = struct.unpack_from("!I", body, o)[0]; o += 4
         if expanded:
@@ -924,6 +942,9 @@ def parse_sflow_flow_sample(body, exporter, expanded=False):
         num_records = struct.unpack_from("!I", body, o)[0]; o += 4
     except struct.error:
         return
+
+    if samp_rate == 0:
+        samp_rate = 1
 
     rec_template = {
         "ts":         time.time(),
@@ -949,6 +970,9 @@ def parse_sflow_flow_sample(body, exporter, expanded=False):
         if (rec_tag & 0xFFF) == 1:
             parse_sflow_raw_header(rec_body, rec_template)
 
+    # Scale to estimate actual traffic (sample = 1 of samp_rate).
+    rec_template["bytes"]   = (rec_template["bytes"]   or 0) * samp_rate
+    rec_template["packets"] = (rec_template["packets"] or 1) * samp_rate
     record_flow(rec_template)
 
 
