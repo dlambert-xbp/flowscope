@@ -1252,10 +1252,18 @@ function exporterDisplayName(d) {
 
 // ===== Rendering =====
 function render() {
-    renderHeader();
-    renderSidebar();
-    renderTab();
-    renderFooter();
+    // Each step independent so a single broken renderer can't strand the
+    // rest. Without this, an exception in (say) renderSidebar means the
+    // chart and tables silently stop refreshing and the user has to click
+    // a tab to recover — which is what was happening with click-driven
+    // refreshes feeling broken.
+    const safe = (name, fn) => { try { fn(); } catch (e) {
+        console.error(`render:${name} failed`, e);
+    } };
+    safe("header",  renderHeader);
+    safe("sidebar", renderSidebar);
+    safe("tab",     renderTab);
+    safe("footer",  renderFooter);
 }
 
 function renderHeader() {
@@ -1327,8 +1335,12 @@ function renderSidebar() {
 
     // Folders sorted by name (case-insensitive); devices sorted by display
     // name. Sort copies, never the originals — saveFolders is responsible
-    // for persisted shape and shouldn't depend on render order.
-    const cmp = (a, b) => a.localeCompare(b, undefined, { sensitivity: "base" });
+    // for persisted shape and shouldn't depend on render order. Coerce to
+    // string defensively: a missing name from a malformed folder/device
+    // record blows up the comparator and the entire sidebar render with
+    // it, leaving the rest of the page stale until a tab click.
+    const cmp = (a, b) => String(a == null ? "" : a)
+        .localeCompare(String(b == null ? "" : b), undefined, { sensitivity: "base" });
     const sortedFolders = state.folders.slice().sort((a, b) => cmp(a.name, b.name));
     const sortedDevices = state.devices.slice().sort((a, b) =>
         cmp(exporterDisplayName(a), exporterDisplayName(b))
