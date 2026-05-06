@@ -78,6 +78,11 @@ devices = {}  # exporter_ip -> {first_seen, last_seen, flow_count, type, hostnam
 exporter_labels  = {}  # exporter_ip -> str
 interface_labels = {}  # (exporter_ip, ifindex) -> str
 
+# Server-side folders (promoted from localStorage). All under state_lock.
+folders          = {}  # folder_id -> {"name", "sort_order"}
+folder_members   = {}  # folder_id -> set(exporter_ip)
+folder_of        = {}  # exporter_ip -> folder_id (inverse index for fast lookup)
+
 # NetFlow v9 / IPFIX templates, keyed by (exporter, source_id, template_id)
 templates = {}
 
@@ -98,6 +103,9 @@ def db_connect():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=5)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
+    # Enabled so folder_members.folder_id ON DELETE CASCADE works when a
+    # folder is removed. Has no effect on tables without FK declarations.
+    conn.execute("PRAGMA foreign_keys=ON")
     return conn
 
 
@@ -137,10 +145,36 @@ def db_init():
             PRIMARY KEY (exporter, ifindex)
         )
     """)
+    # Server-side folders (promoted from localStorage in v0.x). A device may
+    # belong to at most one folder; the unique index on exporter enforces this.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS folders (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            name        TEXT NOT NULL UNIQUE,
+            sort_order  INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS folder_members (
+            folder_id  INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
+            exporter   TEXT    NOT NULL,
+            PRIMARY KEY (folder_id, exporter)
+        )
+    """)
+    conn.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_folder_members_exporter
+        ON folder_members(exporter)
+    """)
     for row in conn.execute("SELECT exporter, label FROM exporter_labels"):
         exporter_labels[row[0]] = row[1]
     for row in conn.execute("SELECT exporter, ifindex, label FROM interface_labels"):
         interface_labels[(row[0], row[1])] = row[2]
+    for row in conn.execute("SELECT id, name, sort_order FROM folders"):
+        folders[row[0]] = {"name": row[1], "sort_order": row[2]}
+        folder_members[row[0]] = set()
+    for row in conn.execute("SELECT folder_id, exporter FROM folder_members"):
+        folder_members.setdefault(row[0], set()).add(row[1])
+        folder_of[row[1]] = row[0]
     conn.commit()
     return conn
 
@@ -807,6 +841,200 @@ def api_set_interface_label(exporter, ifindex):
         else:
             interface_labels.pop((exporter, ifindex), None)
     return jsonify({"ok": True, "exporter": exporter, "ifindex": ifindex, "label": label})
+
+
+# ---------------------------------------------------------------------------
+# Folder API (server-side; promoted from localStorage in v0.x)
+# ---------------------------------------------------------------------------
+# A device may belong to at most one folder. Folders are flat (no nesting).
+# All endpoints take state_lock and db_lock together when mutating.
+
+def _folder_to_dict(fid):
+    """Build the JSON shape under state_lock. Caller must hold the lock."""
+    f = folders[fid]
+    return {
+        "id":         fid,
+        "name":       f["name"],
+        "sort_order": f["sort_order"],
+        "deviceIps":  sorted(folder_members.get(fid, set())),
+    }
+
+
+@app.route("/api/folders", methods=["GET", "POST"])
+def api_folders():
+    if request.method == "GET":
+        with state_lock:
+            out = [_folder_to_dict(fid) for fid in folders]
+        out.sort(key=lambda f: (f["sort_order"], f["name"].lower()))
+        return jsonify(out)
+
+    # POST: create. Atomic creation with optional initial members.
+    payload = request.get_json(silent=True) or {}
+    name = (payload.get("name") or "").strip()
+    if not name:
+        return jsonify({"ok": False, "error": "name required"}), 400
+    sort_order = int(payload.get("sort_order", 0))
+    incoming = [str(x).strip() for x in (payload.get("exporters") or []) if x]
+
+    try:
+        with db_lock, state_lock:
+            cur = db_conn.execute(
+                "INSERT INTO folders(name, sort_order) VALUES(?, ?)",
+                (name, sort_order))
+            fid = cur.lastrowid
+            # Initial members: silently steal from any pre-existing folder.
+            # The unique index on exporter would otherwise raise IntegrityError.
+            for exp in incoming:
+                db_conn.execute(
+                    "DELETE FROM folder_members WHERE exporter = ?", (exp,))
+                db_conn.execute(
+                    "INSERT INTO folder_members(folder_id, exporter) VALUES(?, ?)",
+                    (fid, exp))
+            db_conn.commit()
+            # Mirror into in-memory state.
+            folders[fid] = {"name": name, "sort_order": sort_order}
+            folder_members[fid] = set()
+            for exp in incoming:
+                old = folder_of.pop(exp, None)
+                if old is not None:
+                    folder_members.get(old, set()).discard(exp)
+                folder_members[fid].add(exp)
+                folder_of[exp] = fid
+            return jsonify(_folder_to_dict(fid)), 201
+    except sqlite3.IntegrityError:
+        return jsonify({"ok": False, "error": "folder name already exists"}), 409
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/folders/<int:fid>", methods=["GET", "PATCH", "DELETE"])
+def api_folder(fid):
+    if request.method == "GET":
+        with state_lock:
+            if fid not in folders:
+                return jsonify({"ok": False, "error": "not found"}), 404
+            return jsonify(_folder_to_dict(fid))
+
+    if request.method == "DELETE":
+        try:
+            with db_lock, state_lock:
+                if fid not in folders:
+                    return jsonify({"ok": False, "error": "not found"}), 404
+                # FK ON DELETE CASCADE removes folder_members rows.
+                db_conn.execute("DELETE FROM folders WHERE id = ?", (fid,))
+                db_conn.commit()
+                for exp in folder_members.pop(fid, set()):
+                    folder_of.pop(exp, None)
+                folders.pop(fid, None)
+            return ("", 204)
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)}), 500
+
+    # PATCH: rename and/or reorder.
+    payload = request.get_json(silent=True) or {}
+    new_name = payload.get("name")
+    new_sort = payload.get("sort_order")
+    if new_name is not None:
+        new_name = new_name.strip()
+        if not new_name:
+            return jsonify({"ok": False, "error": "name cannot be empty"}), 400
+    try:
+        with db_lock, state_lock:
+            if fid not in folders:
+                return jsonify({"ok": False, "error": "not found"}), 404
+            if new_name is not None:
+                db_conn.execute("UPDATE folders SET name = ? WHERE id = ?",
+                                (new_name, fid))
+                folders[fid]["name"] = new_name
+            if new_sort is not None:
+                db_conn.execute("UPDATE folders SET sort_order = ? WHERE id = ?",
+                                (int(new_sort), fid))
+                folders[fid]["sort_order"] = int(new_sort)
+            db_conn.commit()
+            return jsonify(_folder_to_dict(fid))
+    except sqlite3.IntegrityError:
+        return jsonify({"ok": False, "error": "folder name already exists"}), 409
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/folders/<int:fid>/members", methods=["PUT"])
+def api_folder_members(fid):
+    """Replace the entire member list of <fid>. Devices previously assigned
+    elsewhere are moved (a device can only be in one folder)."""
+    payload = request.get_json(silent=True) or {}
+    incoming = set(str(x).strip() for x in (payload.get("exporters") or []) if x)
+    try:
+        with db_lock, state_lock:
+            if fid not in folders:
+                return jsonify({"ok": False, "error": "not found"}), 404
+            existing = folder_members.get(fid, set())
+            to_remove = existing - incoming
+            to_add    = incoming - existing
+            for exp in to_remove:
+                db_conn.execute(
+                    "DELETE FROM folder_members WHERE folder_id = ? AND exporter = ?",
+                    (fid, exp))
+            for exp in to_add:
+                # Steal from any other folder first (unique index on exporter).
+                db_conn.execute(
+                    "DELETE FROM folder_members WHERE exporter = ?", (exp,))
+                db_conn.execute(
+                    "INSERT INTO folder_members(folder_id, exporter) VALUES(?, ?)",
+                    (fid, exp))
+            db_conn.commit()
+            for exp in to_remove:
+                folder_members[fid].discard(exp)
+                if folder_of.get(exp) == fid:
+                    folder_of.pop(exp, None)
+            for exp in to_add:
+                old = folder_of.pop(exp, None)
+                if old is not None and old != fid:
+                    folder_members.get(old, set()).discard(exp)
+                folder_members.setdefault(fid, set()).add(exp)
+                folder_of[exp] = fid
+            return jsonify(_folder_to_dict(fid))
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/devices/<exporter>/folder", methods=["PUT", "DELETE"])
+def api_device_folder(exporter):
+    """Move a single device to a folder, or to root (folder_id=null/DELETE)."""
+    if request.method == "DELETE":
+        target = None
+    else:
+        payload = request.get_json(silent=True) or {}
+        target = payload.get("folder_id")
+        if target is not None:
+            try:
+                target = int(target)
+            except (TypeError, ValueError):
+                return jsonify({"ok": False, "error": "folder_id must be int or null"}), 400
+    try:
+        with db_lock, state_lock:
+            if target is not None and target not in folders:
+                return jsonify({"ok": False, "error": "folder not found"}), 404
+            db_conn.execute(
+                "DELETE FROM folder_members WHERE exporter = ?", (exporter,))
+            if target is not None:
+                db_conn.execute(
+                    "INSERT INTO folder_members(folder_id, exporter) VALUES(?, ?)",
+                    (target, exporter))
+            db_conn.commit()
+            old = folder_of.pop(exporter, None)
+            if old is not None:
+                folder_members.get(old, set()).discard(exporter)
+            if target is not None:
+                folder_members.setdefault(target, set()).add(exporter)
+                folder_of[exporter] = target
+            return jsonify({
+                "ok":        True,
+                "exporter":  exporter,
+                "folder_id": target,
+            })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 @app.route("/api/flows/recent")

@@ -826,20 +826,66 @@ const ALLOWED_RANGE_SECONDS = RANGE_OPTIONS.map(r => r.seconds);
 const savedRange = parseInt(localStorage.getItem(RANGE_KEY) || "0", 10);
 const initialRange = ALLOWED_RANGE_SECONDS.includes(savedRange) ? savedRange : 180;
 
-// Folders: client-side device grouping, persisted in localStorage. Backend
-// has no concept of folders — devices may be assigned to at most one folder
-// by exporter IP; everything else renders in the unfoldered "root" list.
-const FOLDERS_KEY = "flowscope:folders";
-function loadFolders() {
-    try {
-        const raw = localStorage.getItem(FOLDERS_KEY);
-        if (!raw) return [];
-        const arr = JSON.parse(raw);
-        return Array.isArray(arr) ? arr : [];
-    } catch (e) { return []; }
+// Folders are server-side (promoted from localStorage in v0.x). A device may
+// belong to at most one folder; everything else renders in the unfoldered
+// "root" list. Collapsed/expanded state remains a per-browser UI preference,
+// stored in localStorage keyed by folder id.
+const FOLDERS_KEY            = "flowscope:folders";          // legacy, used only for migration
+const FOLDERS_COLLAPSED_KEY  = "flowscope:folders:collapsed"; // {[id]: true}
+function loadCollapsedMap() {
+    try { return JSON.parse(localStorage.getItem(FOLDERS_COLLAPSED_KEY) || "{}") || {}; }
+    catch (e) { return {}; }
 }
-function saveFolders() {
-    localStorage.setItem(FOLDERS_KEY, JSON.stringify(state.folders));
+function saveCollapsedMap(m) {
+    localStorage.setItem(FOLDERS_COLLAPSED_KEY, JSON.stringify(m));
+}
+function applyCollapsedFromLocalStorage(folders) {
+    const m = loadCollapsedMap();
+    return folders.map(f => Object.assign({}, f, { collapsed: !!m[f.id] }));
+}
+async function fetchFoldersFromServer() {
+    return applyCollapsedFromLocalStorage(await api("/api/folders"));
+}
+// One-shot migration: if the server has zero folders and localStorage has
+// some, upload them, then clear the legacy key. Safe to call on every boot;
+// it no-ops once the server is the source of truth.
+async function migrateFoldersIfNeeded() {
+    let raw;
+    try { raw = JSON.parse(localStorage.getItem(FOLDERS_KEY) || "[]"); }
+    catch (e) { raw = []; }
+    if (!Array.isArray(raw) || raw.length === 0) return false;
+    const onServer = await api("/api/folders");
+    if (onServer.length > 0) {
+        // Server already authoritative; drop the legacy key without uploading.
+        localStorage.removeItem(FOLDERS_KEY);
+        return false;
+    }
+    for (const f of raw) {
+        const name = (f && f.name || "").trim();
+        if (!name) continue;
+        try {
+            await apiSend("/api/folders", "POST", {
+                name,
+                exporters: Array.isArray(f.deviceIps) ? f.deviceIps : [],
+            });
+        } catch (e) {
+            // 409 = name already created on the server in a parallel migration.
+            // Anything else: log and continue so a single bad row doesn't block
+            // the rest.
+            console.warn("folder migration:", name, e.message);
+        }
+    }
+    localStorage.removeItem(FOLDERS_KEY);
+    return true;
+}
+async function bootstrapFolders() {
+    try {
+        await migrateFoldersIfNeeded();
+        state.folders = await fetchFoldersFromServer();
+        renderSidebar();
+    } catch (e) {
+        console.warn("folder bootstrap failed:", e.message);
+    }
 }
 
 const state = {
@@ -855,7 +901,7 @@ const state = {
     topTalkers: [],
     topPorts: [],
     protocols: [],
-    folders: loadFolders(),     // [{ id, name, collapsed, deviceIps: [] }]
+    folders: [],                // [{ id, name, sort_order, collapsed, deviceIps: [] }] — loaded async at boot
     tableState: {},             // per-table { sort, dir, filter }
     paused: false,              // refresh paused (e.g. while a label is being edited)
     lastUpdate: null,           // ms timestamp of last successful refresh
@@ -967,7 +1013,11 @@ async function apiSend(path, method, body) {
         body: body ? JSON.stringify(body) : undefined,
     });
     if (!r.ok) throw new Error(`${path}: ${r.status}`);
-    return await r.json();
+    // 204 No Content (common for DELETE) and empty 200 bodies must not call
+    // r.json() — it would throw on the empty body.
+    if (r.status === 204) return null;
+    const text = await r.text();
+    return text ? JSON.parse(text) : null;
 }
 function buildParams(extra = {}) {
     const p = new URLSearchParams();
@@ -1385,11 +1435,11 @@ function renderSidebar() {
     if (!state.devices.length && !state.folders.length) return;
 
     // Folders sorted by name (case-insensitive); devices sorted by display
-    // name. Sort copies, never the originals — saveFolders is responsible
-    // for persisted shape and shouldn't depend on render order. Coerce to
-    // string defensively: a missing name from a malformed folder/device
-    // record blows up the comparator and the entire sidebar render with
-    // it, leaving the rest of the page stale until a tab click.
+    // name. Sort copies, never the originals — server-backed state shouldn't
+    // depend on render order. Coerce to string defensively: a missing name
+    // from a malformed folder/device record blows up the comparator and the
+    // entire sidebar render with it, leaving the rest of the page stale
+    // until a tab click.
     const cmp = (a, b) => String(a == null ? "" : a)
         .localeCompare(String(b == null ? "" : b), undefined, { sensitivity: "base" });
     const sortedFolders = state.folders.slice().sort((a, b) => cmp(a.name, b.name));
@@ -1460,99 +1510,137 @@ function renderSidebar() {
     });
 
     // Folder header clicks: rename, delete, or toggle (default).
+    // Folder ids from the server are integers; dataset reads are strings,
+    // so cast at the boundary or === lookups in the handlers will miss.
     list.querySelectorAll(".folder-header").forEach(h => {
         h.addEventListener("click", (ev) => {
             const t = ev.target;
             if (t && t.dataset) {
                 if (t.dataset.rename) {
                     ev.stopPropagation();
-                    renameFolder(t.dataset.rename);
+                    renameFolder(Number(t.dataset.rename));
                     return;
                 }
                 if (t.dataset.delete) {
                     ev.stopPropagation();
-                    deleteFolder(t.dataset.delete);
+                    deleteFolder(Number(t.dataset.delete));
                     return;
                 }
             }
-            toggleFolder(h.dataset.toggle);
+            toggleFolder(Number(h.dataset.toggle));
         });
     });
 }
 
-// ===== Folder operations =====
-function newFolderId() {
-    return "f" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+// ===== Folder operations (server-backed) =====
+// Pattern: prompt the user (sync), call the API (await), refresh state from
+// the server response, then renderSidebar(). The sequential await keeps the
+// list consistent with the database; folder mutations are user-initiated and
+// rare so optimistic UI isn't worth the complexity.
+async function refreshFolders() {
+    state.folders = await fetchFoldersFromServer();
+    renderSidebar();
 }
 async function addFolder() {
-    const name = await appPrompt("New folder", "Folder name (e.g. Troy, MI):", "");
-    if (name == null) return;
-    const t = name.trim();
-    if (!t) return;
-    state.folders.push({ id: newFolderId(), name: t, collapsed: false, deviceIps: [] });
-    saveFolders();
-    renderSidebar();
+    state.paused = true;
+    try {
+        const name = await appPrompt("New folder", "Folder name (e.g. Troy, MI):", "");
+        if (name == null) return;
+        const t = name.trim();
+        if (!t) return;
+        try {
+            await apiSend("/api/folders", "POST", { name: t });
+            await refreshFolders();
+        } catch (e) {
+            await appAlert("Create failed", "Could not create folder: " + e.message);
+        }
+    } finally { state.paused = false; }
 }
 async function renameFolder(id) {
     const f = state.folders.find(x => x.id === id);
     if (!f) return;
-    const v = await appPrompt(`Rename folder "${f.name}"`, "New name:", f.name);
-    if (v == null) return;
-    const t = v.trim();
-    if (!t) return;
-    f.name = t;
-    saveFolders();
-    renderSidebar();
+    state.paused = true;
+    try {
+        const v = await appPrompt(`Rename folder "${f.name}"`, "New name:", f.name);
+        if (v == null) return;
+        const t = v.trim();
+        if (!t) return;
+        try {
+            await apiSend(`/api/folders/${encodeURIComponent(id)}`, "PATCH", { name: t });
+            await refreshFolders();
+        } catch (e) {
+            await appAlert("Rename failed", "Could not rename folder: " + e.message);
+        }
+    } finally { state.paused = false; }
 }
 async function deleteFolder(id) {
     const f = state.folders.find(x => x.id === id);
     if (!f) return;
-    const ok = await appConfirm(
-        `Delete folder "${f.name}"?`,
-        "Its devices will return to the root list.",
-        true);
-    if (!ok) return;
-    state.folders = state.folders.filter(x => x.id !== id);
-    saveFolders();
-    renderSidebar();
+    state.paused = true;
+    try {
+        const ok = await appConfirm(
+            `Delete folder "${f.name}"?`,
+            "Its devices will return to the root list.",
+            true);
+        if (!ok) return;
+        try {
+            await apiSend(`/api/folders/${encodeURIComponent(id)}`, "DELETE");
+        } catch (e) {
+            await appAlert("Delete failed", "Could not delete folder: " + e.message);
+            return;
+        }
+        // Drop the collapsed-state entry for this folder.
+        const m = loadCollapsedMap();
+        if (m[id]) { delete m[id]; saveCollapsedMap(m); }
+        await refreshFolders();
+    } finally { state.paused = false; }
 }
 function toggleFolder(id) {
     const f = state.folders.find(x => x.id === id);
     if (!f) return;
     f.collapsed = !f.collapsed;
-    saveFolders();
+    const m = loadCollapsedMap();
+    if (f.collapsed) m[id] = true; else delete m[id];
+    saveCollapsedMap(m);
     renderSidebar();
 }
 async function moveDeviceToFolder(ip) {
-    // Build the choice list: Root first, then existing folders alphabetically,
-    // then "+ New folder…" at the bottom.
-    const sortedFolders = state.folders.slice().sort((a, b) =>
-        a.name.localeCompare(b.name, undefined, { sensitivity: "base" })
-    );
-    const choices = [
-        { label: "Root (no folder)", value: { kind: "root" }, muted: true },
-        ...sortedFolders.map(f => ({
-            label: f.name,
-            value: { kind: "existing", folder: f },
-        })),
-        { label: "+ New folder…", value: { kind: "new" } },
-    ];
-    let dest = await appChoice(`Move ${ip}`, "Choose a destination:", choices);
-    if (dest == null) return;
-    if (dest.kind === "new") {
-        const name = await appPrompt("New folder", "Folder name:", "");
-        if (name == null) return;
-        const t = name.trim();
-        if (!t) return;
-        dest = { kind: "newWithName", name: t };
-    }
-    state.folders.forEach(f => { f.deviceIps = f.deviceIps.filter(x => x !== ip); });
-    if (dest.kind === "existing") dest.folder.deviceIps.push(ip);
-    else if (dest.kind === "newWithName") state.folders.push({
-        id: newFolderId(), name: dest.name, collapsed: false, deviceIps: [ip],
-    });
-    saveFolders();
-    renderSidebar();
+    state.paused = true;
+    try {
+        const sortedFolders = state.folders.slice().sort((a, b) =>
+            a.name.localeCompare(b.name, undefined, { sensitivity: "base" })
+        );
+        const choices = [
+            { label: "Root (no folder)", value: { kind: "root" }, muted: true },
+            ...sortedFolders.map(f => ({
+                label: f.name,
+                value: { kind: "existing", folder: f },
+            })),
+            { label: "+ New folder…", value: { kind: "new" } },
+        ];
+        let dest = await appChoice(`Move ${ip}`, "Choose a destination:", choices);
+        if (dest == null) return;
+        if (dest.kind === "new") {
+            const name = await appPrompt("New folder", "Folder name:", "");
+            if (name == null) return;
+            const t = name.trim();
+            if (!t) return;
+            dest = { kind: "newWithName", name: t };
+        }
+        try {
+            if (dest.kind === "root") {
+                await apiSend(`/api/devices/${encodeURIComponent(ip)}/folder`, "DELETE");
+            } else if (dest.kind === "existing") {
+                await apiSend(`/api/devices/${encodeURIComponent(ip)}/folder`, "PUT",
+                              { folder_id: dest.folder.id });
+            } else if (dest.kind === "newWithName") {
+                await apiSend("/api/folders", "POST", { name: dest.name, exporters: [ip] });
+            }
+            await refreshFolders();
+        } catch (e) {
+            await appAlert("Move failed", "Could not move device: " + e.message);
+        }
+    } finally { state.paused = false; }
 }
 
 document.getElementById("add-folder").addEventListener("click", addFolder);
@@ -2052,6 +2140,7 @@ window.matchMedia("(prefers-color-scheme: light)").addEventListener("change", ()
 applyTheme(getThemePref());
 
 // ===== Boot =====
+bootstrapFolders();
 refreshAll();
 setInterval(refreshAll, 3000);
 // Independent 1s heartbeat keeps the live/stale indicator and the
