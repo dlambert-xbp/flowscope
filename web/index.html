@@ -738,6 +738,97 @@ footer .live-stale { color: var(--danger); }
 .modal-foot button.danger:hover {
     background: color-mix(in srgb, var(--danger) 15%, transparent);
 }
+
+/* ===== Phase 4: SNMP page ===== */
+.snmp-chip {
+    display: inline-block; margin-left: 6px; padding: 0 6px; font-size: 10px;
+    border-radius: 8px; background: var(--bg-2); color: var(--text-dim);
+}
+.snmp-chip.health-ok    { color: var(--accent);   border: 1px solid var(--accent); }
+.snmp-chip.health-stale { color: var(--accent-2); border: 1px solid var(--accent-2); }
+.snmp-chip.health-error { color: #e54848;          border: 1px solid #e54848; }
+.snmp-chip.empty { display: none; }
+
+.snmp-page { display: flex; flex-direction: column; gap: 16px; }
+.snmp-header {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    padding: 12px 16px; background: var(--bg-2);
+    border: 1px solid var(--line); border-left: 3px solid var(--accent);
+}
+.snmp-header .snmp-h-title { font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; font-size: 12px; color: var(--text-dim); }
+.snmp-header .snmp-h-stat { font-size: 12px; padding: 2px 8px; border-radius: 3px; }
+.snmp-header .snmp-h-stat.ok    { color: var(--accent);   background: rgba(108,240,194,0.08); }
+.snmp-header .snmp-h-stat.stale { color: var(--accent-2); background: rgba(255,123,84,0.08); }
+.snmp-header .snmp-h-stat.err   { color: #e54848;          background: rgba(229,72,72,0.08); }
+.snmp-header .snmp-h-mock { color: var(--accent-3); font-size: 11px; padding: 2px 8px; border: 1px dashed var(--accent-3); border-radius: 3px; }
+.snmp-header .snmp-h-warn { color: var(--accent-2); font-size: 11px; padding: 2px 8px; border: 1px solid var(--accent-2); border-radius: 3px; }
+
+/* Form rows used inside SNMP panels — inline, no popups. */
+.snmp-form { display: grid; grid-template-columns: 140px 1fr; gap: 8px 12px; align-items: center; padding: 12px 0; }
+.snmp-form > label { color: var(--text-dim); font-size: 12px; }
+.snmp-form > input, .snmp-form > select, .snmp-form > textarea {
+    background: var(--bg-1); border: 1px solid var(--line); color: inherit;
+    padding: 6px 8px; font-family: inherit; font-size: 13px;
+}
+.snmp-form > .span-2 { grid-column: 1 / -1; display: flex; gap: 8px; align-items: center; }
+.snmp-form .hint { color: var(--text-dim); font-size: 11px; font-style: italic; }
+.snmp-form input:focus, .snmp-form select:focus { outline: 1px solid var(--accent); }
+
+/* Buttons. Two-step delete: data-armed flips text + color. */
+.snmp-btn {
+    background: var(--bg-2); color: inherit;
+    border: 1px solid var(--line); padding: 5px 10px;
+    font-family: inherit; font-size: 12px; cursor: pointer;
+}
+.snmp-btn:hover { border-color: var(--accent); color: var(--accent); }
+.snmp-btn.primary { border-color: var(--accent); color: var(--accent); }
+.snmp-btn.primary:hover { background: var(--accent); color: var(--bg-1); }
+.snmp-btn.danger { border-color: var(--accent-2); color: var(--accent-2); }
+.snmp-btn.danger:hover { background: var(--accent-2); color: var(--bg-1); }
+.snmp-btn[data-armed="1"] { background: var(--accent-2); color: var(--bg-1); border-color: var(--accent-2); }
+.snmp-btn[disabled] { opacity: 0.45; cursor: not-allowed; }
+
+/* Profile / binding row containers. */
+.snmp-row {
+    display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center;
+    padding: 8px 0; border-bottom: 1px solid var(--line);
+}
+.snmp-row:last-child { border-bottom: 0; }
+.snmp-row .meta { color: var(--text-dim); font-size: 11px; }
+.snmp-row .name { font-weight: 600; }
+.snmp-row .actions { display: flex; gap: 6px; }
+
+.snmp-empty { color: var(--text-dim); font-size: 12px; font-style: italic; padding: 8px 0; }
+
+.snmp-section-h {
+    margin: 18px 0 6px; font-size: 11px; letter-spacing: 0.08em;
+    text-transform: uppercase; color: var(--text-dim);
+}
+.snmp-section-h:first-child { margin-top: 0; }
+
+/* Per-device sidebar health dot. */
+.device-row .health {
+    display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+    margin-right: 6px; vertical-align: middle; opacity: 0.85;
+}
+.device-row .health.ok    { background: var(--accent); }
+.device-row .health.stale { background: var(--accent-2); }
+.device-row .health.error { background: #e54848; }
+.device-row .health.none  { background: transparent; border: 1px solid var(--text-dim); }
+
+/* Inline error / success toast under a form (no popups). */
+.snmp-msg { padding: 6px 10px; margin-top: 6px; font-size: 12px; border-left: 2px solid var(--text-dim); }
+.snmp-msg.err { color: #e54848; border-color: #e54848; background: rgba(229,72,72,0.06); }
+.snmp-msg.ok  { color: var(--accent); border-color: var(--accent); background: rgba(108,240,194,0.06); }
+
+/* Status table */
+.snmp-status-table { width: 100%; border-collapse: collapse; }
+.snmp-status-table th, .snmp-status-table td {
+    padding: 6px 10px; text-align: left; font-size: 12px;
+    border-bottom: 1px solid var(--line);
+}
+.snmp-status-table th { color: var(--text-dim); font-weight: 500; text-transform: uppercase; letter-spacing: 0.05em; font-size: 10px; }
+.snmp-status-table .err { color: #e54848; font-family: var(--mono, monospace); }
 </style>
 </head>
 <body>
@@ -787,6 +878,7 @@ footer .live-stale { color: var(--danger); }
                 <div class="tab active" data-tab="overview">Overview</div>
                 <div class="tab" data-tab="interfaces">Interfaces</div>
                 <div class="tab" data-tab="flows">Live Flows</div>
+                <div class="tab" data-tab="snmp">SNMP <span id="snmp-chip" class="snmp-chip"></span></div>
                 <div class="tab" data-tab="setup">Setup</div>
             </div>
             <div id="tab-content"></div>
@@ -906,6 +998,17 @@ const state = {
     paused: false,              // refresh paused (e.g. while a label is being edited)
     lastUpdate: null,           // ms timestamp of last successful refresh
     lastError:  null,
+    // SNMP (Phase 4) — refreshed on every poll regardless of active tab so
+    // the per-device health dots in the sidebar and the top-bar chip stay
+    // current. Heavier than necessary if SNMP is never used; fine for now.
+    snmpProfiles: [],
+    snmpBindings: [],
+    snmpStatus:   { summary: { ok: 0, stale: 0, error: 0, total: 0 },
+                    config: { mock: false, key_configured: false },
+                    devices: [] },
+    snmpStatusByExporter: {},   // exporter -> status row, rebuilt on every refresh
+    // Two-step delete confirmation. {key: timeoutId} — see armConfirm/disarmConfirm.
+    snmpConfirmArmed: {},
 };
 
 // ===== Utilities =====
@@ -1046,9 +1149,13 @@ async function refreshAll() {
         api("/api/top/talkers"  + (exporterOnly ? exporterOnly + "&limit=15" : "?limit=15")),
         api("/api/top/ports"    + (exporterOnly ? exporterOnly + "&limit=10" : "?limit=10")),
         api("/api/protocols"    + exporterOnly),
+        api("/api/snmp/profiles"),
+        api("/api/snmp/bindings"),
+        api("/api/snmp/status"),
     ]);
     const slots = ["summary", "devices", "interfaces", "flows",
-                   "timeseries", "topTalkers", "topPorts", "protocols"];
+                   "timeseries", "topTalkers", "topPorts", "protocols",
+                   "snmpProfiles", "snmpBindings", "snmpStatus"];
     let anyOk = false, anyErr = null;
     settled.forEach((r, i) => {
         if (r.status === "fulfilled" && r.value != null) {
@@ -1361,6 +1468,32 @@ function render() {
     const safe = (name, fn) => { try { fn(); } catch (e) {
         console.error(`render:${name} failed`, e);
     } };
+    // Rebuild SNMP per-device lookup before sidebar render so the health
+    // dots can read state.snmpStatusByExporter in O(1).
+    safe("snmp-index", () => {
+        state.snmpStatusByExporter = {};
+        const devs = state.snmpStatus && state.snmpStatus.devices || [];
+        devs.forEach(r => { state.snmpStatusByExporter[r.exporter] = r; });
+    });
+    // Header chip on the SNMP tab summarizing health at a glance.
+    safe("snmp-chip", () => {
+        const chip = document.getElementById("snmp-chip");
+        if (!chip) return;
+        const summ = state.snmpStatus && state.snmpStatus.summary;
+        if (!summ || !summ.total) {
+            chip.className = "snmp-chip empty";
+            chip.textContent = "";
+        } else if (summ.error > 0) {
+            chip.className = "snmp-chip health-error";
+            chip.textContent = `${summ.error} err`;
+        } else if (summ.stale > 0) {
+            chip.className = "snmp-chip health-stale";
+            chip.textContent = `${summ.stale} stale`;
+        } else {
+            chip.className = "snmp-chip health-ok";
+            chip.textContent = `${summ.ok}/${summ.total}`;
+        }
+    });
     safe("header",  renderHeader);
     safe("sidebar", renderSidebar);
     safe("tab",     renderTab);
@@ -1408,10 +1541,16 @@ function renderFooter() {
 function deviceRowHtml(d) {
     const display = exporterDisplayName(d);
     const showIp = display !== d.exporter;
+    const health = snmpHealth(d.exporter);
+    const healthTitle = health === "ok"   ? "SNMP poll healthy"
+                      : health === "stale" ? "SNMP poll stale"
+                      : health === "error" ? "SNMP poll failing"
+                      : "SNMP not configured";
     return `
     <div class="device-row ${state.selectedExporter === d.exporter ? "active" : ""}"
          data-exporter="${escapeHtml(d.exporter)}">
         <div class="ip">
+            <span class="health ${health}" title="${healthTitle}"></span>
             <span class="actions move" data-move-exporter="${escapeHtml(d.exporter)}"
                   title="Move to folder">⤴</span>
             <span class="actions" data-edit-exporter="${escapeHtml(d.exporter)}"
@@ -1668,10 +1807,12 @@ function renderTab() {
     if (state.activeTab === "overview")   root.innerHTML = renderOverview();
     if (state.activeTab === "interfaces") root.innerHTML = renderInterfaces();
     if (state.activeTab === "flows")      root.innerHTML = renderFlows();
+    if (state.activeTab === "snmp")       root.innerHTML = renderSnmp();
     if (state.activeTab === "setup")      root.innerHTML = renderSetup();
     if (state.activeTab === "overview")   { wireOverviewControls(); drawTimeseries(); }
     if (state.activeTab === "interfaces") wireInterfaceTable();
     if (state.activeTab === "flows")      wireFlowsControls();
+    if (state.activeTab === "snmp")       wireSnmpControls();
     wireTables();
 }
 
@@ -2058,6 +2199,562 @@ function wireFlowsControls() {
             renderTab();
             refreshAll();
         });
+    });
+}
+
+// ----- SNMP tab (Phase 4) -----
+// Pure inline forms — no popups (memory: feedback_no_browser_popups). Two-step
+// confirmation pattern for destructive actions: first click arms the button,
+// second click within 5s confirms; click anywhere else or wait for the timeout
+// to disarm.
+
+const SNMP_AUTH_PROTOS = ["MD5", "SHA", "SHA224", "SHA256", "SHA384", "SHA512"];
+const SNMP_PRIV_PROTOS = ["DES", "3DES", "AES128", "AES192", "AES256"];
+const SNMP_SEC_LEVELS  = ["noAuthNoPriv", "authNoPriv", "authPriv"];
+
+function _esc(s) { return escapeHtml(s == null ? "" : String(s)); }
+
+function snmpHealth(exporter) {
+    const r = state.snmpStatusByExporter[exporter];
+    if (!r) return "none";
+    return r.health || "none";
+}
+
+function timeAgoTs(ts) {
+    if (!ts) return "never";
+    const s = Math.max(0, Math.floor(Date.now()/1000 - ts));
+    if (s < 60)    return `${s}s ago`;
+    if (s < 3600)  return `${Math.floor(s/60)}m ago`;
+    if (s < 86400) return `${Math.floor(s/3600)}h ago`;
+    return `${Math.floor(s/86400)}d ago`;
+}
+
+function renderSnmp() {
+    const stat     = state.snmpStatus || {};
+    const summary  = stat.summary || { ok: 0, stale: 0, error: 0, total: 0 };
+    const cfg      = stat.config  || {};
+    const profiles = state.snmpProfiles || [];
+    const bindings = state.snmpBindings || [];
+    return `
+        <div class="snmp-page">
+          <div class="snmp-header">
+            <span class="snmp-h-title">SNMP</span>
+            <span class="snmp-h-stat ok">${summary.ok} ok</span>
+            <span class="snmp-h-stat stale">${summary.stale} stale</span>
+            <span class="snmp-h-stat err">${summary.error} error</span>
+            <span class="meta" style="color:var(--text-dim);font-size:11px;margin-left:auto">
+              poll interval default ${cfg.default_interval_s || 60}s
+            </span>
+            ${cfg.mock ? `<span class="snmp-h-mock">MOCK MODE</span>` : ``}
+            ${!cfg.key_configured ? `<span class="snmp-h-warn">FLOWSCOPE_SNMP_KEY not set — v3 profiles cannot be created or unlocked</span>` : ``}
+          </div>
+
+          <div class="panel">
+            <div class="panel-head"><span class="accent">▸</span> Profiles
+              <span class="meta">${profiles.length} defined</span></div>
+            <div class="panel-body">
+              ${renderSnmpProfileList(profiles)}
+              <div class="snmp-section-h" style="margin-top:24px">New profile</div>
+              ${renderSnmpProfileForm(null)}
+              <div id="snmp-msg-newprofile"></div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-head"><span class="accent">▸</span> Bindings
+              <span class="meta">global → folder → device</span></div>
+            <div class="panel-body">
+              ${renderSnmpBindings(bindings, profiles)}
+              <div id="snmp-msg-bindings"></div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-head"><span class="accent">▸</span> Poll status
+              <span class="meta">per-device telemetry, persisted across restarts</span></div>
+            <div class="panel-body" style="padding:0">
+              ${renderSnmpStatusTable(stat.devices || [])}
+            </div>
+          </div>
+        </div>`;
+}
+
+function renderSnmpProfileList(profiles) {
+    if (!profiles.length) {
+        return `<div class="snmp-empty">No profiles yet. Create one below.</div>`;
+    }
+    return profiles.map(p => {
+        const desc = p.version === "2c"
+            ? `v2c · community ${p.community ? "set" : "<em>unset</em>"} · port ${p.port}`
+            : `v3 · ${_esc(p.v3_username || "?")} · ${_esc(p.v3_security_level || "?")} · auth ${_esc(p.v3_auth_proto || "—")} · priv ${_esc(p.v3_priv_proto || "—")}`;
+        return `
+        <div class="snmp-row">
+          <div>
+            <div class="name">${_esc(p.name)}</div>
+            <div class="meta">${desc}</div>
+          </div>
+          <div class="actions">
+            <button class="snmp-btn" data-act="snmp-test-profile" data-name="${_esc(p.name)}">Test…</button>
+            <button class="snmp-btn" data-act="snmp-edit-profile" data-name="${_esc(p.name)}">Edit</button>
+            <button class="snmp-btn danger" data-confirm="del-profile-${_esc(p.name)}" data-act="snmp-delete-profile" data-name="${_esc(p.name)}">Delete</button>
+          </div>
+        </div>
+        <div id="snmp-msg-profile-${_esc(p.name)}"></div>
+        <div id="snmp-edit-profile-${_esc(p.name)}" class="snmp-edit-slot"></div>
+        <div id="snmp-test-profile-${_esc(p.name)}" class="snmp-test-slot"></div>
+        `;
+    }).join("");
+}
+
+function renderSnmpProfileForm(existing) {
+    const e = existing || {};
+    const ver = e.version || "2c";
+    const idPrefix = existing ? `edit-${_esc(existing.name)}` : "new";
+    return `
+        <form class="snmp-form" data-form="profile" data-existing="${existing ? _esc(existing.name) : ''}">
+          ${existing ? `
+            <label>Name</label>
+            <input type="text" name="name" value="${_esc(e.name)}" disabled>
+          ` : `
+            <label>Name</label>
+            <input type="text" name="name" placeholder="e.g. core-v3 or edge-public" required>
+          `}
+          <label>Version</label>
+          <select name="version" data-version-select="${idPrefix}">
+            <option value="2c"${ver === "2c" ? " selected" : ""}>SNMPv2c</option>
+            <option value="3"${ver  === "3"  ? " selected" : ""}>SNMPv3</option>
+          </select>
+
+          <div class="span-2 v2c-only" data-show-when="${idPrefix}-2c">
+            <label style="width:140px">Community</label>
+            <input type="text" name="community" value="${_esc(e.community || '')}" placeholder="readonly" style="flex:1">
+          </div>
+
+          <div class="span-2 v3-only" data-show-when="${idPrefix}-3" style="display:none;flex-direction:column;gap:8px;align-items:stretch">
+            <div style="display:grid;grid-template-columns:140px 1fr;gap:8px;align-items:center">
+              <label>Username</label>
+              <input type="text" name="v3_username" value="${_esc(e.v3_username || '')}" placeholder="snmpadmin">
+              <label>Security level</label>
+              <select name="v3_security_level">
+                ${SNMP_SEC_LEVELS.map(l => `<option value="${l}"${e.v3_security_level === l ? " selected" : ""}>${l}</option>`).join("")}
+              </select>
+              <label>Auth protocol</label>
+              <select name="v3_auth_proto">
+                <option value="">—</option>
+                ${SNMP_AUTH_PROTOS.map(p => `<option value="${p}"${e.v3_auth_proto === p ? " selected" : ""}>${p}</option>`).join("")}
+              </select>
+              <label>Auth passphrase</label>
+              <input type="password" name="v3_auth_pass" placeholder="${e.v3_auth_pass === '***set***' ? '(set — leave blank to keep)' : 'min 8 chars'}">
+              <label>Priv protocol</label>
+              <select name="v3_priv_proto">
+                <option value="">—</option>
+                ${SNMP_PRIV_PROTOS.map(p => `<option value="${p}"${e.v3_priv_proto === p ? " selected" : ""}>${p}</option>`).join("")}
+              </select>
+              <label>Priv passphrase</label>
+              <input type="password" name="v3_priv_pass" placeholder="${e.v3_priv_pass === '***set***' ? '(set — leave blank to keep)' : 'min 8 chars'}">
+              <label>Context</label>
+              <input type="text" name="v3_context" value="${_esc(e.v3_context || '')}" placeholder="(optional)">
+            </div>
+          </div>
+
+          <label>Port</label>
+          <input type="number" name="port" value="${_esc(e.port || 161)}" min="1" max="65535">
+          <label>Timeout (s)</label>
+          <input type="number" name="timeout_s" value="${_esc(e.timeout_s != null ? e.timeout_s : 2)}" step="0.5" min="0.5" max="60">
+          <label>Retries</label>
+          <input type="number" name="retries" value="${_esc(e.retries != null ? e.retries : 1)}" min="0" max="10">
+
+          <div class="span-2">
+            <button type="submit" class="snmp-btn primary">${existing ? "Save changes" : "Create profile"}</button>
+            ${existing ? `<button type="button" class="snmp-btn" data-act="snmp-cancel-edit" data-name="${_esc(existing.name)}">Cancel</button>` : ``}
+            <span class="hint">v3 passphrases are encrypted at rest with FLOWSCOPE_SNMP_KEY.</span>
+          </div>
+        </form>`;
+}
+
+function renderSnmpBindings(bindings, profiles) {
+    const profileOpts = `<option value="">— inherit / no profile —</option>` +
+        profiles.map(p => `<option value="${_esc(p.name)}">${_esc(p.name)}</option>`).join("");
+    const folderOpts = (state.folders || []).map(f =>
+        `<option value="${f.id}">${_esc(f.name)}</option>`).join("");
+    const deviceOpts = (state.devices || []).map(d =>
+        `<option value="${_esc(d.exporter)}">${_esc(d.exporter)}${d.label ? ` — ${_esc(d.label)}` : ''}</option>`).join("");
+
+    const byScope = { global: [], folder: [], device: [] };
+    bindings.forEach(b => byScope[b.scope] && byScope[b.scope].push(b));
+
+    function bindingRow(b) {
+        const profile = profiles.find(p => p.name === b.profile);
+        const profileLabel = b.profile
+            ? (profile ? _esc(b.profile) : `<span class="err">${_esc(b.profile)} (missing)</span>`)
+            : `<em>none</em>`;
+        let scopeLabel = b.scope;
+        if (b.scope === "folder") {
+            const f = (state.folders || []).find(x => String(x.id) === b.scope_id);
+            scopeLabel = `folder · ${f ? _esc(f.name) : `id=${_esc(b.scope_id)} (deleted)`}`;
+        } else if (b.scope === "device") {
+            scopeLabel = `device · ${_esc(b.scope_id)}`;
+        }
+        const interval = b.poll_interval_s != null ? `${b.poll_interval_s}s` : "—";
+        const enabled  = b.enabled === 0 ? "off" : (b.enabled === 1 ? "on" : "—");
+        return `
+        <div class="snmp-row">
+          <div>
+            <div class="name">${_esc(scopeLabel)}</div>
+            <div class="meta">profile: ${profileLabel} · interval: ${interval} · enabled: ${enabled}</div>
+          </div>
+          <div class="actions">
+            <button class="snmp-btn" data-act="snmp-edit-binding"
+                    data-scope="${b.scope}" data-scope-id="${_esc(b.scope_id)}">Edit</button>
+            <button class="snmp-btn danger" data-confirm="del-binding-${b.scope}-${_esc(b.scope_id)}"
+                    data-act="snmp-delete-binding"
+                    data-scope="${b.scope}" data-scope-id="${_esc(b.scope_id)}">Delete</button>
+          </div>
+        </div>
+        <div id="snmp-edit-binding-${b.scope}-${_esc(b.scope_id)}" class="snmp-edit-slot"></div>`;
+    }
+
+    return `
+        <div class="snmp-section-h">Global default</div>
+        ${byScope.global.length ? byScope.global.map(bindingRow).join("")
+            : `<div class="snmp-empty">No global default. Add one below to enable polling for everything not explicitly bound.</div>`}
+
+        <div class="snmp-section-h">Folder bindings</div>
+        ${byScope.folder.length ? byScope.folder.map(bindingRow).join("")
+            : `<div class="snmp-empty">No folder bindings.</div>`}
+
+        <div class="snmp-section-h">Device overrides</div>
+        ${byScope.device.length ? byScope.device.map(bindingRow).join("")
+            : `<div class="snmp-empty">No device overrides.</div>`}
+
+        <div class="snmp-section-h" style="margin-top:24px">Add / replace binding</div>
+        <form class="snmp-form" data-form="binding">
+          <label>Scope</label>
+          <select name="scope" data-binding-scope>
+            <option value="global">Global default</option>
+            <option value="folder">Folder</option>
+            <option value="device">Single device</option>
+          </select>
+          <label data-show-when="binding-folder" style="display:none">Folder</label>
+          <select name="folder_id" data-show-when="binding-folder" style="display:none">${folderOpts}</select>
+          <label data-show-when="binding-device" style="display:none">Device</label>
+          <select name="device" data-show-when="binding-device" style="display:none">${deviceOpts}</select>
+          <label>Profile</label>
+          <select name="profile">${profileOpts}</select>
+          <label>Poll interval (s)</label>
+          <input type="number" name="poll_interval_s" placeholder="(inherit)" min="5" max="86400">
+          <label>Enabled</label>
+          <select name="enabled">
+            <option value="">(inherit)</option>
+            <option value="1">on</option>
+            <option value="0">off</option>
+          </select>
+          <div class="span-2">
+            <button type="submit" class="snmp-btn primary">Save binding</button>
+            <span class="hint">Resolution: device override → folder → global. Each tier overrides whatever earlier tier set.</span>
+          </div>
+        </form>`;
+}
+
+function renderSnmpStatusTable(devices) {
+    if (!devices.length) {
+        return `<div class="snmp-empty" style="padding:16px">No devices polled yet. Create a profile, bind it, and wait for the next tick.</div>`;
+    }
+    const rows = devices.map(r => {
+        const cls = r.health === "ok" ? "ok" : (r.health === "error" ? "err" : "stale");
+        const errCell = r.last_error ? `<span class="err">${_esc(r.last_error)}</span>` : "—";
+        return `
+            <tr>
+              <td><span class="health ${cls}" style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${cls === "ok" ? "var(--accent)" : cls === "err" ? "#e54848" : "var(--accent-2)"};margin-right:6px"></span>${_esc(r.exporter)}</td>
+              <td>${_esc(r.health)}</td>
+              <td>${timeAgoTs(r.last_poll_ts)}</td>
+              <td>${timeAgoTs(r.last_ok_ts)}</td>
+              <td>${r.iface_count != null ? r.iface_count : "—"}</td>
+              <td>${r.consecutive_failures || 0}</td>
+              <td>${errCell}</td>
+              <td>
+                <button class="snmp-btn" data-act="snmp-poll-now" data-exporter="${_esc(r.exporter)}">Poll now</button>
+              </td>
+            </tr>`;
+    }).join("");
+    return `
+        <table class="snmp-status-table">
+          <thead><tr>
+            <th>Exporter</th><th>Health</th><th>Last poll</th><th>Last ok</th>
+            <th>Ifs</th><th>Fails</th><th>Last error</th><th></th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table>`;
+}
+
+// ----- SNMP wiring -----
+function _snmpMsg(id, kind, text) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.innerHTML = `<div class="snmp-msg ${kind}">${_esc(text)}</div>`;
+    if (kind === "ok") setTimeout(() => { if (el) el.innerHTML = ""; }, 4000);
+}
+
+function _armConfirm(btn, key, onConfirm) {
+    if (btn.dataset.armed === "1") {
+        clearTimeout(state.snmpConfirmArmed[key]);
+        delete state.snmpConfirmArmed[key];
+        btn.dataset.armed = "0";
+        btn.textContent = btn.dataset.label || "Delete";
+        onConfirm();
+        return;
+    }
+    btn.dataset.label = btn.dataset.label || btn.textContent;
+    btn.dataset.armed = "1";
+    btn.textContent = "click again to confirm";
+    state.snmpConfirmArmed[key] = setTimeout(() => {
+        btn.dataset.armed = "0";
+        btn.textContent = btn.dataset.label || "Delete";
+        delete state.snmpConfirmArmed[key];
+    }, 5000);
+}
+
+function _wireVersionToggle(form, prefix) {
+    const sel = form.querySelector('[data-version-select="' + prefix + '"]');
+    if (!sel) return;
+    function apply() {
+        const v = sel.value;
+        form.querySelectorAll('[data-show-when="' + prefix + '-2c"]').forEach(el => {
+            el.style.display = v === "2c" ? "" : "none";
+        });
+        form.querySelectorAll('[data-show-when="' + prefix + '-3"]').forEach(el => {
+            el.style.display = v === "3" ? "flex" : "none";
+        });
+    }
+    sel.addEventListener("change", apply);
+    apply();
+}
+
+function _wireBindingScopeToggle(form) {
+    const sel = form.querySelector("[data-binding-scope]");
+    if (!sel) return;
+    function apply() {
+        const v = sel.value;
+        form.querySelectorAll('[data-show-when="binding-folder"]').forEach(el => {
+            el.style.display = v === "folder" ? "" : "none";
+        });
+        form.querySelectorAll('[data-show-when="binding-device"]').forEach(el => {
+            el.style.display = v === "device" ? "" : "none";
+        });
+    }
+    sel.addEventListener("change", apply);
+    apply();
+}
+
+async function snmpSubmitProfile(form) {
+    const existing = form.dataset.existing;
+    const fd = new FormData(form);
+    const body = {};
+    if (!existing) body.name = (fd.get("name") || "").trim();
+    body.version           = fd.get("version");
+    body.community         = (fd.get("community") || "").trim() || null;
+    body.v3_username       = (fd.get("v3_username") || "").trim() || null;
+    body.v3_security_level = fd.get("v3_security_level") || null;
+    body.v3_auth_proto     = fd.get("v3_auth_proto") || null;
+    body.v3_priv_proto     = fd.get("v3_priv_proto") || null;
+    body.v3_context        = (fd.get("v3_context") || "").trim() || null;
+    body.port              = parseInt(fd.get("port") || "161", 10);
+    body.timeout_s         = parseFloat(fd.get("timeout_s") || "2");
+    body.retries           = parseInt(fd.get("retries") || "1", 10);
+    // Passphrases: only send if user typed something. Empty leaves stored value alone on PATCH.
+    const auth = fd.get("v3_auth_pass");
+    const priv = fd.get("v3_priv_pass");
+    if (auth) body.v3_auth_pass = auth;
+    if (priv) body.v3_priv_pass = priv;
+    const msgId = existing ? `snmp-msg-profile-${existing}` : "snmp-msg-newprofile";
+    try {
+        if (existing) {
+            await apiSend(`/api/snmp/profiles/${encodeURIComponent(existing)}`, "PATCH", body);
+            _snmpMsg(msgId, "ok", "Profile saved.");
+            // Close the edit slot
+            const slot = document.getElementById(`snmp-edit-profile-${existing}`);
+            if (slot) slot.innerHTML = "";
+        } else {
+            await apiSend("/api/snmp/profiles", "POST", body);
+            _snmpMsg(msgId, "ok", "Profile created.");
+            form.reset();
+        }
+        await refreshAll();
+    } catch (e) {
+        _snmpMsg(msgId, "err", e.message);
+    }
+}
+
+async function snmpDeleteProfile(name) {
+    try {
+        await apiSend(`/api/snmp/profiles/${encodeURIComponent(name)}`, "DELETE");
+        await refreshAll();
+    } catch (e) {
+        _snmpMsg(`snmp-msg-profile-${name}`, "err", e.message);
+    }
+}
+
+async function snmpTestProfile(name, slot) {
+    slot.innerHTML = `<div class="snmp-msg">Testing...</div>`;
+    try {
+        // Default to the first known device for convenience; user can override.
+        const dev = (state.devices && state.devices[0] && state.devices[0].exporter) || "127.0.0.1";
+        const r = await apiSend(`/api/snmp/profiles/${encodeURIComponent(name)}/test`, "POST",
+                                { exporter: dev });
+        if (r.ok) {
+            const ifs = r.ifaces || [];
+            slot.innerHTML = `<div class="snmp-msg ok">Walk OK against ${_esc(r.exporter)} — ${ifs.length} ifaces. ${
+                ifs.slice(0, 3).map(i => `<code>${i.ifindex}=${_esc(i.name)}</code>`).join(" ")
+            }${ifs.length > 3 ? " ..." : ""}</div>`;
+        } else {
+            slot.innerHTML = `<div class="snmp-msg err">${_esc(r.error || "test failed")}</div>`;
+        }
+    } catch (e) {
+        slot.innerHTML = `<div class="snmp-msg err">${_esc(e.message)}</div>`;
+    }
+}
+
+async function snmpSubmitBinding(form) {
+    const fd = new FormData(form);
+    const scope = fd.get("scope");
+    let scope_id = "";
+    if (scope === "folder") scope_id = String(fd.get("folder_id") || "");
+    else if (scope === "device") scope_id = String(fd.get("device") || "");
+    if (scope === "folder" && !scope_id) {
+        _snmpMsg("snmp-msg-bindings", "err", "Pick a folder.");
+        return;
+    }
+    if (scope === "device" && !scope_id) {
+        _snmpMsg("snmp-msg-bindings", "err", "Pick a device.");
+        return;
+    }
+    const body = {};
+    const profile = fd.get("profile");
+    body.profile = profile || null;
+    const interval = fd.get("poll_interval_s");
+    if (interval) body.poll_interval_s = parseInt(interval, 10);
+    const enabled = fd.get("enabled");
+    if (enabled === "1") body.enabled = true;
+    else if (enabled === "0") body.enabled = false;
+    let url;
+    if (scope === "global")      url = "/api/snmp/bindings/global";
+    else if (scope === "folder") url = `/api/snmp/bindings/folder/${encodeURIComponent(scope_id)}`;
+    else                          url = `/api/snmp/bindings/device/${encodeURIComponent(scope_id)}`;
+    try {
+        await apiSend(url, "PUT", body);
+        _snmpMsg("snmp-msg-bindings", "ok", "Binding saved.");
+        form.reset();
+        await refreshAll();
+    } catch (e) {
+        _snmpMsg("snmp-msg-bindings", "err", e.message);
+    }
+}
+
+async function snmpDeleteBinding(scope, scope_id) {
+    let url;
+    if (scope === "global")      url = "/api/snmp/bindings/global";
+    else if (scope === "folder") url = `/api/snmp/bindings/folder/${encodeURIComponent(scope_id)}`;
+    else                          url = `/api/snmp/bindings/device/${encodeURIComponent(scope_id)}`;
+    try {
+        await apiSend(url, "DELETE");
+        await refreshAll();
+    } catch (e) {
+        _snmpMsg("snmp-msg-bindings", "err", e.message);
+    }
+}
+
+async function snmpPollNow(exporter) {
+    try {
+        const r = await apiSend(`/api/snmp/poll/${encodeURIComponent(exporter)}`, "POST");
+        if (!r.ok) {
+            // Render error inline. The status row will refresh on next tick anyway.
+            console.warn("manual poll failed:", r.error);
+        }
+        await refreshAll();
+    } catch (e) {
+        console.warn("manual poll error:", e.message);
+    }
+}
+
+function wireSnmpControls() {
+    const root = document.getElementById("tab-content");
+    if (!root) return;
+
+    // Version toggle on the new-profile form.
+    root.querySelectorAll('form[data-form="profile"]').forEach(f => {
+        const prefix = f.dataset.existing ? `edit-${f.dataset.existing}` : "new";
+        _wireVersionToggle(f, prefix);
+        f.addEventListener("submit", (ev) => { ev.preventDefault(); snmpSubmitProfile(f); });
+    });
+
+    // Binding form.
+    root.querySelectorAll('form[data-form="binding"]').forEach(f => {
+        _wireBindingScopeToggle(f);
+        f.addEventListener("submit", (ev) => { ev.preventDefault(); snmpSubmitBinding(f); });
+    });
+
+    // Click delegation for actions inside the SNMP page.
+    root.addEventListener("click", (ev) => {
+        const t = ev.target.closest("[data-act]");
+        if (!t) return;
+        const act = t.dataset.act;
+
+        if (act === "snmp-delete-profile") {
+            _armConfirm(t, t.dataset.confirm, () => snmpDeleteProfile(t.dataset.name));
+            return;
+        }
+        if (act === "snmp-edit-profile") {
+            const slot = document.getElementById(`snmp-edit-profile-${t.dataset.name}`);
+            if (!slot) return;
+            if (slot.innerHTML) { slot.innerHTML = ""; return; }   // toggle
+            const profile = (state.snmpProfiles || []).find(p => p.name === t.dataset.name);
+            if (!profile) return;
+            slot.innerHTML = renderSnmpProfileForm(profile);
+            const newForm = slot.querySelector('form[data-form="profile"]');
+            if (newForm) {
+                const prefix = `edit-${profile.name}`;
+                _wireVersionToggle(newForm, prefix);
+                newForm.addEventListener("submit", (ev) => { ev.preventDefault(); snmpSubmitProfile(newForm); });
+            }
+            return;
+        }
+        if (act === "snmp-cancel-edit") {
+            const slot = document.getElementById(`snmp-edit-profile-${t.dataset.name}`);
+            if (slot) slot.innerHTML = "";
+            return;
+        }
+        if (act === "snmp-test-profile") {
+            const slot = document.getElementById(`snmp-test-profile-${t.dataset.name}`);
+            if (!slot) return;
+            snmpTestProfile(t.dataset.name, slot);
+            return;
+        }
+        if (act === "snmp-delete-binding") {
+            _armConfirm(t, t.dataset.confirm,
+                () => snmpDeleteBinding(t.dataset.scope, t.dataset.scopeId));
+            return;
+        }
+        if (act === "snmp-edit-binding") {
+            // Quick path: prefill the bottom form. Saves us building a second form.
+            const form = root.querySelector('form[data-form="binding"]');
+            if (!form) return;
+            const b = (state.snmpBindings || []).find(x =>
+                x.scope === t.dataset.scope && x.scope_id === t.dataset.scopeId);
+            if (!b) return;
+            form.elements["scope"].value = b.scope;
+            _wireBindingScopeToggle(form);
+            if (b.scope === "folder") form.elements["folder_id"].value = b.scope_id;
+            if (b.scope === "device") form.elements["device"].value = b.scope_id;
+            form.elements["profile"].value = b.profile || "";
+            form.elements["poll_interval_s"].value = b.poll_interval_s != null ? b.poll_interval_s : "";
+            form.elements["enabled"].value = b.enabled == null ? "" : String(b.enabled);
+            form.scrollIntoView({ behavior: "smooth", block: "center" });
+            return;
+        }
+        if (act === "snmp-poll-now") {
+            snmpPollNow(t.dataset.exporter);
+            return;
+        }
     });
 }
 
