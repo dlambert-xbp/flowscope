@@ -632,6 +632,109 @@ footer .live-stale { color: var(--danger); }
     background: var(--bg-2);
 }
 .theme-switch svg { width: 13px; height: 13px; }
+
+/* In-app modal (replaces window.prompt / window.confirm / alert) */
+.modal-overlay {
+    position: fixed; inset: 0;
+    background: rgba(0, 0, 0, 0.55);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 1000;
+    backdrop-filter: blur(2px);
+}
+.modal {
+    background: var(--bg-1);
+    border: 1px solid var(--line-bright);
+    min-width: 380px;
+    max-width: min(560px, 92vw);
+    box-shadow: 0 8px 40px rgba(0, 0, 0, 0.4);
+}
+.modal-head {
+    padding: 12px 18px;
+    border-bottom: 1px solid var(--line);
+    background: var(--bg-2);
+    font-family: "Space Grotesk", sans-serif;
+    font-size: 13px;
+    letter-spacing: 0.5px;
+    color: var(--text);
+    font-weight: 500;
+}
+.modal-body {
+    padding: 16px 18px;
+    color: var(--text-dim);
+    font-size: 12px;
+    line-height: 1.6;
+}
+.modal-body .body-text { white-space: pre-wrap; }
+.modal-input {
+    width: 100%;
+    background: var(--bg-0);
+    border: 1px solid var(--line);
+    color: var(--text);
+    font-family: inherit;
+    font-size: 13px;
+    padding: 8px 10px;
+    margin-top: 12px;
+    outline: none;
+}
+.modal-input:focus { border-color: var(--accent); }
+.modal-choices {
+    display: flex; flex-direction: column; gap: 4px;
+    margin-top: 12px;
+}
+.modal-choice {
+    background: var(--bg-2);
+    border: 1px solid var(--line);
+    color: var(--text);
+    font-family: inherit;
+    font-size: 12px;
+    padding: 8px 12px;
+    text-align: left;
+    cursor: pointer;
+    transition: border-color 100ms, background 100ms, color 100ms;
+}
+.modal-choice:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+.modal-choice.muted { color: var(--text-dim); }
+.modal-foot {
+    padding: 10px 14px;
+    border-top: 1px solid var(--line);
+    background: var(--bg-2);
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+}
+.modal-foot button {
+    background: transparent;
+    border: 1px solid var(--line-bright);
+    color: var(--text-dim);
+    font-family: inherit;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    padding: 6px 14px;
+    cursor: pointer;
+    transition: color 100ms, border-color 100ms, background 100ms;
+}
+.modal-foot button:hover {
+    color: var(--text);
+    border-color: var(--text-dim);
+}
+.modal-foot button.primary {
+    color: var(--accent);
+    border-color: var(--accent);
+}
+.modal-foot button.primary:hover {
+    background: color-mix(in srgb, var(--accent) 15%, transparent);
+}
+.modal-foot button.danger {
+    color: var(--danger);
+    border-color: var(--danger);
+}
+.modal-foot button.danger:hover {
+    background: color-mix(in srgb, var(--danger) 15%, transparent);
+}
 </style>
 </head>
 <body>
@@ -994,18 +1097,130 @@ function wireTables() {
     });
 }
 
+// ===== Modal dialogs (replace browser prompt/confirm/alert) =====
+// Pauses background polling while open so the page doesn't shift under the
+// dialog. Returns a Promise: appPrompt → string|null, appConfirm/appAlert →
+// boolean, appChoice → the picked value or null.
+function _showModal({ title, bodyHtml, footerHtml, wireBody, onOk, onCancel, enterSubmits }) {
+    state.paused = true;
+    return new Promise(resolve => {
+        const ov = document.createElement("div");
+        ov.className = "modal-overlay";
+        ov.innerHTML = `
+            <div class="modal" role="dialog" aria-modal="true" aria-label="${escapeHtml(title || "")}">
+                <div class="modal-head">${escapeHtml(title || "")}</div>
+                <div class="modal-body">${bodyHtml}</div>
+                <div class="modal-foot">${footerHtml}</div>
+            </div>`;
+        document.body.appendChild(ov);
+
+        const finish = (val) => {
+            ov.remove();
+            document.removeEventListener("keydown", onKey, true);
+            state.paused = false;
+            resolve(val);
+        };
+        const okBtn     = ov.querySelector('[data-act="ok"]');
+        const cancelBtn = ov.querySelector('[data-act="cancel"]');
+        if (okBtn)     okBtn.addEventListener("click", () => finish(onOk ? onOk(ov) : true));
+        if (cancelBtn) cancelBtn.addEventListener("click", () => finish(onCancel ? onCancel() : null));
+        ov.addEventListener("click", (ev) => {
+            if (ev.target === ov) finish(onCancel ? onCancel() : null);
+        });
+
+        const onKey = (ev) => {
+            if (ev.key === "Escape") {
+                ev.preventDefault();
+                finish(onCancel ? onCancel() : null);
+            } else if (ev.key === "Enter" && enterSubmits && okBtn) {
+                ev.preventDefault();
+                finish(onOk ? onOk(ov) : true);
+            }
+        };
+        document.addEventListener("keydown", onKey, true);
+
+        if (wireBody) wireBody(ov, finish);
+
+        const inp = ov.querySelector(".modal-input");
+        if (inp) { inp.focus(); inp.select(); }
+        else if (okBtn) okBtn.focus();
+    });
+}
+
+function appPrompt(title, body, defaultValue) {
+    return _showModal({
+        title,
+        bodyHtml: `${body ? `<div class="body-text">${escapeHtml(body)}</div>` : ""}
+                   <input type="text" class="modal-input"
+                          value="${escapeHtml(defaultValue == null ? "" : defaultValue)}">`,
+        footerHtml: `<button data-act="cancel">Cancel</button>
+                     <button data-act="ok" class="primary">OK</button>`,
+        enterSubmits: true,
+        onOk: (ov) => ov.querySelector(".modal-input").value,
+        onCancel: () => null,
+    });
+}
+
+function appConfirm(title, body, danger) {
+    return _showModal({
+        title,
+        bodyHtml: `<div class="body-text">${escapeHtml(body || "")}</div>`,
+        footerHtml: `<button data-act="cancel">Cancel</button>
+                     <button data-act="ok" class="${danger ? "danger" : "primary"}">${danger ? "Delete" : "OK"}</button>`,
+        enterSubmits: true,
+        onOk: () => true,
+        onCancel: () => false,
+    });
+}
+
+function appAlert(title, body) {
+    return _showModal({
+        title,
+        bodyHtml: `<div class="body-text">${escapeHtml(body || "")}</div>`,
+        footerHtml: `<button data-act="ok" class="primary">OK</button>`,
+        enterSubmits: true,
+        onOk: () => true,
+        onCancel: () => true,
+    });
+}
+
+// choices: [{ label, value, muted? }, ...]. Buttons are rendered vertically;
+// clicking one resolves to its `value`. Cancel / Esc / backdrop resolves null.
+function appChoice(title, body, choices) {
+    return _showModal({
+        title,
+        bodyHtml: `${body ? `<div class="body-text">${escapeHtml(body)}</div>` : ""}
+                   <div class="modal-choices">${
+                       choices.map((c, i) =>
+                           `<button class="modal-choice ${c.muted ? "muted" : ""}" data-i="${i}">${escapeHtml(c.label)}</button>`
+                       ).join("")
+                   }</div>`,
+        footerHtml: `<button data-act="cancel">Cancel</button>`,
+        enterSubmits: false,
+        onCancel: () => null,
+        wireBody: (ov, finish) => {
+            ov.querySelectorAll(".modal-choice").forEach(b => {
+                b.addEventListener("click", () => {
+                    finish(choices[parseInt(b.dataset.i, 10)].value);
+                });
+            });
+        },
+    });
+}
+
 // ===== Label editing =====
 async function editExporterLabel(ip, current) {
+    const v = await appPrompt(
+        `Label for ${ip}`,
+        "Display name shown in the sidebar. Leave blank to clear.",
+        current || "");
+    if (v == null) return;
     state.paused = true;
     try {
-        const v = window.prompt(
-            `Display label for exporter ${ip}\n(blank to clear)`,
-            current || "");
-        if (v == null) return;  // cancelled
         await apiSend(`/api/exporters/${encodeURIComponent(ip)}/label`,
                       "PUT", { label: v });
     } catch (e) {
-        alert("Failed to save label: " + e.message);
+        await appAlert("Save failed", "Failed to save label: " + e.message);
     } finally {
         state.paused = false;
         refreshAll();
@@ -1013,16 +1228,17 @@ async function editExporterLabel(ip, current) {
 }
 
 async function editInterfaceLabel(exporter, ifindex, current) {
+    const v = await appPrompt(
+        `Label for ${exporter} if${ifindex}`,
+        "Display name shown in the Interfaces tab. Leave blank to clear.",
+        current || "");
+    if (v == null) return;
     state.paused = true;
     try {
-        const v = window.prompt(
-            `Display label for ${exporter} if${ifindex}\n(blank to clear)`,
-            current || "");
-        if (v == null) return;
         await apiSend(`/api/interfaces/${encodeURIComponent(exporter)}/${ifindex}/label`,
                       "PUT", { label: v });
     } catch (e) {
-        alert("Failed to save label: " + e.message);
+        await appAlert("Save failed", "Failed to save label: " + e.message);
     } finally {
         state.paused = false;
         refreshAll();
@@ -1108,13 +1324,22 @@ function renderSidebar() {
     // port codes (#empty-nf-port / #empty-sf-port) keep getting populated.
     if (!state.devices.length && !state.folders.length) return;
 
+    // Folders sorted by name (case-insensitive); devices sorted by display
+    // name. Sort copies, never the originals — saveFolders is responsible
+    // for persisted shape and shouldn't depend on render order.
+    const cmp = (a, b) => a.localeCompare(b, undefined, { sensitivity: "base" });
+    const sortedFolders = state.folders.slice().sort((a, b) => cmp(a.name, b.name));
+    const sortedDevices = state.devices.slice().sort((a, b) =>
+        cmp(exporterDisplayName(a), exporterDisplayName(b))
+    );
+
     // ip → folderId lookup; devices not present here render in the root list.
     const ipToFolder = {};
-    state.folders.forEach(f => f.deviceIps.forEach(ip => { ipToFolder[ip] = f.id; }));
+    sortedFolders.forEach(f => f.deviceIps.forEach(ip => { ipToFolder[ip] = f.id; }));
 
     let html = "";
-    state.folders.forEach(f => {
-        const members = state.devices.filter(d => ipToFolder[d.exporter] === f.id);
+    sortedFolders.forEach(f => {
+        const members = sortedDevices.filter(d => ipToFolder[d.exporter] === f.id);
         const expanded = !f.collapsed;
         html += `
         <div class="folder" data-folder="${escapeHtml(f.id)}">
@@ -1133,7 +1358,7 @@ function renderSidebar() {
         </div>`;
     });
     // Root list: devices not assigned to any folder.
-    const ungrouped = state.devices.filter(d => !ipToFolder[d.exporter]);
+    const ungrouped = sortedDevices.filter(d => !ipToFolder[d.exporter]);
     html += ungrouped.map(deviceRowHtml).join("");
     list.innerHTML = html;
 
@@ -1159,16 +1384,14 @@ function renderSidebar() {
             // Clear interface filter when changing exporter so we don't end
             // up filtering by an ifindex that belongs to a different exporter.
             state.ifindexFilter = null;
-            // Drop view-scoped data so we don't paint the wrong scope while
-            // the next fetch is in flight.
-            state.flows = [];
-            state.timeseries = null;
-            state.topTalkers = [];
-            state.topPorts   = [];
-            state.protocols  = [];
-            state.interfaces = [];
-            render();      // immediate: highlight, chips, scope label
-            refreshAll();  // background: real data
+            // Optimistic sidebar highlight via direct DOM. Existing panels
+            // stay visible (with old scope) until refreshAll returns new
+            // data and fires its own render — no flicker, no blank chart.
+            list.querySelectorAll(".device-row").forEach(x => {
+                x.classList.toggle("active",
+                    x.dataset.exporter === state.selectedExporter);
+            });
+            refreshAll();
         });
     });
 
@@ -1197,42 +1420,37 @@ function renderSidebar() {
 function newFolderId() {
     return "f" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 }
-function addFolder() {
-    state.paused = true;
-    try {
-        const name = window.prompt("New folder name (e.g. Troy, MI):", "");
-        if (name == null) return;
-        const t = name.trim();
-        if (!t) return;
-        state.folders.push({ id: newFolderId(), name: t, collapsed: false, deviceIps: [] });
-        saveFolders();
-        renderSidebar();
-    } finally { state.paused = false; }
+async function addFolder() {
+    const name = await appPrompt("New folder", "Folder name (e.g. Troy, MI):", "");
+    if (name == null) return;
+    const t = name.trim();
+    if (!t) return;
+    state.folders.push({ id: newFolderId(), name: t, collapsed: false, deviceIps: [] });
+    saveFolders();
+    renderSidebar();
 }
-function renameFolder(id) {
+async function renameFolder(id) {
     const f = state.folders.find(x => x.id === id);
     if (!f) return;
-    state.paused = true;
-    try {
-        const v = window.prompt("Rename folder:", f.name);
-        if (v == null) return;
-        const t = v.trim();
-        if (!t) return;
-        f.name = t;
-        saveFolders();
-        renderSidebar();
-    } finally { state.paused = false; }
+    const v = await appPrompt(`Rename folder "${f.name}"`, "New name:", f.name);
+    if (v == null) return;
+    const t = v.trim();
+    if (!t) return;
+    f.name = t;
+    saveFolders();
+    renderSidebar();
 }
-function deleteFolder(id) {
+async function deleteFolder(id) {
     const f = state.folders.find(x => x.id === id);
     if (!f) return;
-    state.paused = true;
-    try {
-        if (!window.confirm(`Delete folder "${f.name}"? Its devices will return to the root list.`)) return;
-        state.folders = state.folders.filter(x => x.id !== id);
-        saveFolders();
-        renderSidebar();
-    } finally { state.paused = false; }
+    const ok = await appConfirm(
+        `Delete folder "${f.name}"?`,
+        "Its devices will return to the root list.",
+        true);
+    if (!ok) return;
+    state.folders = state.folders.filter(x => x.id !== id);
+    saveFolders();
+    renderSidebar();
 }
 function toggleFolder(id) {
     const f = state.folders.find(x => x.id === id);
@@ -1241,37 +1459,36 @@ function toggleFolder(id) {
     saveFolders();
     renderSidebar();
 }
-function moveDeviceToFolder(ip) {
-    state.paused = true;
-    try {
-        const lines = ["Move " + ip + " to:", "", "0 — Root (no folder)"];
-        state.folders.forEach((f, i) => lines.push((i + 1) + " — " + f.name));
-        lines.push("", "Enter a number above, or type a new folder name to create + assign:");
-        const ans = window.prompt(lines.join("\n"), "0");
-        if (ans == null) return;
-        const trimmed = ans.trim();
-        if (!trimmed) return;
-        // Resolve the destination *before* mutating, so an invalid number doesn't
-        // silently un-assign the device when we bail out after the alert.
-        let dest;
-        if (/^\d+$/.test(trimmed)) {
-            const num = parseInt(trimmed, 10);
-            if (num === 0) dest = { kind: "root" };
-            else if (num >= 1 && num <= state.folders.length)
-                dest = { kind: "existing", folder: state.folders[num - 1] };
-            else { alert("No folder numbered " + num + "."); return; }
-        } else {
-            dest = { kind: "new", name: trimmed };
-        }
-        // Remove from any existing folder, then apply destination.
-        state.folders.forEach(f => { f.deviceIps = f.deviceIps.filter(x => x !== ip); });
-        if (dest.kind === "existing") dest.folder.deviceIps.push(ip);
-        else if (dest.kind === "new") state.folders.push({
-            id: newFolderId(), name: dest.name, collapsed: false, deviceIps: [ip],
-        });
-        saveFolders();
-        renderSidebar();
-    } finally { state.paused = false; }
+async function moveDeviceToFolder(ip) {
+    // Build the choice list: Root first, then existing folders alphabetically,
+    // then "+ New folder…" at the bottom.
+    const sortedFolders = state.folders.slice().sort((a, b) =>
+        a.name.localeCompare(b.name, undefined, { sensitivity: "base" })
+    );
+    const choices = [
+        { label: "Root (no folder)", value: { kind: "root" }, muted: true },
+        ...sortedFolders.map(f => ({
+            label: f.name,
+            value: { kind: "existing", folder: f },
+        })),
+        { label: "+ New folder…", value: { kind: "new" } },
+    ];
+    let dest = await appChoice(`Move ${ip}`, "Choose a destination:", choices);
+    if (dest == null) return;
+    if (dest.kind === "new") {
+        const name = await appPrompt("New folder", "Folder name:", "");
+        if (name == null) return;
+        const t = name.trim();
+        if (!t) return;
+        dest = { kind: "newWithName", name: t };
+    }
+    state.folders.forEach(f => { f.deviceIps = f.deviceIps.filter(x => x !== ip); });
+    if (dest.kind === "existing") dest.folder.deviceIps.push(ip);
+    else if (dest.kind === "newWithName") state.folders.push({
+        id: newFolderId(), name: dest.name, collapsed: false, deviceIps: [ip],
+    });
+    saveFolders();
+    renderSidebar();
 }
 
 document.getElementById("add-folder").addEventListener("click", addFolder);
@@ -1279,13 +1496,9 @@ document.getElementById("add-folder").addEventListener("click", addFolder);
 document.getElementById("clear-filter").addEventListener("click", () => {
     state.selectedExporter = null;
     state.ifindexFilter = null;
-    state.flows = [];
-    state.timeseries = null;
-    state.topTalkers = [];
-    state.topPorts   = [];
-    state.protocols  = [];
-    state.interfaces = [];
-    render();
+    document.querySelectorAll("#device-list .device-row").forEach(x => {
+        x.classList.remove("active");
+    });
     refreshAll();
 });
 
@@ -1317,11 +1530,13 @@ function wireOverviewControls() {
             if (!ALLOWED_RANGE_SECONDS.includes(s)) return;
             state.timeseriesSeconds = s;
             localStorage.setItem(RANGE_KEY, String(s));
-            // Drop stale chart data so the user doesn't see old pixels under
-            // the new title/buttons until the fetch lands.
-            state.timeseries = null;
-            renderTab();           // immediate: active button + cleared chart
-            refreshAll();           // background: real data
+            // Optimistic: flip the active class via direct DOM so the user
+            // gets instant feedback. Don't re-render or clear state — the
+            // existing chart stays visible until refreshAll lands new data.
+            document.querySelectorAll(".range-switch button").forEach(x => {
+                x.classList.toggle("active", x === b);
+            });
+            refreshAll();
         });
     });
 }
@@ -1582,13 +1797,14 @@ function wireInterfaceTable() {
             state.selectedExporter = exp;
             state.ifindexFilter = idx;
             state.activeTab = "flows";
-            // Clear so we don't briefly show the un-filtered flow list.
-            state.flows = [];
             document.querySelectorAll(".tab").forEach(t => {
                 t.classList.toggle("active", t.dataset.tab === "flows");
             });
-            render();      // immediate: tab swap, sidebar selection, chips
-            refreshAll();  // background: filtered flow data
+            document.querySelectorAll("#device-list .device-row").forEach(x => {
+                x.classList.toggle("active", x.dataset.exporter === exp);
+            });
+            renderTab();   // tab swap; flows table gets repopulated by refresh
+            refreshAll();
         });
     });
     // Pencil = edit label
@@ -1677,10 +1893,17 @@ function wireFlowsControls() {
         el.addEventListener("click", (ev) => {
             ev.stopPropagation();
             const w = el.dataset.clear;
-            if (w === "exporter") state.selectedExporter = null;
-            if (w === "ifindex")  state.ifindexFilter   = null;
-            state.flows = [];
-            render();
+            if (w === "exporter") {
+                state.selectedExporter = null;
+                document.querySelectorAll("#device-list .device-row").forEach(x => {
+                    x.classList.remove("active");
+                });
+            }
+            if (w === "ifindex") state.ifindexFilter = null;
+            // Re-render the flows tab so the chip disappears immediately.
+            // Don't clear state.flows — it'd flash the table empty before
+            // the broader fetch lands.
+            renderTab();
             refreshAll();
         });
     });
