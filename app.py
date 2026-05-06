@@ -23,7 +23,7 @@ from collections import defaultdict, deque
 from datetime import datetime, timezone
 from ipaddress import ip_address
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, request, send_from_directory, make_response
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -644,7 +644,15 @@ app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
 
 @app.route("/")
 def index():
-    return send_from_directory("web", "index.html")
+    # Belt-and-suspenders no-cache. Flask's SEND_FILE_MAX_AGE_DEFAULT=0
+    # (set above) just means max-age=0; this also prevents disk caching
+    # and forces revalidation, so a deploy is reflected on the next load
+    # without users having to remember to hard-refresh.
+    resp = make_response(send_from_directory("web", "index.html"))
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    resp.headers["Pragma"]  = "no-cache"
+    resp.headers["Expires"] = "0"
+    return resp
 
 
 @app.route("/api/summary")
