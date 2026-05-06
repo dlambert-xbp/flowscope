@@ -23,7 +23,9 @@ docker compose up --build
 
 There are no tests, no linter config, and no build step — `app.py` and `web/index.html` are run as-is.
 
-Environment variable overrides (also honored inside the Docker image): `FLOWSCOPE_NETFLOW_PORT`, `FLOWSCOPE_SFLOW_PORT`, `FLOWSCOPE_WEB_PORT`, `FLOWSCOPE_WEB_HOST`, `FLOWSCOPE_DB_PATH`.
+Environment variable overrides (also honored inside the Docker image): `FLOWSCOPE_NETFLOW_PORT`, `FLOWSCOPE_SFLOW_PORT`, `FLOWSCOPE_WEB_PORT`, `FLOWSCOPE_WEB_HOST`, `FLOWSCOPE_DB_PATH`, `FLOWSCOPE_AUTH_TOKEN`.
+
+`FLOWSCOPE_AUTH_TOKEN` (optional): when set, every `/api/*` request must include `X-Auth-Token: <value>`. Unset = no auth (current behavior). The static dashboard shell is not gated; the browser prompts for the token on first 401 and caches it in `sessionStorage`. Token comparison is constant-time. Does not provide TLS — terminate TLS at a reverse proxy.
 
 ## Architecture
 
@@ -79,3 +81,7 @@ Endpoints listed in the README (`/api/summary`, `/api/devices`, `/api/interfaces
 - **No auth on the web/API.** The README states this explicitly — don't add features that assume the dashboard is private; keep it suitable for a management network behind a reverse proxy.
 - **Single-file philosophy.** Don't split `app.py` into a package or pull in heavy deps. The only runtime dependency is Flask. SNMP polling for human interface names is intentionally out of scope (README "Limitations" section).
 - **In-memory ring is 5000 flows.** Anything that needs more history must query SQLite, not `recent_flows`.
+
+## Working agreement
+
+- **99% confidence rule.** Before making any change, you must be ≥99% confident the change is correct and complete. If you are not, stop and either ask clarifying questions, or write down the specific reasons it may not work (unknown protocol field layouts, untested concurrency interactions, ambiguous user intent, missing dependency, untested platform behavior, etc.) so the user can decide whether to proceed. This applies to code edits, config changes, and dependency additions. A confident plan with explicit caveats is preferred over a guess that compiles.

@@ -12,6 +12,7 @@ counters. SQLite is used for longer-term persistence (last N hours).
 """
 
 import argparse
+import hmac
 import json
 import os
 import socket
@@ -25,6 +26,8 @@ from ipaddress import ip_address
 
 from flask import Flask, jsonify, request, send_from_directory, make_response
 
+import snmp_mock
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -34,6 +37,13 @@ SFLOW_PORT   = int(os.environ.get("FLOWSCOPE_SFLOW_PORT",   6343))
 WEB_PORT     = int(os.environ.get("FLOWSCOPE_WEB_PORT",     8080))
 WEB_HOST     = os.environ.get("FLOWSCOPE_WEB_HOST", "0.0.0.0")
 DB_PATH      = os.environ.get("FLOWSCOPE_DB_PATH", "flowscope.db")
+
+# Optional bearer-token auth for the /api/* surface.
+# Unset (empty) → no auth, current behavior preserved.
+# Set         → every /api/* request must carry  X-Auth-Token: <value>.
+# The static dashboard is NOT gated; the browser fetches it, gets 401 on the
+# first API call, prompts for the token, stores it in sessionStorage, retries.
+AUTH_TOKEN = os.environ.get("FLOWSCOPE_AUTH_TOKEN", "")
 
 # How many recent flow records to keep in memory for the live feed
 RING_SIZE = 5000
@@ -56,6 +66,7 @@ interface_stats = defaultdict(lambda: {
     "egress_packets":  0,
     "last_seen":       0,
     "name":            None,    # filled if SNMP/sFlow tells us
+    "alias":           None,    # filled by SNMP poller (ifAlias)
     "speed_bps":       None,
 })
 
@@ -642,6 +653,34 @@ app = Flask(__name__, static_folder="web", static_url_path="")
 app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
 
 
+@app.before_request
+def _require_auth():
+    """Gate /api/* behind FLOWSCOPE_AUTH_TOKEN when set.
+
+    Static assets (the dashboard shell) stay public so the browser can load
+    its login UI before it has a token. CORS preflights (OPTIONS) pass
+    through; we don't expose a CORS surface anyway, but it costs nothing
+    to be polite to browsers."""
+    if not AUTH_TOKEN:
+        return None
+    if request.method == "OPTIONS":
+        return None
+    if not request.path.startswith("/api/"):
+        return None
+    sent = request.headers.get("X-Auth-Token", "")
+    if not sent or not hmac.compare_digest(sent, AUTH_TOKEN):
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    return None
+
+
+@app.route("/api/auth/check")
+def api_auth_check():
+    """Lightweight endpoint the frontend hits to validate a token without
+    triggering side effects. Returns 200 if the token is good (or auth is
+    disabled), 401 otherwise — handled by _require_auth above."""
+    return jsonify({"ok": True, "auth_required": bool(AUTH_TOKEN)})
+
+
 @app.route("/")
 def index():
     # Belt-and-suspenders no-cache. Flask's SEND_FILE_MAX_AGE_DEFAULT=0
@@ -705,6 +744,7 @@ def api_interfaces():
                 "exporter":        exp,
                 "ifindex":         ifidx,
                 "name":            s["name"] or f"if{ifidx}",
+                "alias":           s.get("alias") or "",
                 "label":           interface_labels.get((exp, ifidx), ""),
                 "speed_bps":       s["speed_bps"],
                 "ingress_bytes":   s["ingress_bytes"],
@@ -856,6 +896,13 @@ def api_protocols():
     return jsonify(rows)
 
 
+@app.route("/api/snmp/status")
+def api_snmp_status():
+    """Report SNMP poller state. Currently always reports mock=true; the
+    field exists so the frontend can warn that names/speeds are synthetic."""
+    return jsonify(snmp_mock.poller_status())
+
+
 @app.route("/api/timeseries")
 def api_timeseries():
     """Bucketed bytes/sec for the last N seconds.
@@ -949,6 +996,7 @@ def main():
     threading.Thread(target=sflow_listener,   daemon=True).start()
     threading.Thread(target=db_prune_loop,    daemon=True).start()
     threading.Thread(target=rdns_loop,        daemon=True).start()
+    snmp_mock.start_snmp_poller(devices, interface_stats, state_lock)
 
     print(f"[web]    http://0.0.0.0:{WEB_PORT}")
     app.run(host=WEB_HOST, port=WEB_PORT, threaded=True, use_reloader=False)

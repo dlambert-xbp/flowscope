@@ -907,13 +907,61 @@ function escapeHtml(s) {
 }
 
 // ===== API =====
+// Bearer token: when the server sets FLOWSCOPE_AUTH_TOKEN, the first /api/*
+// call returns 401; we prompt once, cache the token in sessionStorage, retry.
+// All subsequent calls (including concurrent ones in flight) share the same
+// token via tokenPromise so the user only ever sees one prompt at a time.
+const AUTH_TOKEN_KEY = "flowscope:authToken";
+let _tokenPromise = null;
+function getToken()    { return sessionStorage.getItem(AUTH_TOKEN_KEY) || ""; }
+function setToken(t)   {
+    if (t) sessionStorage.setItem(AUTH_TOKEN_KEY, t);
+    else   sessionStorage.removeItem(AUTH_TOKEN_KEY);
+}
+function promptForToken(reason) {
+    if (_tokenPromise) return _tokenPromise;
+    _tokenPromise = new Promise(resolve => {
+        // setTimeout 0 so the prompt isn't fired from inside a fetch()
+        // microtask — some browsers throttle prompts in that context.
+        setTimeout(() => {
+            const msg = (reason === "bad")
+                ? "Authentication failed. Re-enter the FlowScope auth token:"
+                : "Authentication required.\nEnter the FlowScope auth token:";
+            const t = window.prompt(msg, "");
+            if (t != null) setToken(t.trim());
+            _tokenPromise = null;
+            resolve(getToken());
+        }, 0);
+    });
+    return _tokenPromise;
+}
+async function authedFetch(path, init) {
+    init = init || {};
+    const headers = Object.assign({}, init.headers || {});
+    const tok = getToken();
+    if (tok) headers["X-Auth-Token"] = tok;
+    let r = await fetch(path, Object.assign({}, init, { headers }));
+    if (r.status !== 401) return r;
+    // First 401: prompt once, retry once. If we still 401, give up and
+    // clear the bad token so the next call re-prompts cleanly.
+    await promptForToken(tok ? "bad" : "first");
+    const tok2 = getToken();
+    if (!tok2) throw new Error(`${path}: 401 (no token)`);
+    headers["X-Auth-Token"] = tok2;
+    r = await fetch(path, Object.assign({}, init, { headers }));
+    if (r.status === 401) {
+        setToken("");
+        throw new Error(`${path}: 401 (bad token)`);
+    }
+    return r;
+}
 async function api(path) {
-    const r = await fetch(path);
+    const r = await authedFetch(path);
     if (!r.ok) throw new Error(`${path}: ${r.status}`);
     return await r.json();
 }
 async function apiSend(path, method, body) {
-    const r = await fetch(path, {
+    const r = await authedFetch(path, {
         method,
         headers: { "Content-Type": "application/json" },
         body: body ? JSON.stringify(body) : undefined,
