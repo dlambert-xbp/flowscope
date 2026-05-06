@@ -2836,6 +2836,24 @@ window.matchMedia("(prefers-color-scheme: light)").addEventListener("change", ()
 });
 applyTheme(getThemePref());
 
+// Pause auto-refresh while any SNMP form has focus. Without this, the 3-second
+// refresh re-renders the tab content mid-keystroke and the user's input gets
+// blown away. Mirrors the state.paused pattern used by modals + label edits.
+// Delegated at document level so re-renders never leave a stale listener
+// attached to a destroyed element.
+document.addEventListener("focusin", (ev) => {
+    if (ev.target && ev.target.closest && ev.target.closest(".snmp-form")) {
+        state.paused = true;
+    }
+});
+document.addEventListener("focusout", (ev) => {
+    if (!ev.target || !ev.target.closest || !ev.target.closest(".snmp-form")) return;
+    // Don't unpause if focus is moving to another control inside the same form.
+    const next = ev.relatedTarget;
+    if (next && next.closest && next.closest(".snmp-form")) return;
+    state.paused = false;
+});
+
 // ===== Boot =====
 bootstrapFolders();
 refreshAll();
