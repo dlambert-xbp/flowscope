@@ -506,6 +506,79 @@ th.sort-active   { color: var(--accent); }
 footer .live-ok    { color: var(--accent); }
 footer .live-stale { color: var(--danger); }
 
+/* Folder system (sidebar grouping) */
+.folder { border-bottom: 1px solid var(--line); }
+.folder-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 20px;
+    background: var(--bg-2);
+    cursor: pointer;
+    user-select: none;
+    font-family: "Space Grotesk", sans-serif;
+    font-size: 11px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+}
+.folder-header:hover { background: var(--bg-3); }
+.folder-header .chev {
+    color: var(--text-faint);
+    width: 10px;
+    text-align: center;
+    font-size: 10px;
+}
+.folder-header .name {
+    flex: 1;
+    color: var(--text);
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.folder-header .count {
+    color: var(--text-faint);
+    font-size: 10px;
+    font-weight: 400;
+    padding: 0 4px;
+}
+.folder-header .ico {
+    color: var(--text-faint);
+    cursor: pointer;
+    padding: 0 4px;
+    font-size: 11px;
+    line-height: 1;
+}
+.folder-header .ico:hover     { color: var(--accent); }
+.folder-header .ico.del:hover { color: var(--danger); }
+
+.folder-children .device-row { padding-left: 32px; }
+.folder-empty {
+    padding: 8px 32px;
+    font-size: 10px;
+    color: var(--text-faint);
+    font-style: italic;
+}
+
+.add-folder-btn {
+    display: block;
+    background: transparent;
+    border: 1px dashed var(--line-bright);
+    color: var(--text-dim);
+    width: calc(100% - 40px);
+    margin: 12px 20px 4px;
+    padding: 6px 8px;
+    font-family: inherit;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    cursor: pointer;
+    transition: color 100ms, border-color 100ms;
+}
+.add-folder-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+.device-row .actions.move { margin-right: 2px; }
+
 /* Time-range selector (Overview timeseries panel head) */
 .range-switch {
     margin-left: auto;
@@ -589,6 +662,7 @@ footer .live-stale { color: var(--danger); }
                     sFlow   → UDP <code id="empty-sf-port">6343</code>
                 </div>
             </div>
+            <button id="add-folder" class="add-folder-btn" title="Create a new folder to group devices">+ Add Folder</button>
 
             <h3>Filter</h3>
             <div style="padding:0 20px">
@@ -646,6 +720,22 @@ const ALLOWED_RANGE_SECONDS = RANGE_OPTIONS.map(r => r.seconds);
 const savedRange = parseInt(localStorage.getItem(RANGE_KEY) || "0", 10);
 const initialRange = ALLOWED_RANGE_SECONDS.includes(savedRange) ? savedRange : 180;
 
+// Folders: client-side device grouping, persisted in localStorage. Backend
+// has no concept of folders — devices may be assigned to at most one folder
+// by exporter IP; everything else renders in the unfoldered "root" list.
+const FOLDERS_KEY = "flowscope:folders";
+function loadFolders() {
+    try {
+        const raw = localStorage.getItem(FOLDERS_KEY);
+        if (!raw) return [];
+        const arr = JSON.parse(raw);
+        return Array.isArray(arr) ? arr : [];
+    } catch (e) { return []; }
+}
+function saveFolders() {
+    localStorage.setItem(FOLDERS_KEY, JSON.stringify(state.folders));
+}
+
 const state = {
     activeTab: "overview",
     selectedExporter: null,
@@ -659,6 +749,7 @@ const state = {
     topTalkers: [],
     topPorts: [],
     protocols: [],
+    folders: loadFolders(),     // [{ id, name, collapsed, deviceIps: [] }]
     tableState: {},             // per-table { sort, dir, filter }
     paused: false,              // refresh paused (e.g. while a label is being edited)
     lastUpdate: null,           // ms timestamp of last successful refresh
@@ -989,36 +1080,78 @@ function renderFooter() {
         new Date().toISOString().replace("T"," ").slice(0,19) + " UTC";
 }
 
+function deviceRowHtml(d) {
+    const display = exporterDisplayName(d);
+    const showIp = display !== d.exporter;
+    return `
+    <div class="device-row ${state.selectedExporter === d.exporter ? "active" : ""}"
+         data-exporter="${escapeHtml(d.exporter)}">
+        <div class="ip">
+            <span class="actions move" data-move-exporter="${escapeHtml(d.exporter)}"
+                  title="Move to folder">⤴</span>
+            <span class="actions" data-edit-exporter="${escapeHtml(d.exporter)}"
+                  data-current="${escapeHtml(d.label || "")}"
+                  title="Edit label">✎</span>
+            <span class="label-text">${escapeHtml(display)}</span>
+            ${showIp ? `<span class="ip-text">${escapeHtml(d.exporter)}</span>` : ""}
+        </div>
+        <div class="meta">
+            <span class="badge ${d.type}">${d.type}</span>
+            ${d.interface_count} ifs · ${numHuman(d.flow_count)} flows · ${timeAgo(d.last_seen)}
+        </div>
+    </div>`;
+}
+
 function renderSidebar() {
     const list = document.getElementById("device-list");
-    if (!state.devices.length) return;
-    list.innerHTML = state.devices.map(d => {
-        const display = exporterDisplayName(d);
-        const showIp = display !== d.exporter;
-        return `
-        <div class="device-row ${state.selectedExporter === d.exporter ? "active" : ""}"
-             data-exporter="${escapeHtml(d.exporter)}">
-            <div class="ip">
-                <span class="actions" data-edit-exporter="${escapeHtml(d.exporter)}"
-                      data-current="${escapeHtml(d.label || "")}"
-                      title="Edit label">✎</span>
-                <span class="label-text">${escapeHtml(display)}</span>
-                ${showIp ? `<span class="ip-text">${escapeHtml(d.exporter)}</span>` : ""}
+    // No devices and no folders: leave the static empty-state in place so the
+    // port codes (#empty-nf-port / #empty-sf-port) keep getting populated.
+    if (!state.devices.length && !state.folders.length) return;
+
+    // ip → folderId lookup; devices not present here render in the root list.
+    const ipToFolder = {};
+    state.folders.forEach(f => f.deviceIps.forEach(ip => { ipToFolder[ip] = f.id; }));
+
+    let html = "";
+    state.folders.forEach(f => {
+        const members = state.devices.filter(d => ipToFolder[d.exporter] === f.id);
+        const expanded = !f.collapsed;
+        html += `
+        <div class="folder" data-folder="${escapeHtml(f.id)}">
+            <div class="folder-header" data-toggle="${escapeHtml(f.id)}">
+                <span class="chev">${expanded ? "▾" : "▸"}</span>
+                <span class="name">${escapeHtml(f.name)}</span>
+                <span class="count">${members.length}</span>
+                <span class="ico"     data-rename="${escapeHtml(f.id)}" title="Rename folder">✎</span>
+                <span class="ico del" data-delete="${escapeHtml(f.id)}" title="Delete folder">×</span>
             </div>
-            <div class="meta">
-                <span class="badge ${d.type}">${d.type}</span>
-                ${d.interface_count} ifs · ${numHuman(d.flow_count)} flows · ${timeAgo(d.last_seen)}
-            </div>
+            ${expanded ? `<div class="folder-children">${
+                members.length
+                    ? members.map(deviceRowHtml).join("")
+                    : `<div class="folder-empty">empty — use ⤴ on a device</div>`
+            }</div>` : ""}
         </div>`;
-    }).join("");
+    });
+    // Root list: devices not assigned to any folder.
+    const ungrouped = state.devices.filter(d => !ipToFolder[d.exporter]);
+    html += ungrouped.map(deviceRowHtml).join("");
+    list.innerHTML = html;
+
+    // Device row clicks (delegated from row; sub-icons stop propagation).
     list.querySelectorAll(".device-row").forEach(r => {
         r.addEventListener("click", (ev) => {
-            // Don't change selection when clicking the edit pencil.
-            if (ev.target && ev.target.dataset && ev.target.dataset.editExporter) {
-                ev.stopPropagation();
-                editExporterLabel(ev.target.dataset.editExporter,
-                                  ev.target.dataset.current);
-                return;
+            const t = ev.target;
+            if (t && t.dataset) {
+                if (t.dataset.editExporter) {
+                    ev.stopPropagation();
+                    editExporterLabel(t.dataset.editExporter, t.dataset.current);
+                    return;
+                }
+                if (t.dataset.moveExporter) {
+                    ev.stopPropagation();
+                    moveDeviceToFolder(t.dataset.moveExporter);
+                    return;
+                }
             }
             const exp = r.dataset.exporter;
             const wasSelected = state.selectedExporter === exp;
@@ -1038,7 +1171,110 @@ function renderSidebar() {
             refreshAll();  // background: real data
         });
     });
+
+    // Folder header clicks: rename, delete, or toggle (default).
+    list.querySelectorAll(".folder-header").forEach(h => {
+        h.addEventListener("click", (ev) => {
+            const t = ev.target;
+            if (t && t.dataset) {
+                if (t.dataset.rename) {
+                    ev.stopPropagation();
+                    renameFolder(t.dataset.rename);
+                    return;
+                }
+                if (t.dataset.delete) {
+                    ev.stopPropagation();
+                    deleteFolder(t.dataset.delete);
+                    return;
+                }
+            }
+            toggleFolder(h.dataset.toggle);
+        });
+    });
 }
+
+// ===== Folder operations =====
+function newFolderId() {
+    return "f" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+}
+function addFolder() {
+    state.paused = true;
+    try {
+        const name = window.prompt("New folder name (e.g. Troy, MI):", "");
+        if (name == null) return;
+        const t = name.trim();
+        if (!t) return;
+        state.folders.push({ id: newFolderId(), name: t, collapsed: false, deviceIps: [] });
+        saveFolders();
+        renderSidebar();
+    } finally { state.paused = false; }
+}
+function renameFolder(id) {
+    const f = state.folders.find(x => x.id === id);
+    if (!f) return;
+    state.paused = true;
+    try {
+        const v = window.prompt("Rename folder:", f.name);
+        if (v == null) return;
+        const t = v.trim();
+        if (!t) return;
+        f.name = t;
+        saveFolders();
+        renderSidebar();
+    } finally { state.paused = false; }
+}
+function deleteFolder(id) {
+    const f = state.folders.find(x => x.id === id);
+    if (!f) return;
+    state.paused = true;
+    try {
+        if (!window.confirm(`Delete folder "${f.name}"? Its devices will return to the root list.`)) return;
+        state.folders = state.folders.filter(x => x.id !== id);
+        saveFolders();
+        renderSidebar();
+    } finally { state.paused = false; }
+}
+function toggleFolder(id) {
+    const f = state.folders.find(x => x.id === id);
+    if (!f) return;
+    f.collapsed = !f.collapsed;
+    saveFolders();
+    renderSidebar();
+}
+function moveDeviceToFolder(ip) {
+    state.paused = true;
+    try {
+        const lines = ["Move " + ip + " to:", "", "0 — Root (no folder)"];
+        state.folders.forEach((f, i) => lines.push((i + 1) + " — " + f.name));
+        lines.push("", "Enter a number above, or type a new folder name to create + assign:");
+        const ans = window.prompt(lines.join("\n"), "0");
+        if (ans == null) return;
+        const trimmed = ans.trim();
+        if (!trimmed) return;
+        // Resolve the destination *before* mutating, so an invalid number doesn't
+        // silently un-assign the device when we bail out after the alert.
+        let dest;
+        if (/^\d+$/.test(trimmed)) {
+            const num = parseInt(trimmed, 10);
+            if (num === 0) dest = { kind: "root" };
+            else if (num >= 1 && num <= state.folders.length)
+                dest = { kind: "existing", folder: state.folders[num - 1] };
+            else { alert("No folder numbered " + num + "."); return; }
+        } else {
+            dest = { kind: "new", name: trimmed };
+        }
+        // Remove from any existing folder, then apply destination.
+        state.folders.forEach(f => { f.deviceIps = f.deviceIps.filter(x => x !== ip); });
+        if (dest.kind === "existing") dest.folder.deviceIps.push(ip);
+        else if (dest.kind === "new") state.folders.push({
+            id: newFolderId(), name: dest.name, collapsed: false, deviceIps: [ip],
+        });
+        saveFolders();
+        renderSidebar();
+    } finally { state.paused = false; }
+}
+
+document.getElementById("add-folder").addEventListener("click", addFolder);
 
 document.getElementById("clear-filter").addEventListener("click", () => {
     state.selectedExporter = null;
