@@ -377,6 +377,97 @@ td.egress  { color: var(--accent-2); }
     animation: blink 1s steps(2) infinite;
 }
 @keyframes blink { 50% { opacity: 0; } }
+
+/* Sortable / filterable table controls */
+.table-controls {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--line);
+    background: var(--bg-2);
+}
+.table-controls input.table-filter {
+    flex: 1;
+    background: var(--bg-0);
+    border: 1px solid var(--line);
+    color: var(--text);
+    font-family: inherit;
+    font-size: 11px;
+    padding: 5px 8px;
+    outline: none;
+}
+.table-controls input.table-filter:focus { border-color: var(--accent); }
+.table-controls .table-meta {
+    font-size: 10px;
+    color: var(--text-faint);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    white-space: nowrap;
+}
+
+th.sortable {
+    cursor: pointer;
+    user-select: none;
+}
+th.sortable:hover { color: var(--text); }
+th.sort-active   { color: var(--accent); }
+
+/* Edit-label icon */
+.edit-ico {
+    display: inline-block;
+    margin-left: 6px;
+    color: var(--text-faint);
+    cursor: pointer;
+    font-size: 11px;
+    padding: 0 3px;
+    line-height: 1;
+}
+.edit-ico:hover { color: var(--accent); }
+
+/* Filter chip (active server-side filter, e.g. ifindex) */
+.filter-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: var(--bg-2);
+    border: 1px solid var(--accent);
+    color: var(--accent);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    padding: 3px 8px;
+    margin-right: 8px;
+}
+.filter-chip .x {
+    cursor: pointer;
+    color: var(--text-dim);
+    margin-left: 4px;
+}
+.filter-chip .x:hover { color: var(--danger); }
+
+.device-row .ip .label-text {
+    font-weight: 500;
+    color: var(--text);
+}
+.device-row .ip .ip-text {
+    color: var(--text-dim);
+    font-size: 10px;
+    margin-left: 6px;
+    font-weight: 400;
+}
+.device-row .actions {
+    float: right;
+    color: var(--text-faint);
+    cursor: pointer;
+    padding: 0 4px;
+    font-size: 11px;
+}
+.device-row .actions:hover { color: var(--accent); }
+
+/* Footer live indicator */
+footer .live-ok    { color: var(--accent); }
+footer .live-stale { color: var(--danger); }
 </style>
 </head>
 <body>
@@ -434,7 +525,8 @@ td.egress  { color: var(--accent-2); }
     <footer>
         <span><span class="ok">●</span> COLLECTOR ONLINE</span>
         <span id="foot-selected">VIEW: ALL DEVICES</span>
-        <span style="margin-left:auto" id="foot-time">—</span>
+        <span id="foot-status" class="live-ok" style="margin-left:auto">● LIVE</span>
+        <span id="foot-time">—</span>
     </footer>
 
 </div>
@@ -444,6 +536,7 @@ td.egress  { color: var(--accent-2); }
 const state = {
     activeTab: "overview",
     selectedExporter: null,
+    ifindexFilter: null,        // server-side ifindex filter for flows + timeseries
     summary: null,
     devices: [],
     interfaces: [],
@@ -452,6 +545,10 @@ const state = {
     topTalkers: [],
     topPorts: [],
     protocols: [],
+    tableState: {},             // per-table { sort, dir, filter }
+    paused: false,              // refresh paused (e.g. while a label is being edited)
+    lastUpdate: null,           // ms timestamp of last successful refresh
+    lastError:  null,
 };
 
 // ===== Utilities =====
@@ -500,41 +597,236 @@ function escapeHtml(s) {
 
 // ===== API =====
 async function api(path) {
-    try {
-        const r = await fetch(path);
-        if (!r.ok) throw new Error(r.status);
-        return await r.json();
-    } catch (e) {
-        console.warn("api", path, e);
-        return null;
-    }
+    const r = await fetch(path);
+    if (!r.ok) throw new Error(`${path}: ${r.status}`);
+    return await r.json();
 }
-function exporterParam() {
-    return state.selectedExporter ? `?exporter=${encodeURIComponent(state.selectedExporter)}` : "";
+async function apiSend(path, method, body) {
+    const r = await fetch(path, {
+        method,
+        headers: { "Content-Type": "application/json" },
+        body: body ? JSON.stringify(body) : undefined,
+    });
+    if (!r.ok) throw new Error(`${path}: ${r.status}`);
+    return await r.json();
+}
+function buildParams(extra = {}) {
+    const p = new URLSearchParams();
+    if (state.selectedExporter) p.set("exporter", state.selectedExporter);
+    if (state.ifindexFilter != null) p.set("ifindex", state.ifindexFilter);
+    for (const [k, v] of Object.entries(extra)) p.set(k, v);
+    const s = p.toString();
+    return s ? "?" + s : "";
 }
 
 // ===== Polling =====
 async function refreshAll() {
-    const ep = exporterParam();
-    const [summary, devices, interfaces, flows, ts, talkers, ports, protocols] = await Promise.all([
+    if (state.paused) return;
+    // Interfaces and devices ignore ifindex; flows + timeseries honor it.
+    const exporterOnly = state.selectedExporter
+        ? `?exporter=${encodeURIComponent(state.selectedExporter)}`
+        : "";
+    const flowsParams = buildParams({ limit: 200 });
+    const tsParams    = buildParams({ seconds: 180 });
+    const settled = await Promise.allSettled([
         api("/api/summary"),
         api("/api/devices"),
-        api("/api/interfaces" + ep),
-        api("/api/flows/recent" + (ep ? ep + "&limit=100" : "?limit=100")),
-        api("/api/timeseries" + (ep ? ep + "&seconds=180" : "?seconds=180")),
-        api("/api/top/talkers" + (ep ? ep + "&limit=15" : "?limit=15")),
-        api("/api/top/ports"   + (ep ? ep + "&limit=10" : "?limit=10")),
-        api("/api/protocols"   + ep),
+        api("/api/interfaces" + exporterOnly),
+        api("/api/flows/recent" + flowsParams),
+        api("/api/timeseries"   + tsParams),
+        api("/api/top/talkers"  + (exporterOnly ? exporterOnly + "&limit=15" : "?limit=15")),
+        api("/api/top/ports"    + (exporterOnly ? exporterOnly + "&limit=10" : "?limit=10")),
+        api("/api/protocols"    + exporterOnly),
     ]);
-    if (summary)    state.summary    = summary;
-    if (devices)    state.devices    = devices;
-    if (interfaces) state.interfaces = interfaces;
-    if (flows)      state.flows      = flows;
-    if (ts)         state.timeseries = ts;
-    if (talkers)    state.topTalkers = talkers;
-    if (ports)      state.topPorts   = ports;
-    if (protocols)  state.protocols  = protocols;
-    render();
+    const slots = ["summary", "devices", "interfaces", "flows",
+                   "timeseries", "topTalkers", "topPorts", "protocols"];
+    let anyOk = false, anyErr = null;
+    settled.forEach((r, i) => {
+        if (r.status === "fulfilled" && r.value != null) {
+            state[slots[i]] = r.value;
+            anyOk = true;
+        } else if (r.status === "rejected") {
+            anyErr = r.reason;
+        }
+    });
+    if (anyOk) {
+        state.lastUpdate = Date.now();
+        state.lastError = null;
+    }
+    if (anyErr && !anyOk) {
+        state.lastError = String(anyErr);
+        console.warn("refresh failed:", anyErr);
+    }
+    preserveFocus(() => render());
+}
+
+// Save and restore focus / cursor on a focused .table-filter input across
+// re-renders. Without this, auto-refresh kicks the user out of the box mid-type.
+function preserveFocus(fn) {
+    const active = document.activeElement;
+    let restore = null;
+    if (active && active.classList && active.classList.contains("table-filter")) {
+        const wrap = active.closest(".table-wrap");
+        restore = {
+            id: wrap && wrap.dataset.table,
+            cursor: active.selectionStart,
+        };
+    }
+    fn();
+    if (restore && restore.id) {
+        const ni = document.querySelector(
+            `.table-wrap[data-table="${restore.id}"] .table-filter`);
+        if (ni) {
+            ni.focus();
+            try { ni.setSelectionRange(restore.cursor, restore.cursor); }
+            catch (e) { /* ignore */ }
+        }
+    }
+}
+
+// ===== Sortable / filterable table helper =====
+// Each column = { key, label, cls?, value?(row), render?(row), sortable? }
+// `value(row)` is used for both filter matching and sort comparison so callers
+// can sort a "Volume" cell by raw bytes while still rendering it formatted.
+function makeTable(id, columns, rows, opts = {}) {
+    if (!state.tableState[id]) {
+        state.tableState[id] = {
+            sort: opts.defaultSort || null,
+            dir:  opts.defaultDir  || -1,
+            filter: "",
+        };
+    }
+    const ts = state.tableState[id];
+    const f  = ts.filter.trim().toLowerCase();
+    let visible = rows;
+    if (f) {
+        visible = rows.filter(r => columns.some(c => {
+            const v = c.value ? c.value(r) : r[c.key];
+            return String(v == null ? "" : v).toLowerCase().includes(f);
+        }));
+    }
+    if (ts.sort) {
+        const col = columns.find(c => c.key === ts.sort);
+        if (col) {
+            visible = visible.slice().sort((a, b) => {
+                const av = col.value ? col.value(a) : a[col.key];
+                const bv = col.value ? col.value(b) : b[col.key];
+                const aN = (av == null), bN = (bv == null);
+                if (aN && bN) return 0;
+                if (aN) return 1;
+                if (bN) return -1;
+                if (typeof av === "number" && typeof bv === "number") {
+                    return (av - bv) * ts.dir;
+                }
+                return String(av).localeCompare(String(bv)) * ts.dir;
+            });
+        }
+    }
+    const arrow = key => ts.sort === key ? (ts.dir === 1 ? " ↑" : " ↓") : "";
+    return `
+        <div class="table-wrap" data-table="${escapeHtml(id)}">
+            <div class="table-controls">
+                <input class="table-filter" placeholder="filter…"
+                       value="${escapeHtml(ts.filter)}">
+                <span class="table-meta">${visible.length}${
+                    visible.length !== rows.length ? ` / ${rows.length}` : ""
+                } rows</span>
+            </div>
+            <table>
+                <thead><tr>
+                    ${columns.map(c => {
+                        const sortable = c.sortable !== false;
+                        const cls = [
+                            c.cls || "",
+                            sortable ? "sortable" : "",
+                            ts.sort === c.key ? "sort-active" : "",
+                        ].filter(Boolean).join(" ");
+                        return `<th class="${cls}"${sortable ? ` data-col="${escapeHtml(c.key)}"` : ""}>${
+                            escapeHtml(c.label)}${sortable ? arrow(c.key) : ""}</th>`;
+                    }).join("")}
+                </tr></thead>
+                <tbody>
+                    ${visible.length === 0
+                      ? `<tr><td colspan="${columns.length}"
+                              style="color:var(--text-faint);text-align:center;padding:24px">
+                              ${rows.length === 0 ? "No data yet."
+                                                  : "No rows match filter."}
+                         </td></tr>`
+                      : visible.map(r => `<tr>${columns.map(c =>
+                            c.render
+                                ? c.render(r)
+                                : `<td class="${c.cls || ""}">${
+                                       escapeHtml(r[c.key] == null ? "" : r[c.key])
+                                   }</td>`
+                        ).join("")}</tr>`).join("")
+                    }
+                </tbody>
+            </table>
+        </div>
+    `;
+}
+
+function wireTables() {
+    document.querySelectorAll(".table-wrap").forEach(w => {
+        const id = w.dataset.table;
+        const ts = state.tableState[id];
+        if (!ts) return;
+        const input = w.querySelector(".table-filter");
+        if (input) {
+            input.addEventListener("input", () => {
+                ts.filter = input.value;
+                preserveFocus(() => renderTab());
+            });
+        }
+        w.querySelectorAll("th.sortable").forEach(th => {
+            th.addEventListener("click", () => {
+                const col = th.dataset.col;
+                if (ts.sort === col) ts.dir *= -1;
+                else { ts.sort = col; ts.dir = -1; }
+                renderTab();
+            });
+        });
+    });
+}
+
+// ===== Label editing =====
+async function editExporterLabel(ip, current) {
+    state.paused = true;
+    try {
+        const v = window.prompt(
+            `Display label for exporter ${ip}\n(blank to clear)`,
+            current || "");
+        if (v == null) return;  // cancelled
+        await apiSend(`/api/exporters/${encodeURIComponent(ip)}/label`,
+                      "PUT", { label: v });
+    } catch (e) {
+        alert("Failed to save label: " + e.message);
+    } finally {
+        state.paused = false;
+        refreshAll();
+    }
+}
+
+async function editInterfaceLabel(exporter, ifindex, current) {
+    state.paused = true;
+    try {
+        const v = window.prompt(
+            `Display label for ${exporter} if${ifindex}\n(blank to clear)`,
+            current || "");
+        if (v == null) return;
+        await apiSend(`/api/interfaces/${encodeURIComponent(exporter)}/${ifindex}/label`,
+                      "PUT", { label: v });
+    } catch (e) {
+        alert("Failed to save label: " + e.message);
+    } finally {
+        state.paused = false;
+        refreshAll();
+    }
+}
+
+// What to display for an exporter: prefer user label, then reverse-DNS, then IP.
+function exporterDisplayName(d) {
+    return d.label || d.hostname || d.exporter;
 }
 
 // ===== Rendering =====
@@ -558,10 +850,27 @@ function renderHeader() {
 }
 
 function renderFooter() {
-    document.getElementById("foot-selected").textContent =
-        state.selectedExporter
-            ? `VIEW: ${state.selectedExporter}`
-            : "VIEW: ALL DEVICES";
+    let viewLabel = "VIEW: ALL DEVICES";
+    if (state.selectedExporter) {
+        const d = state.devices.find(x => x.exporter === state.selectedExporter);
+        viewLabel = "VIEW: " + (d ? exporterDisplayName(d) : state.selectedExporter);
+    }
+    document.getElementById("foot-selected").textContent = viewLabel;
+    const stat = document.getElementById("foot-status");
+    if (state.lastError && !state.lastUpdate) {
+        stat.textContent = "● STALLED";
+        stat.className = "live-stale";
+    } else if (state.lastUpdate) {
+        const age = Math.floor((Date.now() - state.lastUpdate) / 1000);
+        const stale = age > 10;
+        stat.textContent = stale
+            ? `● STALE ${age}s`
+            : `● LIVE · ${new Date(state.lastUpdate).toLocaleTimeString()}`;
+        stat.className = stale ? "live-stale" : "live-ok";
+    } else {
+        stat.textContent = "● CONNECTING…";
+        stat.className = "";
+    }
     document.getElementById("foot-time").textContent =
         new Date().toISOString().replace("T"," ").slice(0,19) + " UTC";
 }
@@ -569,20 +878,40 @@ function renderFooter() {
 function renderSidebar() {
     const list = document.getElementById("device-list");
     if (!state.devices.length) return;
-    list.innerHTML = state.devices.map(d => `
+    list.innerHTML = state.devices.map(d => {
+        const display = exporterDisplayName(d);
+        const showIp = display !== d.exporter;
+        return `
         <div class="device-row ${state.selectedExporter === d.exporter ? "active" : ""}"
              data-exporter="${escapeHtml(d.exporter)}">
-            <div class="ip">${escapeHtml(d.exporter)}</div>
+            <div class="ip">
+                <span class="actions" data-edit-exporter="${escapeHtml(d.exporter)}"
+                      data-current="${escapeHtml(d.label || "")}"
+                      title="Edit label">✎</span>
+                <span class="label-text">${escapeHtml(display)}</span>
+                ${showIp ? `<span class="ip-text">${escapeHtml(d.exporter)}</span>` : ""}
+            </div>
             <div class="meta">
                 <span class="badge ${d.type}">${d.type}</span>
                 ${d.interface_count} ifs · ${numHuman(d.flow_count)} flows · ${timeAgo(d.last_seen)}
             </div>
-        </div>
-    `).join("");
+        </div>`;
+    }).join("");
     list.querySelectorAll(".device-row").forEach(r => {
-        r.addEventListener("click", () => {
+        r.addEventListener("click", (ev) => {
+            // Don't change selection when clicking the edit pencil.
+            if (ev.target && ev.target.dataset && ev.target.dataset.editExporter) {
+                ev.stopPropagation();
+                editExporterLabel(ev.target.dataset.editExporter,
+                                  ev.target.dataset.current);
+                return;
+            }
             const exp = r.dataset.exporter;
-            state.selectedExporter = (state.selectedExporter === exp) ? null : exp;
+            const wasSelected = state.selectedExporter === exp;
+            state.selectedExporter = wasSelected ? null : exp;
+            // Clear interface filter when changing exporter so we don't end
+            // up filtering by an ifindex that belongs to a different exporter.
+            state.ifindexFilter = null;
             refreshAll();
         });
     });
@@ -590,6 +919,7 @@ function renderSidebar() {
 
 document.getElementById("clear-filter").addEventListener("click", () => {
     state.selectedExporter = null;
+    state.ifindexFilter = null;
     refreshAll();
 });
 
@@ -609,7 +939,9 @@ function renderTab() {
     if (state.activeTab === "flows")      root.innerHTML = renderFlows();
     if (state.activeTab === "setup")      root.innerHTML = renderSetup();
     if (state.activeTab === "overview")   drawTimeseries();
-    if (state.activeTab === "interfaces") wireInterfaceClicks();
+    if (state.activeTab === "interfaces") wireInterfaceTable();
+    if (state.activeTab === "flows")      wireFlowsControls();
+    wireTables();
 }
 
 // ----- Overview tab -----
@@ -617,19 +949,35 @@ function renderOverview() {
     if (!state.devices.length) {
         return renderSetup();   // bootstrap aid
     }
+    // Title and legend reflect what the chart actually plots:
+    //   - No ifindex filter: per-second sum of flow bytes (each flow counts once).
+    //     There's no meaningful direction so we show a single "VOLUME" series.
+    //   - With ifindex filter: split into INGRESS / EGRESS for that interface.
+    const ifFilter = state.ifindexFilter != null;
+    const tsHead = ifFilter
+        ? `Ingress / Egress — if${escapeHtml(state.ifindexFilter)}`
+        : `Total Flow Volume — last 3 minutes`;
+    const tsLegend = ifFilter
+        ? `<span><span class="swatch" style="background:var(--accent)"></span>INGRESS</span>
+           <span><span class="swatch" style="background:var(--accent-2)"></span>EGRESS</span>`
+        : `<span><span class="swatch" style="background:var(--accent)"></span>VOLUME</span>
+           <span style="color:var(--text-faint)">each flow counted once</span>`;
+    const scope = state.selectedExporter
+        ? (() => {
+              const d = state.devices.find(x => x.exporter === state.selectedExporter);
+              return d ? exporterDisplayName(d) : state.selectedExporter;
+          })()
+        : "all exporters";
     return `
         <div class="grid-3">
             <div class="panel">
                 <div class="panel-head">
-                    <span class="accent">▸</span> Traffic — last 3 minutes
-                    <span class="meta">${state.selectedExporter || "all exporters"}</span>
+                    <span class="accent">▸</span> ${tsHead}
+                    <span class="meta">${escapeHtml(scope)}</span>
                 </div>
                 <div class="panel-body">
                     <div class="timeseries">
-                        <div class="ts-legend">
-                            <span><span class="swatch" style="background:var(--accent)"></span>INGRESS</span>
-                            <span><span class="swatch" style="background:var(--accent-2)"></span>EGRESS</span>
-                        </div>
+                        <div class="ts-legend">${tsLegend}</div>
                         <canvas id="ts-canvas" width="800" height="220"></canvas>
                     </div>
                 </div>
@@ -651,83 +999,62 @@ function renderOverview() {
 }
 
 function renderTopTalkersTable() {
-    if (!state.topTalkers.length) return `<div style="padding:24px;color:var(--text-faint)">No flows yet.</div>`;
-    const max = state.topTalkers[0].bytes || 1;
-    return `
-        <table>
-            <thead><tr>
-                <th>Source</th><th>Destination</th>
-                <th class="num">Bytes</th><th class="num">Packets</th>
-                <th class="num">Flows</th><th>Volume</th>
-            </tr></thead>
-            <tbody>
-            ${state.topTalkers.map(t => `
-                <tr>
-                    <td>${escapeHtml(t.src_ip)}</td>
-                    <td>${escapeHtml(t.dst_ip)}</td>
-                    <td class="num ingress">${bytesHuman(t.bytes)}</td>
-                    <td class="num dim">${numHuman(t.packets)}</td>
-                    <td class="num dim">${t.flows}</td>
-                    <td class="bar-cell" style="width:25%">
-                        <div class="bar" style="width:${(t.bytes/max*100).toFixed(1)}%"></div>
-                    </td>
-                </tr>
-            `).join("")}
-            </tbody>
-        </table>
-    `;
+    const rows = state.topTalkers || [];
+    const max = (rows[0] && rows[0].bytes) || 1;
+    return makeTable("top-talkers", [
+        { key: "src_ip", label: "Source",
+          render: r => `<td>${escapeHtml(r.src_ip)}</td>` },
+        { key: "dst_ip", label: "Destination",
+          render: r => `<td>${escapeHtml(r.dst_ip)}</td>` },
+        { key: "bytes", label: "Bytes", cls: "num",
+          render: r => `<td class="num ingress">${bytesHuman(r.bytes)}</td>` },
+        { key: "packets", label: "Packets", cls: "num",
+          render: r => `<td class="num dim">${numHuman(r.packets)}</td>` },
+        { key: "flows", label: "Flows", cls: "num",
+          render: r => `<td class="num dim">${r.flows}</td>` },
+        { key: "volume", label: "Volume", sortable: false,
+          render: r => `<td class="bar-cell" style="width:25%">
+              <div class="bar" style="width:${(r.bytes/max*100).toFixed(1)}%"></div>
+          </td>` },
+    ], rows, { defaultSort: "bytes", defaultDir: -1 });
 }
 
 function renderTopPortsTable() {
-    if (!state.topPorts.length) return `<div style="padding:24px;color:var(--text-faint)">No flows yet.</div>`;
-    const max = state.topPorts[0].bytes || 1;
     const named = {53:"DNS",80:"HTTP",443:"HTTPS",22:"SSH",25:"SMTP",
                    123:"NTP",161:"SNMP",514:"Syslog",3389:"RDP",
                    5060:"SIP",179:"BGP"};
-    return `
-        <table>
-            <thead><tr>
-                <th>Port</th><th>Service</th>
-                <th class="num">Bytes</th>
-            </tr></thead>
-            <tbody>
-            ${state.topPorts.map(t => `
-                <tr>
-                    <td class="proto">${t.port}</td>
-                    <td class="dim">${named[t.port] || t.protocol || ""}</td>
-                    <td class="bar-cell num">
-                        <div class="bar" style="width:${(t.bytes/max*100).toFixed(1)}%"></div>
-                        <span class="label">${bytesHuman(t.bytes)}</span>
-                    </td>
-                </tr>
-            `).join("")}
-            </tbody>
-        </table>
-    `;
+    const rows = (state.topPorts || []).map(t => ({
+        ...t,
+        service: named[t.port] || t.protocol || "",
+    }));
+    const max = (rows[0] && rows[0].bytes) || 1;
+    return makeTable("top-ports", [
+        { key: "port", label: "Port",
+          render: r => `<td class="proto">${r.port}</td>` },
+        { key: "service", label: "Service",
+          render: r => `<td class="dim">${escapeHtml(r.service)}</td>` },
+        { key: "bytes", label: "Bytes", cls: "num",
+          render: r => `<td class="bar-cell num">
+              <div class="bar" style="width:${(r.bytes/max*100).toFixed(1)}%"></div>
+              <span class="label">${bytesHuman(r.bytes)}</span>
+          </td>` },
+    ], rows, { defaultSort: "bytes", defaultDir: -1 });
 }
 
 function renderProtocolTable() {
-    if (!state.protocols.length) return `<div style="padding:24px;color:var(--text-faint)">No flows yet.</div>`;
-    const max = state.protocols[0].bytes || 1;
-    return `
-        <table>
-            <thead><tr>
-                <th>Proto</th><th class="num">Bytes</th><th class="num">Flows</th>
-            </tr></thead>
-            <tbody>
-            ${state.protocols.map(p => `
-                <tr>
-                    <td class="proto">${escapeHtml(p.protocol)}</td>
-                    <td class="bar-cell num">
-                        <div class="bar" style="width:${(p.bytes/max*100).toFixed(1)}%"></div>
-                        <span class="label">${bytesHuman(p.bytes)}</span>
-                    </td>
-                    <td class="num dim">${numHuman(p.flows)}</td>
-                </tr>
-            `).join("")}
-            </tbody>
-        </table>
-    `;
+    const rows = state.protocols || [];
+    const max = (rows[0] && rows[0].bytes) || 1;
+    return makeTable("protocols", [
+        { key: "protocol", label: "Proto",
+          render: r => `<td class="proto">${escapeHtml(r.protocol)}</td>` },
+        { key: "bytes", label: "Bytes", cls: "num",
+          render: r => `<td class="bar-cell num">
+              <div class="bar" style="width:${(r.bytes/max*100).toFixed(1)}%"></div>
+              <span class="label">${bytesHuman(r.bytes)}</span>
+          </td>` },
+        { key: "flows", label: "Flows", cls: "num",
+          render: r => `<td class="num dim">${numHuman(r.flows)}</td>` },
+    ], rows, { defaultSort: "bytes", defaultDir: -1 });
 }
 
 function drawTimeseries() {
@@ -793,101 +1120,168 @@ function renderInterfaces() {
             ${state.selectedExporter ? "Try clearing the device filter." : "Once flows arrive, interfaces will appear here."}
         </div></div>`;
     }
+    // Build per-row exporter display from the devices list so labels surface here too.
+    const expByIp = {};
+    state.devices.forEach(d => { expByIp[d.exporter] = d; });
+    const rows = state.interfaces.map(i => ({
+        ...i,
+        display: i.label || i.name,
+        exporter_display: expByIp[i.exporter]
+            ? exporterDisplayName(expByIp[i.exporter])
+            : i.exporter,
+    }));
+    const tableHtml = makeTable("interfaces", [
+        { key: "display", label: "Name",
+          value: r => r.display,
+          render: r => `<td>
+              <span style="font-weight:500">${escapeHtml(r.display)}</span>
+              <span class="edit-ico"
+                    data-edit-iface="${escapeHtml(r.exporter)}|${r.ifindex}"
+                    data-current="${escapeHtml(r.label || "")}"
+                    title="Edit label">✎</span>
+          </td>` },
+        { key: "ifindex", label: "ifIndex", cls: "num",
+          render: r => `<td class="num dim">${r.ifindex}</td>` },
+        { key: "exporter_display", label: "Exporter",
+          render: r => `<td class="dim">${escapeHtml(r.exporter_display)}</td>` },
+        { key: "ingress_bytes", label: "Ingress", cls: "num",
+          render: r => `<td class="num ingress">${bytesHuman(r.ingress_bytes)}<br>
+              <span class="dim" style="font-size:10px">${numHuman(r.ingress_packets)} pkts</span>
+          </td>` },
+        { key: "egress_bytes", label: "Egress", cls: "num",
+          render: r => `<td class="num egress">${bytesHuman(r.egress_bytes)}<br>
+              <span class="dim" style="font-size:10px">${numHuman(r.egress_packets)} pkts</span>
+          </td>` },
+        { key: "speed_bps", label: "Link", cls: "num",
+          render: r => `<td class="num dim">${
+              r.speed_bps ? bitsHuman(r.speed_bps / 8) : "—"
+          }</td>` },
+        { key: "last_seen", label: "Last seen",
+          render: r => `<td class="dim">${timeAgo(r.last_seen)}</td>` },
+        { key: "view", label: "", sortable: false,
+          render: r => `<td><a class="iface-view"
+              data-exporter="${escapeHtml(r.exporter)}"
+              data-ifindex="${r.ifindex}"
+              style="color:var(--accent-3);cursor:pointer">view flows ▸</a></td>` },
+    ], rows, { defaultSort: "ingress_bytes", defaultDir: -1 });
     return `
         <div class="panel">
             <div class="panel-head">
                 <span class="accent">▸</span> Interfaces
                 <span class="meta">${state.interfaces.length} interfaces ·
-                    ingress + egress measured per ifIndex</span>
+                    ingress + egress per ifIndex (counter samples win when present)</span>
             </div>
-            <div class="panel-body">
-                ${state.interfaces.map(i => `
-                    <div class="iface-card" data-exporter="${escapeHtml(i.exporter)}" data-ifindex="${i.ifindex}">
-                        <div>
-                            <div class="ifname">${escapeHtml(i.name)}</div>
-                            <div class="ifindex">idx ${i.ifindex} · ${escapeHtml(i.exporter)}</div>
-                        </div>
-                        <div class="dir in">
-                            <span class="label">▼ Ingress</span>
-                            <span class="value">${bytesHuman(i.ingress_bytes)}</span>
-                            <span class="sub">${numHuman(i.ingress_packets)} pkts</span>
-                        </div>
-                        <div class="dir out">
-                            <span class="label">▲ Egress</span>
-                            <span class="value">${bytesHuman(i.egress_bytes)}</span>
-                            <span class="sub">${numHuman(i.egress_packets)} pkts</span>
-                        </div>
-                    </div>
-                `).join("")}
-            </div>
+            ${tableHtml}
         </div>
     `;
 }
-function wireInterfaceClicks() {
-    document.querySelectorAll(".iface-card").forEach(c => {
-        c.addEventListener("click", () => {
-            // jump to live flows filtered by this interface
-            const exp = c.dataset.exporter;
-            const idx = c.dataset.ifindex;
+function wireInterfaceTable() {
+    // "View flows" link applies a server-side ifindex filter and switches tabs.
+    document.querySelectorAll(".iface-view").forEach(a => {
+        a.addEventListener("click", (ev) => {
+            ev.stopPropagation();
+            const exp = a.dataset.exporter;
+            const idx = parseInt(a.dataset.ifindex, 10);
             state.selectedExporter = exp;
+            state.ifindexFilter = idx;
             state.activeTab = "flows";
-            window._ifindexFilter = idx;
             document.querySelectorAll(".tab").forEach(t => {
                 t.classList.toggle("active", t.dataset.tab === "flows");
             });
             refreshAll();
         });
     });
+    // Pencil = edit label
+    document.querySelectorAll('[data-edit-iface]').forEach(el => {
+        el.addEventListener("click", (ev) => {
+            ev.stopPropagation();
+            const [exp, idx] = el.dataset.editIface.split("|");
+            editInterfaceLabel(exp, parseInt(idx, 10), el.dataset.current);
+        });
+    });
 }
 
 // ----- Live flows tab -----
 function renderFlows() {
+    // Active filter chips (server-side filters)
+    const chips = [];
+    if (state.selectedExporter) {
+        const d = state.devices.find(x => x.exporter === state.selectedExporter);
+        const lbl = d ? exporterDisplayName(d) : state.selectedExporter;
+        chips.push(`<span class="filter-chip">EXPORTER: ${escapeHtml(lbl)}
+            <span class="x" data-clear="exporter">×</span></span>`);
+    }
+    if (state.ifindexFilter != null) {
+        chips.push(`<span class="filter-chip">IFINDEX: ${escapeHtml(state.ifindexFilter)}
+            <span class="x" data-clear="ifindex">×</span></span>`);
+    }
+
     if (!state.flows.length) {
-        return `<div class="panel"><div class="panel-body" style="color:var(--text-dim)">
-            <span class="spinner"></span> Awaiting flow records.
-        </div></div>`;
+        return `
+        <div class="panel">
+            <div class="panel-head">
+                <span class="accent">▸</span> Live Flow Records
+                <span class="meta">${chips.join("") || "no filters"}</span>
+            </div>
+            <div class="panel-body" style="color:var(--text-dim)">
+                <span class="spinner"></span>
+                ${state.ifindexFilter != null
+                  ? "No recent flows matched this interface filter. Showing only flows the collector has seen for this ifIndex."
+                  : "Awaiting flow records."}
+            </div>
+        </div>`;
     }
-    let flows = state.flows;
-    if (window._ifindexFilter != null) {
-        const idx = parseInt(window._ifindexFilter);
-        flows = flows.filter(f => f.input_if === idx || f.output_if === idx);
-    }
+
+    const rows = state.flows.map(f => ({
+        ...f,
+        time_local: new Date((f.ts || 0) * 1000).toLocaleTimeString(),
+        src: (f.src_ip || "?") + (f.src_port ? ":" + f.src_port : ""),
+        dst: (f.dst_ip || "?") + (f.dst_port ? ":" + f.dst_port : ""),
+    }));
+    const tableHtml = makeTable("flows", [
+        { key: "ts", label: "Time",
+          render: r => `<td class="dim">${escapeHtml(r.time_local)}</td>` },
+        { key: "exporter", label: "Exporter",
+          render: r => `<td class="dim">${escapeHtml(r.exporter)}</td>` },
+        { key: "src", label: "Src → Dst", value: r => r.src + " → " + r.dst,
+          render: r => `<td>
+              <span>${escapeHtml(r.src)}</span>
+              <span class="dim"> → </span>
+              <span>${escapeHtml(r.dst)}</span>
+          </td>` },
+        { key: "protocol_name", label: "Proto",
+          render: r => `<td class="proto">${escapeHtml(r.protocol_name || "")}</td>` },
+        { key: "input_if", label: "In if", cls: "num",
+          render: r => `<td class="num ingress">${r.input_if ?? ""}</td>` },
+        { key: "output_if", label: "Out if", cls: "num",
+          render: r => `<td class="num egress">${r.output_if ?? ""}</td>` },
+        { key: "bytes", label: "Bytes", cls: "num",
+          render: r => `<td class="num">${bytesHuman(r.bytes)}</td>` },
+        { key: "packets", label: "Packets", cls: "num",
+          render: r => `<td class="num dim">${numHuman(r.packets)}</td>` },
+    ], rows, { defaultSort: "ts", defaultDir: -1 });
+
     return `
         <div class="panel">
             <div class="panel-head">
                 <span class="accent">▸</span> Live Flow Records
-                <span class="meta">${flows.length} most recent ${
-                    window._ifindexFilter != null ? `· ifindex ${window._ifindexFilter}` : ""
-                }</span>
+                <span class="meta">${chips.join("") || `${rows.length} most recent`}</span>
             </div>
-            <table>
-                <thead><tr>
-                    <th>Time</th><th>Exporter</th>
-                    <th>Src → Dst</th><th>Proto</th>
-                    <th class="num">In if</th><th class="num">Out if</th>
-                    <th class="num">Bytes</th><th class="num">Packets</th>
-                </tr></thead>
-                <tbody>
-                ${flows.map(f => `
-                    <tr>
-                        <td class="dim">${new Date((f.ts||0)*1000).toLocaleTimeString()}</td>
-                        <td class="dim">${escapeHtml(f.exporter)}</td>
-                        <td>
-                            <span>${escapeHtml(f.src_ip || "?")}${f.src_port ? ":" + f.src_port : ""}</span>
-                            <span class="dim"> → </span>
-                            <span>${escapeHtml(f.dst_ip || "?")}${f.dst_port ? ":" + f.dst_port : ""}</span>
-                        </td>
-                        <td class="proto">${escapeHtml(f.protocol_name || "")}</td>
-                        <td class="num ingress">${f.input_if ?? ""}</td>
-                        <td class="num egress">${f.output_if ?? ""}</td>
-                        <td class="num">${bytesHuman(f.bytes)}</td>
-                        <td class="num dim">${numHuman(f.packets)}</td>
-                    </tr>
-                `).join("")}
-                </tbody>
-            </table>
+            ${tableHtml}
         </div>
     `;
+}
+
+function wireFlowsControls() {
+    document.querySelectorAll('[data-clear]').forEach(el => {
+        el.addEventListener("click", (ev) => {
+            ev.stopPropagation();
+            const w = el.dataset.clear;
+            if (w === "exporter") state.selectedExporter = null;
+            if (w === "ifindex")  state.ifindexFilter   = null;
+            refreshAll();
+        });
+    });
 }
 
 // ----- Setup tab -----
@@ -947,6 +1341,14 @@ sudo apt install nfdump softflowd        <span class="c"># optional generators</
 // ===== Boot =====
 refreshAll();
 setInterval(refreshAll, 3000);
+// Independent 1s heartbeat keeps the live/stale indicator and the
+// "X seconds ago" sidebar timestamps current even while polling is paused
+// or in flight.
+setInterval(() => {
+    renderFooter();
+    // Cheap re-render of the sidebar's "last seen" relative times.
+    if (state.devices.length) renderSidebar();
+}, 1000);
 window.addEventListener("resize", drawTimeseries);
 </script>
 </body>

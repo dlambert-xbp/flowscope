@@ -60,7 +60,12 @@ interface_stats = defaultdict(lambda: {
 })
 
 # Devices we've heard from
-devices = {}  # exporter_ip -> {first_seen, last_seen, flow_count, type}
+devices = {}  # exporter_ip -> {first_seen, last_seen, flow_count, type, hostname}
+
+# User-defined display labels for exporters and interfaces, persisted in SQLite.
+# Loaded at startup, mutated through the label PUT endpoints.
+exporter_labels  = {}  # exporter_ip -> str
+interface_labels = {}  # (exporter_ip, ifindex) -> str
 
 # NetFlow v9 / IPFIX templates, keyed by (exporter, source_id, template_id)
 templates = {}
@@ -107,6 +112,24 @@ def db_init():
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_flows_ts ON flows(ts)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_flows_exp ON flows(exporter)")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS exporter_labels (
+            exporter TEXT PRIMARY KEY,
+            label    TEXT NOT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS interface_labels (
+            exporter TEXT NOT NULL,
+            ifindex  INTEGER NOT NULL,
+            label    TEXT NOT NULL,
+            PRIMARY KEY (exporter, ifindex)
+        )
+    """)
+    for row in conn.execute("SELECT exporter, label FROM exporter_labels"):
+        exporter_labels[row[0]] = row[1]
+    for row in conn.execute("SELECT exporter, ifindex, label FROM interface_labels"):
+        interface_labels[(row[0], row[1])] = row[2]
     conn.commit()
     return conn
 
@@ -150,6 +173,31 @@ def db_prune_loop():
         time.sleep(300)
 
 
+def rdns_loop():
+    """Best-effort reverse DNS for exporter IPs.
+
+    Runs in its own daemon thread so the (potentially blocking) gethostbyaddr
+    calls never delay the UDP parser threads. Each device is resolved once;
+    a failed lookup is recorded as an empty string so we don't keep retrying.
+    """
+    while True:
+        try:
+            with state_lock:
+                need = [ip for ip, d in devices.items() if "hostname" not in d]
+            for ip in need:
+                hn = ""
+                try:
+                    hn = socket.gethostbyaddr(ip)[0]
+                except Exception:
+                    pass
+                with state_lock:
+                    if ip in devices:
+                        devices[ip]["hostname"] = hn
+        except Exception as e:
+            print(f"[rdns] error: {e}")
+        time.sleep(30)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -168,7 +216,9 @@ def record_flow(rec):
         recent_flows.append(rec)
         stats["flows_recorded"] += 1
 
-        # Update device tracking
+        # Update device tracking. Note: "hostname" key is intentionally absent
+        # on first sight — its absence is the signal rdns_loop uses to know it
+        # still needs to resolve this exporter.
         d = devices.setdefault(exporter, {
             "first_seen": rec["ts"],
             "last_seen":  rec["ts"],
@@ -618,6 +668,8 @@ def api_devices():
         for ip, d in devices.items():
             out.append({
                 "exporter":   ip,
+                "label":      exporter_labels.get(ip, ""),
+                "hostname":   d.get("hostname", ""),
                 "first_seen": d["first_seen"],
                 "last_seen":  d["last_seen"],
                 "flow_count": d["flow_count"],
@@ -642,6 +694,7 @@ def api_interfaces():
                 "exporter":        exp,
                 "ifindex":         ifidx,
                 "name":            s["name"] or f"if{ifidx}",
+                "label":           interface_labels.get((exp, ifidx), ""),
                 "speed_bps":       s["speed_bps"],
                 "ingress_bytes":   s["ingress_bytes"],
                 "ingress_packets": s["ingress_packets"],
@@ -651,6 +704,58 @@ def api_interfaces():
             })
     rows.sort(key=lambda r: (r["exporter"], r["ifindex"]))
     return jsonify(rows)
+
+
+@app.route("/api/exporters/<exporter>/label", methods=["PUT", "POST", "DELETE"])
+def api_set_exporter_label(exporter):
+    """Set or clear the user-defined display label for an exporter.
+    Body: {"label": "..."}; empty/missing label or DELETE clears it."""
+    payload = request.get_json(silent=True) or {}
+    label = "" if request.method == "DELETE" else (payload.get("label") or "").strip()
+    try:
+        with db_lock:
+            if label:
+                db_conn.execute(
+                    "INSERT OR REPLACE INTO exporter_labels(exporter, label) VALUES(?, ?)",
+                    (exporter, label))
+            else:
+                db_conn.execute(
+                    "DELETE FROM exporter_labels WHERE exporter = ?", (exporter,))
+            db_conn.commit()
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    with state_lock:
+        if label:
+            exporter_labels[exporter] = label
+        else:
+            exporter_labels.pop(exporter, None)
+    return jsonify({"ok": True, "exporter": exporter, "label": label})
+
+
+@app.route("/api/interfaces/<exporter>/<int:ifindex>/label", methods=["PUT", "POST", "DELETE"])
+def api_set_interface_label(exporter, ifindex):
+    """Set or clear the user-defined display label for an interface."""
+    payload = request.get_json(silent=True) or {}
+    label = "" if request.method == "DELETE" else (payload.get("label") or "").strip()
+    try:
+        with db_lock:
+            if label:
+                db_conn.execute(
+                    "INSERT OR REPLACE INTO interface_labels(exporter, ifindex, label) VALUES(?, ?, ?)",
+                    (exporter, ifindex, label))
+            else:
+                db_conn.execute(
+                    "DELETE FROM interface_labels WHERE exporter = ? AND ifindex = ?",
+                    (exporter, ifindex))
+            db_conn.commit()
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    with state_lock:
+        if label:
+            interface_labels[(exporter, ifindex)] = label
+        else:
+            interface_labels.pop((exporter, ifindex), None)
+    return jsonify({"ok": True, "exporter": exporter, "ifindex": ifindex, "label": label})
 
 
 @app.route("/api/flows/recent")
@@ -799,6 +904,7 @@ def main():
     threading.Thread(target=netflow_listener, daemon=True).start()
     threading.Thread(target=sflow_listener,   daemon=True).start()
     threading.Thread(target=db_prune_loop,    daemon=True).start()
+    threading.Thread(target=rdns_loop,        daemon=True).start()
 
     print(f"[web]    http://0.0.0.0:{WEB_PORT}")
     app.run(host=WEB_HOST, port=WEB_PORT, threaded=True, use_reloader=False)
