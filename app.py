@@ -637,6 +637,9 @@ def sflow_listener():
 # ===========================================================================
 
 app = Flask(__name__, static_folder="web", static_url_path="")
+# Don't let browsers cache the dashboard. Flask defaults to a 12h max-age,
+# which made every UI change require a hard refresh in the field.
+app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
 
 
 @app.route("/")

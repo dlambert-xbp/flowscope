@@ -1313,7 +1313,8 @@ function deviceRowHtml(d) {
         </div>
         <div class="meta">
             <span class="badge ${d.type}">${d.type}</span>
-            ${d.interface_count} ifs · ${numHuman(d.flow_count)} flows · ${timeAgo(d.last_seen)}
+            ${d.interface_count} ifs · ${numHuman(d.flow_count)} flows ·
+            <span class="time-ago" data-last-seen="${d.last_seen}">${timeAgo(d.last_seen)}</span>
         </div>
     </div>`;
 }
@@ -1992,11 +1993,18 @@ refreshAll();
 setInterval(refreshAll, 3000);
 // Independent 1s heartbeat keeps the live/stale indicator and the
 // "X seconds ago" sidebar timestamps current even while polling is paused
-// or in flight.
+// or in flight. Update time-ago spans in place — re-rendering the whole
+// sidebar every second blew away scroll position, hover state, and made
+// the column visibly twitch.
 setInterval(() => {
     renderFooter();
-    // Cheap re-render of the sidebar's "last seen" relative times.
-    if (state.devices.length) renderSidebar();
+    document.querySelectorAll("#device-list .time-ago").forEach(el => {
+        const ts = parseFloat(el.dataset.lastSeen);
+        if (!isNaN(ts)) {
+            const next = timeAgo(ts);
+            if (el.textContent !== next) el.textContent = next;
+        }
+    });
 }, 1000);
 window.addEventListener("resize", drawTimeseries);
 </script>
