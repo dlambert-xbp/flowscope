@@ -1,0 +1,953 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FlowScope</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+:root {
+    --bg-0:        #08090b;
+    --bg-1:        #0d0f12;
+    --bg-2:        #14171c;
+    --bg-3:        #1c2026;
+    --line:        #232830;
+    --line-bright: #2e3441;
+    --text:        #d8dde6;
+    --text-dim:    #7d8694;
+    --text-faint:  #4a5160;
+    --accent:      #6cf0c2;   /* phosphor green */
+    --accent-2:    #ff7b54;   /* warm amber */
+    --accent-3:    #5fa8ff;   /* signal blue */
+    --warn:        #f5d36e;
+    --danger:      #ff5e7e;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+    height: 100%;
+    background: var(--bg-0);
+    color: var(--text);
+    font-family: "JetBrains Mono", "SF Mono", Consolas, monospace;
+    font-size: 13px;
+    line-height: 1.5;
+    overflow: hidden;
+}
+
+body {
+    background-image:
+        radial-gradient(circle at 20% 0%,   rgba(108,240,194,0.04) 0%, transparent 40%),
+        radial-gradient(circle at 90% 100%, rgba(95,168,255,0.03)  0%, transparent 40%);
+}
+
+/* Layout */
+.app {
+    display: grid;
+    grid-template-rows: 56px 1fr 28px;
+    height: 100vh;
+}
+
+/* Header */
+header {
+    display: flex;
+    align-items: center;
+    padding: 0 20px;
+    border-bottom: 1px solid var(--line);
+    background: var(--bg-1);
+    gap: 24px;
+}
+.brand {
+    font-family: "Space Grotesk", sans-serif;
+    font-weight: 700;
+    font-size: 18px;
+    letter-spacing: 0.5px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+.brand .dot {
+    width: 8px; height: 8px;
+    background: var(--accent);
+    box-shadow: 0 0 12px var(--accent);
+    animation: pulse 2s infinite;
+}
+@keyframes pulse { 50% { opacity: 0.4; } }
+
+.header-stats {
+    display: flex;
+    gap: 24px;
+    margin-left: auto;
+    font-size: 11px;
+    color: var(--text-dim);
+}
+.header-stats span b {
+    color: var(--text);
+    font-weight: 500;
+}
+
+/* Footer / status bar */
+footer {
+    display: flex;
+    align-items: center;
+    padding: 0 20px;
+    border-top: 1px solid var(--line);
+    background: var(--bg-1);
+    font-size: 10px;
+    color: var(--text-faint);
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    gap: 24px;
+}
+footer .ok    { color: var(--accent); }
+
+/* Main area: sidebar + content */
+main {
+    display: grid;
+    grid-template-columns: 280px 1fr;
+    overflow: hidden;
+}
+
+aside {
+    border-right: 1px solid var(--line);
+    background: var(--bg-1);
+    overflow-y: auto;
+    padding: 16px 0;
+}
+aside h3 {
+    font-family: "Space Grotesk", sans-serif;
+    font-weight: 500;
+    font-size: 10px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--text-faint);
+    padding: 0 20px;
+    margin: 16px 0 8px 0;
+}
+aside h3:first-child { margin-top: 0; }
+
+.device-row {
+    padding: 10px 20px;
+    border-left: 2px solid transparent;
+    cursor: pointer;
+    transition: background 80ms ease;
+}
+.device-row:hover { background: var(--bg-2); }
+.device-row.active {
+    background: var(--bg-2);
+    border-left-color: var(--accent);
+}
+.device-row .ip {
+    font-weight: 500;
+    color: var(--text);
+}
+.device-row .meta {
+    font-size: 10px;
+    color: var(--text-dim);
+    margin-top: 2px;
+}
+.device-row .badge {
+    display: inline-block;
+    font-size: 9px;
+    padding: 1px 6px;
+    border: 1px solid var(--line-bright);
+    color: var(--text-dim);
+    margin-right: 6px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+.device-row .badge.netflow { color: var(--accent-3); border-color: var(--accent-3); }
+.device-row .badge.sflow   { color: var(--accent-2); border-color: var(--accent-2); }
+
+.empty-state {
+    padding: 20px;
+    color: var(--text-faint);
+    font-size: 11px;
+    line-height: 1.7;
+}
+.empty-state code {
+    color: var(--accent);
+    background: var(--bg-2);
+    padding: 1px 4px;
+    border-radius: 2px;
+}
+
+/* Content */
+.content {
+    overflow-y: auto;
+    padding: 20px;
+}
+.tabs {
+    display: flex;
+    gap: 4px;
+    border-bottom: 1px solid var(--line);
+    margin-bottom: 20px;
+}
+.tab {
+    padding: 8px 16px;
+    cursor: pointer;
+    font-size: 11px;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+    transition: color 100ms;
+}
+.tab:hover  { color: var(--text); }
+.tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+/* Panels */
+.panel {
+    background: var(--bg-1);
+    border: 1px solid var(--line);
+    margin-bottom: 16px;
+}
+.panel-head {
+    display: flex;
+    align-items: center;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--line);
+    font-size: 11px;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    background: var(--bg-2);
+}
+.panel-head .accent {
+    color: var(--accent);
+    margin-right: 8px;
+}
+.panel-head .meta {
+    margin-left: auto;
+    color: var(--text-faint);
+    font-size: 10px;
+    letter-spacing: 1px;
+}
+.panel-body { padding: 16px; }
+
+/* Grid for top widgets */
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.grid-3 { display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 16px; }
+@media (max-width: 1100px) { .grid-2, .grid-3 { grid-template-columns: 1fr; } }
+
+/* Tables */
+table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+}
+th, td {
+    text-align: left;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--line);
+}
+th {
+    font-weight: 400;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    font-size: 10px;
+    color: var(--text-faint);
+    background: var(--bg-2);
+}
+tr:hover td { background: var(--bg-2); }
+td.num     { text-align: right; font-variant-numeric: tabular-nums; }
+td.dim     { color: var(--text-dim); }
+td.proto   { color: var(--accent-3); }
+td.ingress { color: var(--accent); }
+td.egress  { color: var(--accent-2); }
+
+/* Bar element used inside table cells */
+.bar-cell {
+    position: relative;
+    padding: 6px 12px;
+}
+.bar-cell .bar {
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    background: linear-gradient(90deg, rgba(108,240,194,0.15), rgba(108,240,194,0.05));
+    border-right: 1px solid rgba(108,240,194,0.4);
+    z-index: 0;
+}
+.bar-cell .label { position: relative; z-index: 1; }
+
+/* Time series chart */
+.timeseries {
+    position: relative;
+    height: 220px;
+}
+.ts-legend {
+    position: absolute;
+    top: 8px; right: 8px;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    color: var(--text-dim);
+    display: flex; gap: 14px;
+}
+.ts-legend .swatch {
+    display: inline-block; width: 8px; height: 8px;
+    margin-right: 6px; vertical-align: middle;
+}
+
+/* Interface row */
+.iface-card {
+    border: 1px solid var(--line);
+    background: var(--bg-2);
+    padding: 12px 14px;
+    margin-bottom: 8px;
+    display: grid;
+    grid-template-columns: 70px 1fr 1fr;
+    gap: 16px;
+    align-items: center;
+    cursor: pointer;
+    transition: border-color 100ms;
+}
+.iface-card:hover { border-color: var(--line-bright); }
+.iface-card .ifname {
+    font-weight: 500;
+    font-size: 14px;
+    color: var(--text);
+}
+.iface-card .ifindex {
+    font-size: 10px;
+    color: var(--text-faint);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+.iface-card .dir {
+    display: flex; flex-direction: column; gap: 2px;
+}
+.iface-card .dir .label {
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    color: var(--text-faint);
+}
+.iface-card .dir .value {
+    font-size: 14px;
+    font-variant-numeric: tabular-nums;
+}
+.iface-card .dir.in  .value { color: var(--accent); }
+.iface-card .dir.out .value { color: var(--accent-2); }
+.iface-card .dir .sub {
+    font-size: 10px; color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
+}
+
+/* Setup overlay (shown when no devices) */
+.setup-card {
+    background: var(--bg-1);
+    border: 1px solid var(--line);
+    padding: 24px;
+    max-width: 720px;
+    margin: 40px auto;
+}
+.setup-card h2 {
+    font-family: "Space Grotesk", sans-serif;
+    font-size: 18px;
+    color: var(--accent);
+    margin-bottom: 6px;
+    letter-spacing: 0.5px;
+}
+.setup-card p { color: var(--text-dim); margin-bottom: 16px; font-size: 12px; }
+.setup-card pre {
+    background: var(--bg-0);
+    border: 1px solid var(--line);
+    padding: 14px 16px;
+    color: var(--accent);
+    font-size: 12px;
+    line-height: 1.7;
+    overflow-x: auto;
+    margin-bottom: 16px;
+}
+.setup-card pre .c { color: var(--text-faint); }
+
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: var(--bg-0); }
+::-webkit-scrollbar-thumb { background: var(--line-bright); }
+::-webkit-scrollbar-thumb:hover { background: var(--text-faint); }
+
+.spinner {
+    display: inline-block;
+    width: 8px; height: 8px;
+    background: var(--accent);
+    animation: blink 1s steps(2) infinite;
+}
+@keyframes blink { 50% { opacity: 0; } }
+</style>
+</head>
+<body>
+<div class="app">
+
+    <header>
+        <div class="brand">
+            <div class="dot"></div>
+            FLOWSCOPE
+        </div>
+        <div class="header-stats">
+            <span>NETFLOW <b id="hdr-nf">—</b></span>
+            <span>SFLOW <b id="hdr-sf">—</b></span>
+            <span>FLOWS <b id="hdr-flows">—</b></span>
+            <span>DEVICES <b id="hdr-dev">—</b></span>
+            <span>UPTIME <b id="hdr-up">—</b></span>
+        </div>
+    </header>
+
+    <main>
+        <aside>
+            <h3>Exporters</h3>
+            <div id="device-list">
+                <div class="empty-state">
+                    No flow exporters detected yet.<br><br>
+                    Configure your switch to send to:<br>
+                    NetFlow → UDP <code id="empty-nf-port">2055</code><br>
+                    sFlow   → UDP <code id="empty-sf-port">6343</code>
+                </div>
+            </div>
+
+            <h3>Filter</h3>
+            <div style="padding:0 20px">
+                <button id="clear-filter" style="
+                    background:var(--bg-2); border:1px solid var(--line);
+                    color:var(--text-dim); padding:6px 10px; font-family:inherit;
+                    font-size:11px; cursor:pointer; width:100%;
+                    text-transform:uppercase; letter-spacing:1.5px;">
+                    Show All Devices
+                </button>
+            </div>
+        </aside>
+
+        <div class="content" id="content">
+            <div class="tabs">
+                <div class="tab active" data-tab="overview">Overview</div>
+                <div class="tab" data-tab="interfaces">Interfaces</div>
+                <div class="tab" data-tab="flows">Live Flows</div>
+                <div class="tab" data-tab="setup">Setup</div>
+            </div>
+            <div id="tab-content"></div>
+        </div>
+    </main>
+
+    <footer>
+        <span><span class="ok">●</span> COLLECTOR ONLINE</span>
+        <span id="foot-selected">VIEW: ALL DEVICES</span>
+        <span style="margin-left:auto" id="foot-time">—</span>
+    </footer>
+
+</div>
+
+<script>
+// ===== State =====
+const state = {
+    activeTab: "overview",
+    selectedExporter: null,
+    summary: null,
+    devices: [],
+    interfaces: [],
+    flows: [],
+    timeseries: null,
+    topTalkers: [],
+    topPorts: [],
+    protocols: [],
+};
+
+// ===== Utilities =====
+function bytesHuman(n) {
+    if (n == null || isNaN(n)) return "—";
+    if (n < 1024) return n + " B";
+    const u = ["KB","MB","GB","TB","PB"];
+    let i = -1; do { n /= 1024; i++; } while (n >= 1024 && i < u.length-1);
+    return n.toFixed(n < 10 ? 2 : (n < 100 ? 1 : 0)) + " " + u[i];
+}
+function bitsHuman(n) {
+    n = n * 8;
+    if (n < 1000) return n.toFixed(0) + " bps";
+    const u = ["Kbps","Mbps","Gbps","Tbps"];
+    let i = -1; do { n /= 1000; i++; } while (n >= 1000 && i < u.length-1);
+    return n.toFixed(n < 10 ? 2 : (n < 100 ? 1 : 0)) + " " + u[i];
+}
+function numHuman(n) {
+    if (n == null) return "—";
+    if (n < 1000) return n.toString();
+    const u = ["K","M","B","T"];
+    let i = -1; do { n /= 1000; i++; } while (n >= 1000 && i < u.length-1);
+    return n.toFixed(n < 10 ? 2 : (n < 100 ? 1 : 0)) + u[i];
+}
+function timeAgo(ts) {
+    if (!ts) return "—";
+    const s = Math.floor(Date.now()/1000 - ts);
+    if (s < 2)    return "now";
+    if (s < 60)   return s + "s ago";
+    if (s < 3600) return Math.floor(s/60) + "m ago";
+    if (s < 86400) return Math.floor(s/3600) + "h ago";
+    return Math.floor(s/86400) + "d ago";
+}
+function uptimeHuman(s) {
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const sec = s % 60;
+    return `${h}h ${String(m).padStart(2,"0")}m ${String(sec).padStart(2,"0")}s`;
+}
+function escapeHtml(s) {
+    if (s == null) return "";
+    return String(s).replace(/[&<>"']/g, c => ({
+        "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
+    }[c]));
+}
+
+// ===== API =====
+async function api(path) {
+    try {
+        const r = await fetch(path);
+        if (!r.ok) throw new Error(r.status);
+        return await r.json();
+    } catch (e) {
+        console.warn("api", path, e);
+        return null;
+    }
+}
+function exporterParam() {
+    return state.selectedExporter ? `?exporter=${encodeURIComponent(state.selectedExporter)}` : "";
+}
+
+// ===== Polling =====
+async function refreshAll() {
+    const ep = exporterParam();
+    const [summary, devices, interfaces, flows, ts, talkers, ports, protocols] = await Promise.all([
+        api("/api/summary"),
+        api("/api/devices"),
+        api("/api/interfaces" + ep),
+        api("/api/flows/recent" + (ep ? ep + "&limit=100" : "?limit=100")),
+        api("/api/timeseries" + (ep ? ep + "&seconds=180" : "?seconds=180")),
+        api("/api/top/talkers" + (ep ? ep + "&limit=15" : "?limit=15")),
+        api("/api/top/ports"   + (ep ? ep + "&limit=10" : "?limit=10")),
+        api("/api/protocols"   + ep),
+    ]);
+    if (summary)    state.summary    = summary;
+    if (devices)    state.devices    = devices;
+    if (interfaces) state.interfaces = interfaces;
+    if (flows)      state.flows      = flows;
+    if (ts)         state.timeseries = ts;
+    if (talkers)    state.topTalkers = talkers;
+    if (ports)      state.topPorts   = ports;
+    if (protocols)  state.protocols  = protocols;
+    render();
+}
+
+// ===== Rendering =====
+function render() {
+    renderHeader();
+    renderSidebar();
+    renderTab();
+    renderFooter();
+}
+
+function renderHeader() {
+    const s = state.summary;
+    if (!s) return;
+    document.getElementById("hdr-nf").textContent    = numHuman(s.netflow_packets);
+    document.getElementById("hdr-sf").textContent    = numHuman(s.sflow_packets);
+    document.getElementById("hdr-flows").textContent = numHuman(s.flows_recorded);
+    document.getElementById("hdr-dev").textContent   = s.device_count;
+    document.getElementById("hdr-up").textContent    = uptimeHuman(s.uptime_seconds);
+    document.getElementById("empty-nf-port").textContent = s.ports.netflow;
+    document.getElementById("empty-sf-port").textContent = s.ports.sflow;
+}
+
+function renderFooter() {
+    document.getElementById("foot-selected").textContent =
+        state.selectedExporter
+            ? `VIEW: ${state.selectedExporter}`
+            : "VIEW: ALL DEVICES";
+    document.getElementById("foot-time").textContent =
+        new Date().toISOString().replace("T"," ").slice(0,19) + " UTC";
+}
+
+function renderSidebar() {
+    const list = document.getElementById("device-list");
+    if (!state.devices.length) return;
+    list.innerHTML = state.devices.map(d => `
+        <div class="device-row ${state.selectedExporter === d.exporter ? "active" : ""}"
+             data-exporter="${escapeHtml(d.exporter)}">
+            <div class="ip">${escapeHtml(d.exporter)}</div>
+            <div class="meta">
+                <span class="badge ${d.type}">${d.type}</span>
+                ${d.interface_count} ifs · ${numHuman(d.flow_count)} flows · ${timeAgo(d.last_seen)}
+            </div>
+        </div>
+    `).join("");
+    list.querySelectorAll(".device-row").forEach(r => {
+        r.addEventListener("click", () => {
+            const exp = r.dataset.exporter;
+            state.selectedExporter = (state.selectedExporter === exp) ? null : exp;
+            refreshAll();
+        });
+    });
+}
+
+document.getElementById("clear-filter").addEventListener("click", () => {
+    state.selectedExporter = null;
+    refreshAll();
+});
+
+document.querySelectorAll(".tab").forEach(t => {
+    t.addEventListener("click", () => {
+        document.querySelectorAll(".tab").forEach(x => x.classList.remove("active"));
+        t.classList.add("active");
+        state.activeTab = t.dataset.tab;
+        renderTab();
+    });
+});
+
+function renderTab() {
+    const root = document.getElementById("tab-content");
+    if (state.activeTab === "overview")   root.innerHTML = renderOverview();
+    if (state.activeTab === "interfaces") root.innerHTML = renderInterfaces();
+    if (state.activeTab === "flows")      root.innerHTML = renderFlows();
+    if (state.activeTab === "setup")      root.innerHTML = renderSetup();
+    if (state.activeTab === "overview")   drawTimeseries();
+    if (state.activeTab === "interfaces") wireInterfaceClicks();
+}
+
+// ----- Overview tab -----
+function renderOverview() {
+    if (!state.devices.length) {
+        return renderSetup();   // bootstrap aid
+    }
+    return `
+        <div class="grid-3">
+            <div class="panel">
+                <div class="panel-head">
+                    <span class="accent">▸</span> Traffic — last 3 minutes
+                    <span class="meta">${state.selectedExporter || "all exporters"}</span>
+                </div>
+                <div class="panel-body">
+                    <div class="timeseries">
+                        <div class="ts-legend">
+                            <span><span class="swatch" style="background:var(--accent)"></span>INGRESS</span>
+                            <span><span class="swatch" style="background:var(--accent-2)"></span>EGRESS</span>
+                        </div>
+                        <canvas id="ts-canvas" width="800" height="220"></canvas>
+                    </div>
+                </div>
+            </div>
+            <div class="panel">
+                <div class="panel-head"><span class="accent">▸</span> Protocols</div>
+                <div class="panel-body" style="padding:0">${renderProtocolTable()}</div>
+            </div>
+            <div class="panel">
+                <div class="panel-head"><span class="accent">▸</span> Top Ports</div>
+                <div class="panel-body" style="padding:0">${renderTopPortsTable()}</div>
+            </div>
+        </div>
+        <div class="panel">
+            <div class="panel-head"><span class="accent">▸</span> Top Talkers (src → dst)</div>
+            <div class="panel-body" style="padding:0">${renderTopTalkersTable()}</div>
+        </div>
+    `;
+}
+
+function renderTopTalkersTable() {
+    if (!state.topTalkers.length) return `<div style="padding:24px;color:var(--text-faint)">No flows yet.</div>`;
+    const max = state.topTalkers[0].bytes || 1;
+    return `
+        <table>
+            <thead><tr>
+                <th>Source</th><th>Destination</th>
+                <th class="num">Bytes</th><th class="num">Packets</th>
+                <th class="num">Flows</th><th>Volume</th>
+            </tr></thead>
+            <tbody>
+            ${state.topTalkers.map(t => `
+                <tr>
+                    <td>${escapeHtml(t.src_ip)}</td>
+                    <td>${escapeHtml(t.dst_ip)}</td>
+                    <td class="num ingress">${bytesHuman(t.bytes)}</td>
+                    <td class="num dim">${numHuman(t.packets)}</td>
+                    <td class="num dim">${t.flows}</td>
+                    <td class="bar-cell" style="width:25%">
+                        <div class="bar" style="width:${(t.bytes/max*100).toFixed(1)}%"></div>
+                    </td>
+                </tr>
+            `).join("")}
+            </tbody>
+        </table>
+    `;
+}
+
+function renderTopPortsTable() {
+    if (!state.topPorts.length) return `<div style="padding:24px;color:var(--text-faint)">No flows yet.</div>`;
+    const max = state.topPorts[0].bytes || 1;
+    const named = {53:"DNS",80:"HTTP",443:"HTTPS",22:"SSH",25:"SMTP",
+                   123:"NTP",161:"SNMP",514:"Syslog",3389:"RDP",
+                   5060:"SIP",179:"BGP"};
+    return `
+        <table>
+            <thead><tr>
+                <th>Port</th><th>Service</th>
+                <th class="num">Bytes</th>
+            </tr></thead>
+            <tbody>
+            ${state.topPorts.map(t => `
+                <tr>
+                    <td class="proto">${t.port}</td>
+                    <td class="dim">${named[t.port] || t.protocol || ""}</td>
+                    <td class="bar-cell num">
+                        <div class="bar" style="width:${(t.bytes/max*100).toFixed(1)}%"></div>
+                        <span class="label">${bytesHuman(t.bytes)}</span>
+                    </td>
+                </tr>
+            `).join("")}
+            </tbody>
+        </table>
+    `;
+}
+
+function renderProtocolTable() {
+    if (!state.protocols.length) return `<div style="padding:24px;color:var(--text-faint)">No flows yet.</div>`;
+    const max = state.protocols[0].bytes || 1;
+    return `
+        <table>
+            <thead><tr>
+                <th>Proto</th><th class="num">Bytes</th><th class="num">Flows</th>
+            </tr></thead>
+            <tbody>
+            ${state.protocols.map(p => `
+                <tr>
+                    <td class="proto">${escapeHtml(p.protocol)}</td>
+                    <td class="bar-cell num">
+                        <div class="bar" style="width:${(p.bytes/max*100).toFixed(1)}%"></div>
+                        <span class="label">${bytesHuman(p.bytes)}</span>
+                    </td>
+                    <td class="num dim">${numHuman(p.flows)}</td>
+                </tr>
+            `).join("")}
+            </tbody>
+        </table>
+    `;
+}
+
+function drawTimeseries() {
+    const c = document.getElementById("ts-canvas");
+    if (!c || !state.timeseries) return;
+    const ctx = c.getContext("2d");
+    // Adapt to actual displayed width
+    const cw = c.clientWidth, ch = c.clientHeight;
+    if (c.width !== cw || c.height !== ch) { c.width = cw; c.height = ch; }
+    ctx.clearRect(0, 0, cw, ch);
+
+    const ing = state.timeseries.ingress;
+    const eg  = state.timeseries.egress;
+    const n   = ing.length;
+    const max = Math.max(1, ...ing, ...eg);
+
+    // grid
+    ctx.strokeStyle = "#1c2026";
+    ctx.lineWidth = 1;
+    for (let i = 1; i < 4; i++) {
+        const y = (ch / 4) * i;
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(cw, y); ctx.stroke();
+    }
+    // y-axis labels
+    ctx.fillStyle = "#4a5160";
+    ctx.font = "10px JetBrains Mono";
+    ctx.textAlign = "right";
+    ctx.fillText(bytesHuman(max) + "/s",        cw - 4, 12);
+    ctx.fillText(bytesHuman(max/2) + "/s",      cw - 4, ch/2 + 4);
+    ctx.fillText("0",                            cw - 4, ch - 4);
+
+    function plot(data, color, fillColor) {
+        ctx.beginPath();
+        for (let i = 0; i < n; i++) {
+            const x = (i / (n - 1)) * cw;
+            const y = ch - (data[i] / max) * (ch - 16) - 4;
+            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        // fill
+        ctx.lineTo(cw, ch); ctx.lineTo(0, ch); ctx.closePath();
+        ctx.fillStyle = fillColor;
+        ctx.fill();
+        // line
+        ctx.beginPath();
+        for (let i = 0; i < n; i++) {
+            const x = (i / (n - 1)) * cw;
+            const y = ch - (data[i] / max) * (ch - 16) - 4;
+            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+    }
+    plot(ing, "#6cf0c2", "rgba(108,240,194,0.10)");
+    if (eg.some(v => v > 0)) plot(eg, "#ff7b54", "rgba(255,123,84,0.08)");
+}
+
+// ----- Interfaces tab -----
+function renderInterfaces() {
+    if (!state.interfaces.length) {
+        return `<div class="panel"><div class="panel-body" style="color:var(--text-dim)">
+            No interfaces have reported traffic yet.
+            ${state.selectedExporter ? "Try clearing the device filter." : "Once flows arrive, interfaces will appear here."}
+        </div></div>`;
+    }
+    return `
+        <div class="panel">
+            <div class="panel-head">
+                <span class="accent">▸</span> Interfaces
+                <span class="meta">${state.interfaces.length} interfaces ·
+                    ingress + egress measured per ifIndex</span>
+            </div>
+            <div class="panel-body">
+                ${state.interfaces.map(i => `
+                    <div class="iface-card" data-exporter="${escapeHtml(i.exporter)}" data-ifindex="${i.ifindex}">
+                        <div>
+                            <div class="ifname">${escapeHtml(i.name)}</div>
+                            <div class="ifindex">idx ${i.ifindex} · ${escapeHtml(i.exporter)}</div>
+                        </div>
+                        <div class="dir in">
+                            <span class="label">▼ Ingress</span>
+                            <span class="value">${bytesHuman(i.ingress_bytes)}</span>
+                            <span class="sub">${numHuman(i.ingress_packets)} pkts</span>
+                        </div>
+                        <div class="dir out">
+                            <span class="label">▲ Egress</span>
+                            <span class="value">${bytesHuman(i.egress_bytes)}</span>
+                            <span class="sub">${numHuman(i.egress_packets)} pkts</span>
+                        </div>
+                    </div>
+                `).join("")}
+            </div>
+        </div>
+    `;
+}
+function wireInterfaceClicks() {
+    document.querySelectorAll(".iface-card").forEach(c => {
+        c.addEventListener("click", () => {
+            // jump to live flows filtered by this interface
+            const exp = c.dataset.exporter;
+            const idx = c.dataset.ifindex;
+            state.selectedExporter = exp;
+            state.activeTab = "flows";
+            window._ifindexFilter = idx;
+            document.querySelectorAll(".tab").forEach(t => {
+                t.classList.toggle("active", t.dataset.tab === "flows");
+            });
+            refreshAll();
+        });
+    });
+}
+
+// ----- Live flows tab -----
+function renderFlows() {
+    if (!state.flows.length) {
+        return `<div class="panel"><div class="panel-body" style="color:var(--text-dim)">
+            <span class="spinner"></span> Awaiting flow records.
+        </div></div>`;
+    }
+    let flows = state.flows;
+    if (window._ifindexFilter != null) {
+        const idx = parseInt(window._ifindexFilter);
+        flows = flows.filter(f => f.input_if === idx || f.output_if === idx);
+    }
+    return `
+        <div class="panel">
+            <div class="panel-head">
+                <span class="accent">▸</span> Live Flow Records
+                <span class="meta">${flows.length} most recent ${
+                    window._ifindexFilter != null ? `· ifindex ${window._ifindexFilter}` : ""
+                }</span>
+            </div>
+            <table>
+                <thead><tr>
+                    <th>Time</th><th>Exporter</th>
+                    <th>Src → Dst</th><th>Proto</th>
+                    <th class="num">In if</th><th class="num">Out if</th>
+                    <th class="num">Bytes</th><th class="num">Packets</th>
+                </tr></thead>
+                <tbody>
+                ${flows.map(f => `
+                    <tr>
+                        <td class="dim">${new Date((f.ts||0)*1000).toLocaleTimeString()}</td>
+                        <td class="dim">${escapeHtml(f.exporter)}</td>
+                        <td>
+                            <span>${escapeHtml(f.src_ip || "?")}${f.src_port ? ":" + f.src_port : ""}</span>
+                            <span class="dim"> → </span>
+                            <span>${escapeHtml(f.dst_ip || "?")}${f.dst_port ? ":" + f.dst_port : ""}</span>
+                        </td>
+                        <td class="proto">${escapeHtml(f.protocol_name || "")}</td>
+                        <td class="num ingress">${f.input_if ?? ""}</td>
+                        <td class="num egress">${f.output_if ?? ""}</td>
+                        <td class="num">${bytesHuman(f.bytes)}</td>
+                        <td class="num dim">${numHuman(f.packets)}</td>
+                    </tr>
+                `).join("")}
+                </tbody>
+            </table>
+        </div>
+    `;
+}
+
+// ----- Setup tab -----
+function renderSetup() {
+    const s = state.summary || { ports: { netflow: 2055, sflow: 6343 } };
+    return `
+        <div class="setup-card">
+            <h2>// Configure your switch</h2>
+            <p>Point your device's NetFlow or sFlow exporter at this collector. The
+               IP below is the host running FlowScope.</p>
+
+            <h2 style="margin-top:24px">Arista EOS — sFlow</h2>
+            <pre><span class="c">! On your Arista switch:</span>
+sflow source-interface Management1
+sflow destination &lt;collector-ip&gt; ${s.ports.sflow}
+sflow polling-interval 10
+sflow sample 10000
+sflow run</pre>
+
+            <h2>Arista EOS — NetFlow v9</h2>
+            <pre><span class="c">! Define a flow record / exporter:</span>
+flow tracking hardware
+   tracker FLOWSCOPE
+      record export on inactive timeout 15
+      record export on interval 60
+      exporter FLOWSCOPE_EXP
+         collector &lt;collector-ip&gt; port ${s.ports.netflow}
+         format ipfix version 10
+         template interval 5000
+   no shutdown
+<span class="c">! Enable on each interface you want monitored:</span>
+interface Ethernet1
+   flow tracker hardware FLOWSCOPE</pre>
+
+            <h2>Cisco IOS — NetFlow v9</h2>
+            <pre>flow exporter FLOWSCOPE
+ destination &lt;collector-ip&gt;
+ transport udp ${s.ports.netflow}
+ template data timeout 60
+flow monitor FM
+ exporter FLOWSCOPE
+ record netflow ipv4 original-input
+interface GigabitEthernet0/1
+ ip flow monitor FM input
+ ip flow monitor FM output</pre>
+
+            <h2>Test from any Linux box</h2>
+            <pre><span class="c"># Send a synthetic sFlow datagram with hping3 / nc</span>
+sudo apt install nfdump softflowd        <span class="c"># optional generators</span></pre>
+
+            <p>Once a device starts sending, it will appear in the left sidebar
+               and the Overview tab will start drawing.</p>
+        </div>
+    `;
+}
+
+// ===== Boot =====
+refreshAll();
+setInterval(refreshAll, 3000);
+window.addEventListener("resize", drawTimeseries);
+</script>
+</body>
+</html>

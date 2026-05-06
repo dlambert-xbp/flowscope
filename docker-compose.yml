@@ -1,0 +1,21 @@
+services:
+  flowscope:
+    build: .
+    image: flowscope:latest
+    container_name: flowscope
+    restart: unless-stopped
+    ports:
+      - "8080:8080/tcp"     # web dashboard
+      - "2055:2055/udp"     # NetFlow v5/v9/IPFIX
+      - "6343:6343/udp"     # sFlow v5
+    volumes:
+      - flowscope-data:/data
+    # Optional: lock down resource usage
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+
+volumes:
+  flowscope-data:
