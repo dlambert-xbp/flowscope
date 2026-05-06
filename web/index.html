@@ -7,8 +7,18 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet">
+<script>
+// Resolve theme before stylesheet applies so we don't flash dark→light.
+(function () {
+    var pref = localStorage.getItem("flowscope:theme") || "system";
+    var resolved = pref === "system"
+        ? (window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark")
+        : pref;
+    document.documentElement.setAttribute("data-theme", resolved);
+})();
+</script>
 <style>
-:root {
+:root, :root[data-theme="dark"] {
     --bg-0:        #08090b;
     --bg-1:        #0d0f12;
     --bg-2:        #14171c;
@@ -23,6 +33,31 @@
     --accent-3:    #5fa8ff;   /* signal blue */
     --warn:        #f5d36e;
     --danger:      #ff5e7e;
+    --chart-ingress-fill: rgba(108,240,194,0.10);
+    --chart-egress-fill:  rgba(255,123,84,0.08);
+    --body-glow-1: rgba(108,240,194,0.04);
+    --body-glow-2: rgba(95,168,255,0.03);
+}
+
+:root[data-theme="light"] {
+    --bg-0:        #f4f6fa;
+    --bg-1:        #ffffff;
+    --bg-2:        #eef1f6;
+    --bg-3:        #e3e8f0;
+    --line:        #d8dde6;
+    --line-bright: #b9c1cf;
+    --text:        #161b22;
+    --text-dim:    #4a5160;
+    --text-faint:  #8a93a3;
+    --accent:      #009b6d;
+    --accent-2:    #c8552b;
+    --accent-3:    #2563eb;
+    --warn:        #b8870a;
+    --danger:      #d63862;
+    --chart-ingress-fill: rgba(0,155,109,0.12);
+    --chart-egress-fill:  rgba(200,85,43,0.10);
+    --body-glow-1: rgba(0,155,109,0.05);
+    --body-glow-2: rgba(37,99,235,0.04);
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -39,8 +74,8 @@ html, body {
 
 body {
     background-image:
-        radial-gradient(circle at 20% 0%,   rgba(108,240,194,0.04) 0%, transparent 40%),
-        radial-gradient(circle at 90% 100%, rgba(95,168,255,0.03)  0%, transparent 40%);
+        radial-gradient(circle at 20% 0%,   var(--body-glow-1) 0%, transparent 40%),
+        radial-gradient(circle at 90% 100%, var(--body-glow-2) 0%, transparent 40%);
 }
 
 /* Layout */
@@ -267,8 +302,10 @@ td.egress  { color: var(--accent-2); }
 .bar-cell .bar {
     position: absolute;
     left: 0; top: 0; bottom: 0;
-    background: linear-gradient(90deg, rgba(108,240,194,0.15), rgba(108,240,194,0.05));
-    border-right: 1px solid rgba(108,240,194,0.4);
+    background: linear-gradient(90deg,
+        color-mix(in srgb, var(--accent) 15%, transparent),
+        color-mix(in srgb, var(--accent) 5%,  transparent));
+    border-right: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
     z-index: 0;
 }
 .bar-cell .label { position: relative; z-index: 1; }
@@ -468,6 +505,32 @@ th.sort-active   { color: var(--accent); }
 /* Footer live indicator */
 footer .live-ok    { color: var(--accent); }
 footer .live-stale { color: var(--danger); }
+
+/* Theme switcher (footer, bottom-left) */
+.theme-switch {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+}
+.theme-switch button {
+    background: transparent;
+    border: 1px solid transparent;
+    color: var(--text-faint);
+    cursor: pointer;
+    padding: 2px 5px;
+    line-height: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    transition: color 100ms, background 100ms, border-color 100ms;
+}
+.theme-switch button:hover { color: var(--text-dim); }
+.theme-switch button.active {
+    color: var(--accent);
+    border-color: var(--line-bright);
+    background: var(--bg-2);
+}
+.theme-switch svg { width: 13px; height: 13px; }
 </style>
 </head>
 <body>
@@ -523,6 +586,17 @@ footer .live-stale { color: var(--danger); }
     </main>
 
     <footer>
+        <span class="theme-switch" role="group" aria-label="Theme">
+            <button data-theme="light" title="Light" aria-label="Light theme">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>
+            </button>
+            <button data-theme="dark" title="Dark" aria-label="Dark theme">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+            </button>
+            <button data-theme="system" title="System" aria-label="System theme">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="14" x="2" y="3" rx="2"/><line x1="8" x2="16" y1="21" y2="21"/><line x1="12" x2="12" y1="17" y2="21"/></svg>
+            </button>
+        </span>
         <span><span class="ok">●</span> COLLECTOR ONLINE</span>
         <span id="foot-selected">VIEW: ALL DEVICES</span>
         <span id="foot-status" class="live-ok" style="margin-left:auto">● LIVE</span>
@@ -1066,20 +1140,29 @@ function drawTimeseries() {
     if (c.width !== cw || c.height !== ch) { c.width = cw; c.height = ch; }
     ctx.clearRect(0, 0, cw, ch);
 
+    const css = getComputedStyle(document.documentElement);
+    const cssVar = (name) => css.getPropertyValue(name).trim();
+    const gridColor    = cssVar("--line");
+    const axisColor    = cssVar("--text-faint");
+    const ingressColor = cssVar("--accent");
+    const egressColor  = cssVar("--accent-2");
+    const ingressFill  = cssVar("--chart-ingress-fill");
+    const egressFill   = cssVar("--chart-egress-fill");
+
     const ing = state.timeseries.ingress;
     const eg  = state.timeseries.egress;
     const n   = ing.length;
     const max = Math.max(1, ...ing, ...eg);
 
     // grid
-    ctx.strokeStyle = "#1c2026";
+    ctx.strokeStyle = gridColor;
     ctx.lineWidth = 1;
     for (let i = 1; i < 4; i++) {
         const y = (ch / 4) * i;
         ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(cw, y); ctx.stroke();
     }
     // y-axis labels
-    ctx.fillStyle = "#4a5160";
+    ctx.fillStyle = axisColor;
     ctx.font = "10px JetBrains Mono";
     ctx.textAlign = "right";
     ctx.fillText(bytesHuman(max) + "/s",        cw - 4, 12);
@@ -1108,8 +1191,8 @@ function drawTimeseries() {
         ctx.lineWidth = 1.5;
         ctx.stroke();
     }
-    plot(ing, "#6cf0c2", "rgba(108,240,194,0.10)");
-    if (eg.some(v => v > 0)) plot(eg, "#ff7b54", "rgba(255,123,84,0.08)");
+    plot(ing, ingressColor, ingressFill);
+    if (eg.some(v => v > 0)) plot(eg, egressColor, egressFill);
 }
 
 // ----- Interfaces tab -----
@@ -1337,6 +1420,30 @@ sudo apt install nfdump softflowd        <span class="c"># optional generators</
         </div>
     `;
 }
+
+// ===== Theme switcher =====
+const THEME_KEY = "flowscope:theme";
+function getThemePref() { return localStorage.getItem(THEME_KEY) || "system"; }
+function applyTheme(pref) {
+    const resolved = pref === "system"
+        ? (window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark")
+        : pref;
+    document.documentElement.setAttribute("data-theme", resolved);
+    document.querySelectorAll(".theme-switch button").forEach(b => {
+        b.classList.toggle("active", b.dataset.theme === pref);
+    });
+    if (state.activeTab === "overview") drawTimeseries();
+}
+document.querySelectorAll(".theme-switch button").forEach(b => {
+    b.addEventListener("click", () => {
+        localStorage.setItem(THEME_KEY, b.dataset.theme);
+        applyTheme(b.dataset.theme);
+    });
+});
+window.matchMedia("(prefers-color-scheme: light)").addEventListener("change", () => {
+    if (getThemePref() === "system") applyTheme("system");
+});
+applyTheme(getThemePref());
 
 // ===== Boot =====
 refreshAll();
