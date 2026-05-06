@@ -847,41 +847,74 @@ def api_protocols():
 
 @app.route("/api/timeseries")
 def api_timeseries():
-    """Bucketed per-second bytes for the last N seconds.
-    Optional ?seconds=300 ?exporter=... ?ifindex=..."""
+    """Bucketed bytes/sec for the last N seconds.
+    Optional ?seconds=300 ?exporter=... ?ifindex=...
+
+    Short windows (<= 300s) read from the in-memory ring; longer windows
+    read from SQLite, which holds the full ~6h of pruned history. The
+    response is downsampled to ~600 buckets so payload stays bounded for
+    long windows; values returned are bytes/sec averaged over each
+    bucket."""
+    # Clamp to [60s, 6h] — 6h matches the SQLite prune horizon.
     seconds = int(request.args.get("seconds", 300))
+    seconds = max(60, min(seconds, 6 * 3600))
     exporter_filter = request.args.get("exporter")
     ifindex_filter  = request.args.get("ifindex")
     if ifindex_filter is not None:
         ifindex_filter = int(ifindex_filter)
     now = int(time.time())
     cutoff = now - seconds
-    buckets_in  = [0] * seconds
-    buckets_out = [0] * seconds
-    with state_lock:
-        flows = list(recent_flows)
-    for f in flows:
-        ts = int(f.get("ts", 0))
-        if ts < cutoff or ts > now:
-            continue
-        if exporter_filter and f.get("exporter") != exporter_filter:
-            continue
-        bucket = ts - cutoff - 1
-        if bucket < 0 or bucket >= seconds:
-            continue
-        b = f.get("bytes", 0) or 0
+
+    TARGET_BUCKETS = 600
+    bucket_size = max(1, seconds // TARGET_BUCKETS)
+    n_buckets   = (seconds + bucket_size - 1) // bucket_size
+    sum_in  = [0] * n_buckets
+    sum_out = [0] * n_buckets
+
+    def add(ts, b, in_if, out_if):
+        bucket = (int(ts) - cutoff) // bucket_size
+        if bucket < 0 or bucket >= n_buckets:
+            return
+        b = b or 0
         if ifindex_filter is None:
-            buckets_in[bucket] += b
+            sum_in[bucket] += b
         else:
-            if f.get("input_if") == ifindex_filter:
-                buckets_in[bucket] += b
-            if f.get("output_if") == ifindex_filter:
-                buckets_out[bucket] += b
+            if in_if == ifindex_filter:
+                sum_in[bucket]  += b
+            if out_if == ifindex_filter:
+                sum_out[bucket] += b
+
+    if seconds <= 300:
+        with state_lock:
+            flows = list(recent_flows)
+        for f in flows:
+            ts = f.get("ts", 0)
+            if ts < cutoff or ts > now:
+                continue
+            if exporter_filter and f.get("exporter") != exporter_filter:
+                continue
+            add(ts, f.get("bytes"), f.get("input_if"), f.get("output_if"))
+    else:
+        sql = "SELECT ts, bytes, input_if, output_if FROM flows WHERE ts >= ?"
+        params = [cutoff]
+        if exporter_filter:
+            sql += " AND exporter = ?"
+            params.append(exporter_filter)
+        with db_lock:
+            rows = db_conn.execute(sql, params).fetchall()
+        for ts, bts, in_if, out_if in rows:
+            if ts > now:
+                continue
+            add(ts, bts, in_if, out_if)
+
+    ingress = [s / bucket_size for s in sum_in]
+    egress  = [s / bucket_size for s in sum_out]
     return jsonify({
-        "start_ts": cutoff,
-        "seconds": seconds,
-        "ingress": buckets_in,
-        "egress":  buckets_out,
+        "start_ts":    cutoff,
+        "seconds":     seconds,
+        "bucket_size": bucket_size,
+        "ingress":     ingress,
+        "egress":      egress,
     })
 
 

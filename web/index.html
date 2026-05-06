@@ -506,6 +506,34 @@ th.sort-active   { color: var(--accent); }
 footer .live-ok    { color: var(--accent); }
 footer .live-stale { color: var(--danger); }
 
+/* Time-range selector (Overview timeseries panel head) */
+.range-switch {
+    margin-left: auto;
+    display: inline-flex;
+    gap: 2px;
+}
+.range-switch button {
+    background: transparent;
+    border: 1px solid var(--line);
+    color: var(--text-faint);
+    font-family: inherit;
+    font-size: 10px;
+    letter-spacing: 1px;
+    padding: 2px 8px;
+    cursor: pointer;
+    text-transform: uppercase;
+    transition: color 100ms, background 100ms, border-color 100ms;
+}
+.range-switch button:hover {
+    color: var(--text-dim);
+    border-color: var(--line-bright);
+}
+.range-switch button.active {
+    color: var(--accent);
+    border-color: var(--accent);
+    background: var(--bg-2);
+}
+
 /* Theme switcher (footer, bottom-left) */
 .theme-switch {
     display: inline-flex;
@@ -607,10 +635,22 @@ footer .live-stale { color: var(--danger); }
 
 <script>
 // ===== State =====
+const RANGE_OPTIONS = [
+    { label: "3m",  seconds: 180   },
+    { label: "15m", seconds: 900   },
+    { label: "1h",  seconds: 3600  },
+    { label: "6h",  seconds: 21600 },
+];
+const RANGE_KEY = "flowscope:range";
+const ALLOWED_RANGE_SECONDS = RANGE_OPTIONS.map(r => r.seconds);
+const savedRange = parseInt(localStorage.getItem(RANGE_KEY) || "0", 10);
+const initialRange = ALLOWED_RANGE_SECONDS.includes(savedRange) ? savedRange : 180;
+
 const state = {
     activeTab: "overview",
     selectedExporter: null,
     ifindexFilter: null,        // server-side ifindex filter for flows + timeseries
+    timeseriesSeconds: initialRange,
     summary: null,
     devices: [],
     interfaces: [],
@@ -701,7 +741,7 @@ async function refreshAll() {
         ? `?exporter=${encodeURIComponent(state.selectedExporter)}`
         : "";
     const flowsParams = buildParams({ limit: 200 });
-    const tsParams    = buildParams({ seconds: 180 });
+    const tsParams    = buildParams({ seconds: state.timeseriesSeconds });
     const settled = await Promise.allSettled([
         api("/api/summary"),
         api("/api/devices"),
@@ -1012,10 +1052,22 @@ function renderTab() {
     if (state.activeTab === "interfaces") root.innerHTML = renderInterfaces();
     if (state.activeTab === "flows")      root.innerHTML = renderFlows();
     if (state.activeTab === "setup")      root.innerHTML = renderSetup();
-    if (state.activeTab === "overview")   drawTimeseries();
+    if (state.activeTab === "overview")   { wireOverviewControls(); drawTimeseries(); }
     if (state.activeTab === "interfaces") wireInterfaceTable();
     if (state.activeTab === "flows")      wireFlowsControls();
     wireTables();
+}
+
+function wireOverviewControls() {
+    document.querySelectorAll(".range-switch button").forEach(b => {
+        b.addEventListener("click", () => {
+            const s = parseInt(b.dataset.seconds, 10);
+            if (!ALLOWED_RANGE_SECONDS.includes(s)) return;
+            state.timeseriesSeconds = s;
+            localStorage.setItem(RANGE_KEY, String(s));
+            refreshAll();
+        });
+    });
 }
 
 // ----- Overview tab -----
@@ -1028,26 +1080,31 @@ function renderOverview() {
     //     There's no meaningful direction so we show a single "VOLUME" series.
     //   - With ifindex filter: split into INGRESS / EGRESS for that interface.
     const ifFilter = state.ifindexFilter != null;
-    const tsHead = ifFilter
-        ? `Ingress / Egress — if${escapeHtml(state.ifindexFilter)}`
-        : `Total Flow Volume — last 3 minutes`;
-    const tsLegend = ifFilter
-        ? `<span><span class="swatch" style="background:var(--accent)"></span>INGRESS</span>
-           <span><span class="swatch" style="background:var(--accent-2)"></span>EGRESS</span>`
-        : `<span><span class="swatch" style="background:var(--accent)"></span>VOLUME</span>
-           <span style="color:var(--text-faint)">each flow counted once</span>`;
     const scope = state.selectedExporter
         ? (() => {
               const d = state.devices.find(x => x.exporter === state.selectedExporter);
               return d ? exporterDisplayName(d) : state.selectedExporter;
           })()
         : "all exporters";
+    const tsHead = ifFilter
+        ? `Ingress / Egress · if${escapeHtml(state.ifindexFilter)} · ${escapeHtml(scope)}`
+        : `Total Flow Volume · ${escapeHtml(scope)}`;
+    const tsLegend = ifFilter
+        ? `<span><span class="swatch" style="background:var(--accent)"></span>INGRESS</span>
+           <span><span class="swatch" style="background:var(--accent-2)"></span>EGRESS</span>`
+        : `<span><span class="swatch" style="background:var(--accent)"></span>VOLUME</span>
+           <span style="color:var(--text-faint)">each flow counted once</span>`;
+    const rangeButtons = RANGE_OPTIONS.map(r =>
+        `<button data-seconds="${r.seconds}"${
+            state.timeseriesSeconds === r.seconds ? ' class="active"' : ""
+        }>${r.label}</button>`
+    ).join("");
     return `
         <div class="grid-3">
             <div class="panel">
                 <div class="panel-head">
                     <span class="accent">▸</span> ${tsHead}
-                    <span class="meta">${escapeHtml(scope)}</span>
+                    <span class="range-switch" role="group" aria-label="Time range">${rangeButtons}</span>
                 </div>
                 <div class="panel-body">
                     <div class="timeseries">

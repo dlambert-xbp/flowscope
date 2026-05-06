@@ -8,16 +8,18 @@ Short list of decided-on changes. Keep tight; not a wishlist.
   `localStorage["flowscope:theme"]`, bottom-left of the footer.
   Implemented in `web/index.html`.
 
+- [x] **Configurable time range on graphs (3m / 15m / 1h / 6h).**
+  Selector lives in the Overview timeseries panel head, persisted in
+  `localStorage["flowscope:range"]`. Backend (`/api/timeseries`) reads
+  from the in-memory ring for windows ≤ 5 min and from SQLite for longer
+  windows, downsampled server-side to ~600 buckets returned as bytes/sec.
+  6 h cap matches the SQLite prune horizon.
+
 ## Planned
 
-- [ ] **Configurable time range on graphs.** Everything is currently
-  hard-coded to 3 minutes (`/api/timeseries?seconds=180` in `refreshAll`).
-  Add a selector — e.g. `5m / 15m / 1h / 6h` — that drives the timeseries
-  query and any other windowed views. Notes:
-    - SQLite prune in `db_prune_loop` caps real history at ~6 h, so that's
-      the upper bound unless retention is extended.
-    - `recent_flows` is a 5000-entry ring (no time bound) and feeds top
-      talkers / top ports / protocols. A user-selected window for those
-      means routing aggregations through SQLite instead of the ring.
-    - The `seconds` query param on `/api/timeseries` already exists;
-      change is mostly frontend.
+- [ ] **Time-window the other Overview aggregations (top talkers / top
+  ports / protocols).** Right now those still aggregate over whatever
+  happens to be in the 5000-entry `recent_flows` ring, regardless of the
+  range selector. Honoring the range means routing them through SQLite.
+  Pre-aggregation (or SQL `GROUP BY src_ip, dst_ip` with a `LIMIT`) will
+  matter at 6 h windows.
