@@ -1804,15 +1804,28 @@ document.querySelectorAll(".tab").forEach(t => {
 
 function renderTab() {
     const root = document.getElementById("tab-content");
+    // SNMP tab manages its own state in-place so the 3s refresh doesn't
+    // tear down forms, scroll position, hover, or edit slots. Build the
+    // static frame once when the tab is activated; on subsequent renders
+    // updateSnmpInPlace() touches only the cells that actually change.
+    if (state.activeTab === "snmp") {
+        if (state.lastRenderedTab !== "snmp") {
+            root.innerHTML = renderSnmp();
+            wireSnmpControls();
+            state.lastRenderedTab = "snmp";
+        }
+        updateSnmpInPlace();
+        wireTables();
+        return;
+    }
+    state.lastRenderedTab = state.activeTab;
     if (state.activeTab === "overview")   root.innerHTML = renderOverview();
     if (state.activeTab === "interfaces") root.innerHTML = renderInterfaces();
     if (state.activeTab === "flows")      root.innerHTML = renderFlows();
-    if (state.activeTab === "snmp")       root.innerHTML = renderSnmp();
     if (state.activeTab === "setup")      root.innerHTML = renderSetup();
     if (state.activeTab === "overview")   { wireOverviewControls(); drawTimeseries(); }
     if (state.activeTab === "interfaces") wireInterfaceTable();
     if (state.activeTab === "flows")      wireFlowsControls();
-    if (state.activeTab === "snmp")       wireSnmpControls();
     wireTables();
 }
 
@@ -2460,7 +2473,18 @@ function renderSnmpStatusTable(devices) {
     if (!devices.length) {
         return `<div class="snmp-empty" style="padding:16px">No devices polled yet. Create a profile, bind it, and wait for the next tick.</div>`;
     }
-    const rows = devices.map(r => {
+    return `
+        <table class="snmp-status-table">
+          <thead><tr>
+            <th>Exporter</th><th>Health</th><th>Last poll</th><th>Last ok</th>
+            <th>Ifs</th><th>Fails</th><th>Last error</th><th></th>
+          </tr></thead>
+          <tbody>${_renderSnmpStatusRows(devices)}</tbody>
+        </table>`;
+}
+
+function _renderSnmpStatusRows(devices) {
+    return devices.map(r => {
         const cls = r.health === "ok" ? "ok" : (r.health === "error" ? "err" : "stale");
         const errCell = r.last_error ? `<span class="err">${_esc(r.last_error)}</span>` : "—";
         return `
@@ -2477,14 +2501,55 @@ function renderSnmpStatusTable(devices) {
               </td>
             </tr>`;
     }).join("");
-    return `
-        <table class="snmp-status-table">
-          <thead><tr>
-            <th>Exporter</th><th>Health</th><th>Last poll</th><th>Last ok</th>
-            <th>Ifs</th><th>Fails</th><th>Last error</th><th></th>
-          </tr></thead>
-          <tbody>${rows}</tbody>
-        </table>`;
+}
+
+// Per-tick in-place updates for the SNMP tab. Touches only the things that
+// genuinely change every 3 seconds (status counts, status table rows). Forms,
+// profile list, and bindings list are left alone unless explicitly rebuilt
+// after a user mutation. This is what stops the tab from flickering and
+// stealing focus on every refresh.
+function updateSnmpInPlace() {
+    const stat    = state.snmpStatus || {};
+    const summ    = stat.summary || { ok: 0, stale: 0, error: 0, total: 0 };
+    const devices = stat.devices || [];
+
+    // Top status counters
+    const okEl = document.querySelector(".snmp-h-stat.ok");
+    const stEl = document.querySelector(".snmp-h-stat.stale");
+    const erEl = document.querySelector(".snmp-h-stat.err");
+    if (okEl) okEl.textContent = `${summ.ok} ok`;
+    if (stEl) stEl.textContent = `${summ.stale} stale`;
+    if (erEl) erEl.textContent = `${summ.error} error`;
+
+    // Status table body. Only the tbody is replaced, never the surrounding
+    // <table> or column headers — that's the bit users were watching twitch.
+    const tbody = document.querySelector(".snmp-status-table tbody");
+    if (tbody && devices.length) {
+        tbody.innerHTML = _renderSnmpStatusRows(devices);
+    } else {
+        // Transition empty -> populated or populated -> empty: replace just
+        // the status panel body, not the whole tab.
+        const panels = document.querySelectorAll(".snmp-page > .panel");
+        const statusPanel = panels[panels.length - 1];
+        if (statusPanel) {
+            const body = statusPanel.querySelector(".panel-body");
+            if (body && (!tbody || !devices.length)) {
+                body.innerHTML = renderSnmpStatusTable(devices);
+            }
+        }
+    }
+}
+
+// Force a full re-render of the static SNMP frame. Called after profile or
+// binding mutations so the lists reflect what's now in state. No-op when the
+// SNMP tab isn't active (the next click into the tab will rebuild fresh
+// anyway via state.lastRenderedTab).
+function rebuildSnmpStatic() {
+    if (state.activeTab !== "snmp") return;
+    const root = document.getElementById("tab-content");
+    if (!root) return;
+    root.innerHTML = renderSnmp();
+    wireSnmpControls();
 }
 
 // ----- SNMP wiring -----
@@ -2570,16 +2635,15 @@ async function snmpSubmitProfile(form) {
     try {
         if (existing) {
             await apiSend(`/api/snmp/profiles/${encodeURIComponent(existing)}`, "PATCH", body);
-            _snmpMsg(msgId, "ok", "Profile saved.");
-            // Close the edit slot
-            const slot = document.getElementById(`snmp-edit-profile-${existing}`);
-            if (slot) slot.innerHTML = "";
         } else {
             await apiSend("/api/snmp/profiles", "POST", body);
-            _snmpMsg(msgId, "ok", "Profile created.");
-            form.reset();
         }
         await refreshAll();
+        // Static frame (profile list, forms) needs a rebuild now that the
+        // underlying data changed. The msg div gets recreated; we write to
+        // it after the rebuild so the success toast shows on the fresh DOM.
+        rebuildSnmpStatic();
+        _snmpMsg(msgId, "ok", existing ? "Profile saved." : "Profile created.");
     } catch (e) {
         _snmpMsg(msgId, "err", e.message);
     }
@@ -2589,6 +2653,7 @@ async function snmpDeleteProfile(name) {
     try {
         await apiSend(`/api/snmp/profiles/${encodeURIComponent(name)}`, "DELETE");
         await refreshAll();
+        rebuildSnmpStatic();
     } catch (e) {
         _snmpMsg(`snmp-msg-profile-${name}`, "err", e.message);
     }
@@ -2642,9 +2707,9 @@ async function snmpSubmitBinding(form) {
     else                          url = `/api/snmp/bindings/device/${encodeURIComponent(scope_id)}`;
     try {
         await apiSend(url, "PUT", body);
-        _snmpMsg("snmp-msg-bindings", "ok", "Binding saved.");
-        form.reset();
         await refreshAll();
+        rebuildSnmpStatic();
+        _snmpMsg("snmp-msg-bindings", "ok", "Binding saved.");
     } catch (e) {
         _snmpMsg("snmp-msg-bindings", "err", e.message);
     }
@@ -2658,6 +2723,7 @@ async function snmpDeleteBinding(scope, scope_id) {
     try {
         await apiSend(url, "DELETE");
         await refreshAll();
+        rebuildSnmpStatic();
     } catch (e) {
         _snmpMsg("snmp-msg-bindings", "err", e.message);
     }
@@ -2680,7 +2746,9 @@ function wireSnmpControls() {
     const root = document.getElementById("tab-content");
     if (!root) return;
 
-    // Version toggle on the new-profile form.
+    // Version toggle on the new-profile form. Forms are fresh after every
+    // static rebuild, so attaching submit handlers here is safe (no stale
+    // listeners on torn-down nodes).
     root.querySelectorAll('form[data-form="profile"]').forEach(f => {
         const prefix = f.dataset.existing ? `edit-${f.dataset.existing}` : "new";
         _wireVersionToggle(f, prefix);
@@ -2693,7 +2761,11 @@ function wireSnmpControls() {
         f.addEventListener("submit", (ev) => { ev.preventDefault(); snmpSubmitBinding(f); });
     });
 
-    // Click delegation for actions inside the SNMP page.
+    // Click delegation: attach exactly once. tab-content's innerHTML can be
+    // replaced any number of times but the element itself persists, so a
+    // single delegated listener handles every rebuild.
+    if (root.dataset.snmpClickAttached === "1") return;
+    root.dataset.snmpClickAttached = "1";
     root.addEventListener("click", (ev) => {
         const t = ev.target.closest("[data-act]");
         if (!t) return;
