@@ -1,7 +1,33 @@
 import { useQuery } from '@tanstack/react-query'
 import { useState, type ReactNode } from 'react'
-import { api, fmt } from '../api'
+import { api, fmt, labelExporter, labelInterface } from '../api'
 import type { Device, DeviceInventory, InterfaceRow, RecentFlow } from '../api'
+
+// TwoLine renders a primary value with a smaller, faint secondary
+// underneath. Used everywhere the SNMP enrichment exposes a
+// human-friendly name plus a stable identifier (sys_name + IP, or
+// if_descr + if_alias). The wrapper applies `truncate` so wide
+// values don't blow out narrow cells.
+function TwoLine({
+  primary,
+  secondary,
+  primaryClass = 'font-mono',
+  secondaryClass = 'font-mono italic text-faint',
+}: {
+  primary: ReactNode
+  secondary?: ReactNode
+  primaryClass?: string
+  secondaryClass?: string
+}) {
+  return (
+    <div className="min-w-0 max-w-full">
+      <div className={`${primaryClass} truncate`}>{primary}</div>
+      {secondary && (
+        <div className={`${secondaryClass} text-[10.5px] truncate`}>{secondary}</div>
+      )}
+    </div>
+  )
+}
 
 // Devices tab — directory of exporters seen in flows on the left,
 // feature view of the selected exporter on the right with three
@@ -99,6 +125,7 @@ function DirectoryRow({
   const since = secondsSince(d.last_seen)
   const dot =
     since < 60 ? 'bg-ok' : since < 300 ? 'bg-warn' : 'bg-crit'
+  const lbl = labelExporter(d)
   return (
     <button
       onClick={onSelect}
@@ -106,8 +133,13 @@ function DirectoryRow({
         active ? 'bg-accent-wash' : ''
       }`}
     >
-      <span className={`w-1.5 h-1.5 rounded-full ${dot} shrink-0`} />
-      <span className="font-mono text-[12.5px] truncate">{d.exporter}</span>
+      <span className={`w-1.5 h-1.5 rounded-full ${dot} shrink-0 mt-0.5 self-start`} />
+      <div className="min-w-0 flex-1">
+        <div className="font-mono text-[12.5px] truncate">{lbl.primary}</div>
+        {lbl.secondary && (
+          <div className="font-mono text-[10.5px] text-faint truncate">{lbl.secondary}</div>
+        )}
+      </div>
       <span className="ml-auto font-mono text-[10.5px] text-faint shrink-0 tabular">
         {fmt.bps((d.bytes * 8) / 300)}
       </span>
@@ -422,10 +454,18 @@ function InterfacesMini({ exporter }: { exporter: string }) {
     )
   }
   return (
-    <table className="w-full">
+    <table className="w-full table-fixed">
+      <colgroup>
+        <col style={{ width: '40%' }} />
+        <col />
+        <col />
+        <col />
+        <col />
+        <col style={{ width: '90px' }} />
+      </colgroup>
       <thead>
         <tr>
-          <th className="r">ifindex</th>
+          <th>interface</th>
           <th className="r">in (latest)</th>
           <th className="r">out (latest)</th>
           <th className="r">in peak</th>
@@ -434,16 +474,21 @@ function InterfacesMini({ exporter }: { exporter: string }) {
         </tr>
       </thead>
       <tbody>
-        {ifaces.slice(0, 10).map((i: InterfaceRow) => (
-          <tr key={i.ifindex} className="hover:bg-surface">
-            <td className="r n">{i.ifindex}</td>
-            <td className="r n">{fmt.bps(i.in_bps_latest)}</td>
-            <td className="r n">{fmt.bps(i.out_bps_latest)}</td>
-            <td className="r n text-accent">{fmt.bps(i.in_bps_peak)}</td>
-            <td className="r n text-ok">{fmt.bps(i.out_bps_peak)}</td>
-            <td className="r n text-faint">{fmt.time(i.last_seen).slice(11, 19)}</td>
-          </tr>
-        ))}
+        {ifaces.slice(0, 10).map((i: InterfaceRow) => {
+          const lbl = labelInterface(i)
+          return (
+            <tr key={i.ifindex} className="hover:bg-surface">
+              <td>
+                <TwoLine primary={lbl.primary} secondary={lbl.secondary || undefined} />
+              </td>
+              <td className="r n">{fmt.bps(i.in_bps_latest)}</td>
+              <td className="r n">{fmt.bps(i.out_bps_latest)}</td>
+              <td className="r n text-accent">{fmt.bps(i.in_bps_peak)}</td>
+              <td className="r n text-ok">{fmt.bps(i.out_bps_peak)}</td>
+              <td className="r n text-faint">{fmt.time(i.last_seen).slice(11, 19)}</td>
+            </tr>
+          )
+        })}
       </tbody>
     </table>
   )
@@ -476,10 +521,18 @@ function InterfacesTab({ exporter }: { exporter: string }) {
           no counter samples for this exporter · NetFlow-only sources do not produce them
         </div>
       ) : (
-        <table className="w-full">
+        <table className="w-full table-fixed">
+          <colgroup>
+            <col style={{ width: '40%' }} />
+            <col />
+            <col />
+            <col />
+            <col />
+            <col style={{ width: '90px' }} />
+          </colgroup>
           <thead>
             <tr>
-              <th className="r">ifindex</th>
+              <th>interface</th>
               <th className="r">in (latest)</th>
               <th className="r">out (latest)</th>
               <th className="r">in peak</th>
@@ -488,16 +541,21 @@ function InterfacesTab({ exporter }: { exporter: string }) {
             </tr>
           </thead>
           <tbody>
-            {ifaces.map((i: InterfaceRow) => (
-              <tr key={i.ifindex} className="hover:bg-surface">
-                <td className="r n">{i.ifindex}</td>
-                <td className="r n">{fmt.bps(i.in_bps_latest)}</td>
-                <td className="r n">{fmt.bps(i.out_bps_latest)}</td>
-                <td className="r n text-accent">{fmt.bps(i.in_bps_peak)}</td>
-                <td className="r n text-ok">{fmt.bps(i.out_bps_peak)}</td>
-                <td className="r n text-faint">{fmt.time(i.last_seen).slice(11, 19)}</td>
-              </tr>
-            ))}
+            {ifaces.map((i: InterfaceRow) => {
+              const lbl = labelInterface(i)
+              return (
+                <tr key={i.ifindex} className="hover:bg-surface">
+                  <td>
+                    <TwoLine primary={lbl.primary} secondary={lbl.secondary || undefined} />
+                  </td>
+                  <td className="r n">{fmt.bps(i.in_bps_latest)}</td>
+                  <td className="r n">{fmt.bps(i.out_bps_latest)}</td>
+                  <td className="r n text-accent">{fmt.bps(i.in_bps_peak)}</td>
+                  <td className="r n text-ok">{fmt.bps(i.out_bps_peak)}</td>
+                  <td className="r n text-faint">{fmt.time(i.last_seen).slice(11, 19)}</td>
+                </tr>
+              )
+            })}
           </tbody>
         </table>
       )}
@@ -532,7 +590,15 @@ function FlowsTab({ exporter }: { exporter: string }) {
           no flows yet for this exporter
         </div>
       ) : (
-        <table className="w-full">
+        <table className="w-full table-fixed">
+          <colgroup>
+            <col style={{ width: '110px' }} />
+            <col style={{ width: '90px' }} />
+            <col />
+            <col style={{ width: '70px' }} />
+            <col style={{ width: '90px' }} />
+            <col style={{ width: '90px' }} />
+          </colgroup>
           <thead>
             <tr>
               <th>time</th>
@@ -548,7 +614,7 @@ function FlowsTab({ exporter }: { exporter: string }) {
               <tr key={i} className="hover:bg-surface">
                 <td className="n text-faint">{fmt.time(f.observed).slice(11, 23)}</td>
                 <td className="n text-dim">{f.source}</td>
-                <td className="n">
+                <td className="n truncate">
                   {f.src_addr}:{f.src_port}{' '}
                   <span className="text-faint">→</span>{' '}
                   {f.dst_addr}:{f.dst_port}

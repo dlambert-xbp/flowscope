@@ -233,7 +233,7 @@ function Row({ alert }: { alert: Alert }) {
           <div className="flex items-center gap-4 mt-3 font-mono text-[11px] text-faint">
             <span>
               <span className="text-faint">scope ·</span>{' '}
-              <span className="text-dim">{alert.scope}</span>
+              <span className="text-dim">{alert.scope_display || alert.scope}</span>
             </span>
             <span>
               <span className="text-faint">rule ·</span>{' '}

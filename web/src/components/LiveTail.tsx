@@ -26,10 +26,21 @@ export function LiveTail() {
           no flows yet · drive synth to populate
         </div>
       ) : (
-        <table className="w-full">
+        <table className="w-full table-fixed">
+          <colgroup>
+            <col style={{ width: '110px' }} />
+            <col style={{ width: '160px' }} />
+            <col style={{ width: '90px' }} />
+            <col />
+            <col style={{ width: '70px' }} />
+            <col style={{ width: '70px' }} />
+            <col style={{ width: '90px' }} />
+            <col style={{ width: '90px' }} />
+          </colgroup>
           <thead>
             <tr>
               <th>time</th>
+              <th>exporter</th>
               <th>source</th>
               <th>src → dst</th>
               <th>proto</th>
@@ -42,8 +53,18 @@ export function LiveTail() {
             {flows.map((f, i) => (
               <tr key={i} className="hover:bg-surface">
                 <td className="n text-faint">{fmt.time(f.observed).slice(11, 23)}</td>
+                <td>
+                  <div className="font-mono truncate">
+                    {f.exporter_name || f.exporter}
+                  </div>
+                  {f.exporter_name && (
+                    <div className="font-mono italic text-faint text-[10.5px] truncate">
+                      {f.exporter}
+                    </div>
+                  )}
+                </td>
                 <td className="n text-dim">{f.source}</td>
-                <td className="n">
+                <td className="n truncate">
                   {f.src_addr}:{f.src_port} <span className="text-faint">→</span>{' '}
                   {f.dst_addr}:{f.dst_port}
                 </td>

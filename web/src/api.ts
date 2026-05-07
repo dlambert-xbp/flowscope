@@ -15,6 +15,7 @@ export type Summary = {
 export type RecentFlow = {
   observed: string
   exporter: string
+  exporter_name: string // SNMP-resolved sys_name; empty when not yet walked
   src_addr: string
   dst_addr: string
   src_port: number
@@ -29,7 +30,10 @@ export type RecentFlow = {
 
 export type InterfaceRow = {
   exporter: string
+  sys_name: string // SNMP-resolved hostname; empty when not yet walked
   ifindex: number
+  if_descr: string // SNMP-resolved interface name (e.g. Te1/0/47)
+  if_alias: string // operator-set description, optional
   last_seen: string
   in_bps_latest: number
   out_bps_latest: number
@@ -46,7 +50,10 @@ export type InterfaceTimeseriesPoint = {
 
 export type InterfaceTimeseries = {
   exporter: string
+  sys_name: string
   ifindex: number
+  if_descr: string
+  if_alias: string
   window_seconds: number
   source: string
   points: InterfaceTimeseriesPoint[]
@@ -54,6 +61,7 @@ export type InterfaceTimeseries = {
 
 export type Device = {
   exporter: string
+  sys_name: string // SNMP-resolved hostname; empty when not yet walked
   flows: number
   bytes: number
   packets: number
@@ -98,6 +106,7 @@ export type Alert = {
   severity: 'critical' | 'warning' | 'info'
   state: 'opened' | 'heartbeat' | 'closed' | 'acknowledged'
   scope: string
+  scope_display: string // SNMP-enriched human form; falls back to scope when empty
   group_key: string
   title: string
   body: string
@@ -337,3 +346,20 @@ export const fmt = {
     ({ 1: 'icmp', 6: 'tcp', 17: 'udp', 47: 'gre', 50: 'esp' } as Record<number, string>)[n] ??
     `p${n}`,
 }
+
+// labelExporter and labelInterface are the two enrichment helpers.
+// Backend joins SNMP inventory at query time; the UI just picks
+// whichever fields are populated and renders them in the agreed
+// stacked format. Long names truncate via the `truncate` Tailwind
+// utility on the parent cell.
+export const labelExporter = (e: { exporter: string; sys_name?: string }) => ({
+  primary: e.sys_name && e.sys_name.length > 0 ? e.sys_name : e.exporter,
+  secondary: e.sys_name && e.sys_name.length > 0 ? e.exporter : '',
+})
+
+export const labelInterface = (
+  i: { ifindex: number; if_descr?: string; if_alias?: string },
+) => ({
+  primary: i.if_descr && i.if_descr.length > 0 ? i.if_descr : `ifindex ${i.ifindex}`,
+  secondary: i.if_alias ?? '',
+})

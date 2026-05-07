@@ -10,6 +10,25 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 )
 
+// SQL fragments that compute the latest SNMP enrichment per
+// (exporter) and per (exporter, ifindex). Inlined into per-query
+// CTEs so we don't depend on a SELECT FINAL on the underlying
+// MergeTrees (which are append-only by design — see VISION.md §4.2
+// and migration 000003_snmp.sql).
+const sqlLatestInventory = `
+SELECT exporter, argMax(sys_name, polled_at) AS sys_name
+FROM device_inventory
+WHERE polled_at >= now() - INTERVAL 7 DAY
+GROUP BY exporter`
+
+const sqlLatestSNMPInterfaces = `
+SELECT exporter, ifindex,
+       argMax(if_descr, polled_at) AS if_descr,
+       argMax(if_alias, polled_at) AS if_alias
+FROM device_snmp_interfaces
+WHERE polled_at >= now() - INTERVAL 7 DAY
+GROUP BY exporter, ifindex`
+
 // Summary captures the aggregate view used by /api/summary and the
 // Overview tab. All counts are computed over the trailing window
 // passed to QuerySummary.
@@ -28,7 +47,10 @@ type Summary struct {
 // the most recent counter sample plus the trailing-window peak rate.
 type InterfaceRow struct {
 	Exporter      string    `json:"exporter"`
+	SysName       string    `json:"sys_name"` // populated when SNMP has walked the exporter
 	IfIndex       uint32    `json:"ifindex"`
+	IfDescr       string    `json:"if_descr"` // e.g. Te1/0/47, populated when SNMP has walked
+	IfAlias       string    `json:"if_alias"` // operator description, optional
 	LastSeen      time.Time `json:"last_seen"`
 	InBpsLatest   uint64    `json:"in_bps_latest"`
 	OutBpsLatest  uint64    `json:"out_bps_latest"`
@@ -44,7 +66,10 @@ type InterfaceRow struct {
 // (VISION.md §3.3).
 type InterfaceTimeseries struct {
 	Exporter      string                  `json:"exporter"`
+	SysName       string                  `json:"sys_name"`
 	IfIndex       uint32                  `json:"ifindex"`
+	IfDescr       string                  `json:"if_descr"`
+	IfAlias       string                  `json:"if_alias"`
 	WindowSeconds int                     `json:"window_seconds"`
 	Source        string                  `json:"source"`
 	Points        []InterfaceTimeseriesPt `json:"points"`
@@ -61,6 +86,7 @@ type InterfaceTimeseriesPt struct {
 type RecentFlow struct {
 	Observed       time.Time `json:"observed"`
 	Exporter       string    `json:"exporter"`
+	ExporterName   string    `json:"exporter_name"` // sys_name when SNMP has walked
 	SrcAddr        string    `json:"src_addr"`
 	DstAddr        string    `json:"dst_addr"`
 	SrcPort        uint16    `json:"src_port"`
@@ -120,7 +146,8 @@ func QueryInterfaces(ctx context.Context, conn driver.Conn, window time.Duration
 		args = append(args, toIPv6(addr))
 	}
 	q := `
-WITH diffed AS (
+WITH
+diffed AS (
     SELECT
         ts,
         exporter,
@@ -131,19 +158,33 @@ WITH diffed AS (
     FROM iface_counter_samples
     WHERE ts >= now() - INTERVAL ? SECOND` + exporterPredicate + `
     WINDOW w AS (PARTITION BY exporter, ifindex ORDER BY ts)
-)
+),
+agg AS (
+    SELECT
+        exporter,
+        ifindex,
+        max(ts) AS last_seen,
+        toUInt64(argMax(if(d_in >= 0 AND dt_ms > 0, d_in * 8000 / dt_ms, 0), ts))  AS in_latest,
+        toUInt64(argMax(if(d_out >= 0 AND dt_ms > 0, d_out * 8000 / dt_ms, 0), ts)) AS out_latest,
+        toUInt64(max(if(d_in >= 0 AND dt_ms > 0, d_in * 8000 / dt_ms, 0)))  AS in_peak,
+        toUInt64(max(if(d_out >= 0 AND dt_ms > 0, d_out * 8000 / dt_ms, 0))) AS out_peak
+    FROM diffed
+    WHERE dt_ms > 0
+    GROUP BY exporter, ifindex
+),
+inv AS (` + sqlLatestInventory + `),
+sif AS (` + sqlLatestSNMPInterfaces + `)
 SELECT
-    exporter,
-    ifindex,
-    max(ts) AS last_seen,
-    toUInt64(argMax(if(d_in >= 0 AND dt_ms > 0, d_in * 8000 / dt_ms, 0), ts))  AS in_latest,
-    toUInt64(argMax(if(d_out >= 0 AND dt_ms > 0, d_out * 8000 / dt_ms, 0), ts)) AS out_latest,
-    toUInt64(max(if(d_in >= 0 AND dt_ms > 0, d_in * 8000 / dt_ms, 0)))  AS in_peak,
-    toUInt64(max(if(d_out >= 0 AND dt_ms > 0, d_out * 8000 / dt_ms, 0))) AS out_peak
-FROM diffed
-WHERE dt_ms > 0
-GROUP BY exporter, ifindex
-ORDER BY (in_peak + out_peak) DESC
+    a.exporter,
+    ifNull(inv.sys_name, '') AS sys_name,
+    a.ifindex,
+    ifNull(sif.if_descr, '') AS if_descr,
+    ifNull(sif.if_alias, '') AS if_alias,
+    a.last_seen, a.in_latest, a.out_latest, a.in_peak, a.out_peak
+FROM agg AS a
+LEFT JOIN inv ON a.exporter = inv.exporter
+LEFT JOIN sif ON a.exporter = sif.exporter AND a.ifindex = sif.ifindex
+ORDER BY (a.in_peak + a.out_peak) DESC
 LIMIT 50`
 	rows, err := conn.Query(ctx, q, args...)
 	if err != nil {
@@ -157,9 +198,8 @@ LIMIT 50`
 			exporter netip.Addr
 		)
 		if err := rows.Scan(
-			&exporter, &r.IfIndex, &r.LastSeen,
-			&r.InBpsLatest, &r.OutBpsLatest,
-			&r.InBpsPeak, &r.OutBpsPeak,
+			&exporter, &r.SysName, &r.IfIndex, &r.IfDescr, &r.IfAlias,
+			&r.LastSeen, &r.InBpsLatest, &r.OutBpsLatest, &r.InBpsPeak, &r.OutBpsPeak,
 		); err != nil {
 			return nil, fmt.Errorf("store: scan interface: %w", err)
 		}
@@ -218,7 +258,28 @@ ORDER BY ts`
 		}
 		out.Points = append(out.Points, p)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// SNMP enrichment — non-fatal if missing.
+	const qm = `
+SELECT
+    argMax(sys_name, polled_at)
+FROM device_inventory
+WHERE polled_at >= now() - INTERVAL 7 DAY AND exporter = ?
+GROUP BY exporter`
+	_ = conn.QueryRow(ctx, qm, toIPv6(exporter)).Scan(&out.SysName)
+
+	const qif = `
+SELECT
+    argMax(if_descr, polled_at),
+    argMax(if_alias, polled_at)
+FROM device_snmp_interfaces
+WHERE polled_at >= now() - INTERVAL 7 DAY AND exporter = ? AND ifindex = ?
+GROUP BY exporter, ifindex`
+	_ = conn.QueryRow(ctx, qif, toIPv6(exporter), ifindex).Scan(&out.IfDescr, &out.IfAlias)
+	return out, nil
 }
 
 // Device is one exporter's traffic summary over a window. Returned by
@@ -227,6 +288,7 @@ ORDER BY ts`
 // arrives in a later slice.
 type Device struct {
 	Exporter   string    `json:"exporter"`
+	SysName    string    `json:"sys_name"` // populated from device_inventory when SNMP has walked
 	Flows      uint64    `json:"flows"`
 	Bytes      uint64    `json:"bytes"`
 	Packets    uint64    `json:"packets"`
@@ -239,18 +301,21 @@ type Device struct {
 // trailing window, ranked by total bytes. iface_count is the number
 // of unique ifindex values that produced counter samples in the same
 // window — populated only for sFlow / gNMI-capable exporters.
+// sys_name comes from the latest SNMP walk; empty when no walk yet.
 func QueryDevices(ctx context.Context, conn driver.Conn, window time.Duration) ([]Device, error) {
 	if window <= 0 {
 		window = 5 * time.Minute
 	}
-	const q = `
+	q := `
+WITH inv AS (` + sqlLatestInventory + `)
 SELECT
     f.exporter   AS exporter,
-    f.flows      AS flows,
-    f.bytes      AS bytes,
-    f.packets    AS packets,
-    f.first_seen AS first_seen,
-    f.last_seen  AS last_seen,
+    ifNull(inv.sys_name, '') AS sys_name,
+    f.flows,
+    f.bytes,
+    f.packets,
+    f.first_seen,
+    f.last_seen,
     ifNull(i.iface_count, 0) AS iface_count
 FROM (
     SELECT
@@ -270,6 +335,7 @@ LEFT JOIN (
     WHERE ts >= now() - INTERVAL ? SECOND
     GROUP BY exporter
 ) AS i ON f.exporter = i.exporter
+LEFT JOIN inv ON f.exporter = inv.exporter
 ORDER BY f.bytes DESC`
 	w := uint64(window.Seconds())
 	rows, err := conn.Query(ctx, q, w, w)
@@ -283,7 +349,7 @@ ORDER BY f.bytes DESC`
 			d        Device
 			exporter netip.Addr
 		)
-		if err := rows.Scan(&exporter, &d.Flows, &d.Bytes, &d.Packets, &d.FirstSeen, &d.LastSeen, &d.IfaceCount); err != nil {
+		if err := rows.Scan(&exporter, &d.SysName, &d.Flows, &d.Bytes, &d.Packets, &d.FirstSeen, &d.LastSeen, &d.IfaceCount); err != nil {
 			return nil, fmt.Errorf("store: scan device: %w", err)
 		}
 		d.Exporter = exporter.Unmap().String()
@@ -320,6 +386,17 @@ GROUP BY exporter`
 		return nil, fmt.Errorf("store: query device: %w", err)
 	}
 	d.Exporter = exporter.Unmap().String()
+
+	// Latest SNMP sys_name for this exporter. Non-fatal if SNMP has
+	// not yet walked.
+	const qn = `
+SELECT argMax(sys_name, polled_at)
+FROM device_inventory
+WHERE polled_at >= now() - INTERVAL 7 DAY AND exporter = ?
+GROUP BY exporter`
+	if err := conn.QueryRow(ctx, qn, expIP).Scan(&d.SysName); err != nil {
+		d.SysName = ""
+	}
 
 	// Interface count for this exporter.
 	const qi = `
@@ -447,7 +524,8 @@ type Alert struct {
 	RuleID       string            `json:"rule_id"`
 	Severity     string            `json:"severity"`
 	State        string            `json:"state"`
-	Scope        string            `json:"scope"`
+	Scope        string            `json:"scope"`         // raw, stable identifier (IP, "src→dst", etc.)
+	ScopeDisplay string            `json:"scope_display"` // human-friendly enrichment of Scope; falls back to Scope
 	GroupKey     string            `json:"group_key"`
 	Title        string            `json:"title"`
 	Body         string            `json:"body"`
@@ -521,7 +599,51 @@ ORDER BY opened_at DESC`
 		a.ID = fmt.Sprintf("%016x", id)
 		out = append(out, a)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Enrich scope_display when an alert's labels carry an exporter
+	// IP and SNMP has resolved a sys_name for it.
+	exporters := make(map[string]struct{}, len(out))
+	for _, a := range out {
+		if ip := a.Labels["exporter"]; ip != "" {
+			exporters[ip] = struct{}{}
+		}
+	}
+	if len(exporters) > 0 {
+		names := make(map[string]string, len(exporters))
+		for ip := range exporters {
+			addr, err := netip.ParseAddr(ip)
+			if err != nil {
+				continue
+			}
+			const qn = `
+SELECT argMax(sys_name, polled_at)
+FROM device_inventory
+WHERE polled_at >= now() - INTERVAL 7 DAY AND exporter = ?
+GROUP BY exporter`
+			var n string
+			if err := conn.QueryRow(ctx, qn, toIPv6(addr)).Scan(&n); err == nil && n != "" {
+				names[ip] = n
+			}
+		}
+		for i := range out {
+			if ip := out[i].Labels["exporter"]; ip != "" {
+				if n := names[ip]; n != "" {
+					// Replace the IP in the scope text with "name · ip"
+					// when the scope contained the IP literally; else
+					// just append the name as a hint.
+					if out[i].Scope == ip {
+						out[i].ScopeDisplay = n + " · " + ip
+					} else {
+						out[i].ScopeDisplay = out[i].Scope + " · " + n
+					}
+				}
+			}
+		}
+	}
+	return out, nil
 }
 
 // alertStatePredicate maps the api query parameter to a SQL WHERE.
@@ -890,16 +1012,19 @@ func QueryRecentFlows(ctx context.Context, conn driver.Conn, limit int, exporter
 		if err != nil {
 			return nil, fmt.Errorf("store: invalid exporter address: %w", err)
 		}
-		exporterPredicate = " WHERE exporter = ?"
+		exporterPredicate = " WHERE f.exporter = ?"
 		args = append(args, toIPv6(addr))
 	}
 	q := `
+WITH inv AS (` + sqlLatestInventory + `)
 SELECT
-    observed, exporter, src_addr, dst_addr,
-    src_port, dst_port, proto, bytes, packets,
-    input_ifindex, output_ifindex, source
-FROM flows` + exporterPredicate + `
-ORDER BY observed DESC
+    f.observed, f.exporter, ifNull(inv.sys_name, '') AS exporter_name,
+    f.src_addr, f.dst_addr,
+    f.src_port, f.dst_port, f.proto, f.bytes, f.packets,
+    f.input_ifindex, f.output_ifindex, f.source
+FROM flows AS f
+LEFT JOIN inv ON f.exporter = inv.exporter` + exporterPredicate + `
+ORDER BY f.observed DESC
 LIMIT ?`
 	args = append(args, uint64(limit))
 	rows, err := conn.Query(ctx, q, args...)
@@ -916,7 +1041,7 @@ LIMIT ?`
 			dst      netip.Addr
 		)
 		if err := rows.Scan(
-			&rf.Observed, &exporter, &src, &dst,
+			&rf.Observed, &exporter, &rf.ExporterName, &src, &dst,
 			&rf.SrcPort, &rf.DstPort, &rf.Proto,
 			&rf.Bytes, &rf.Packets,
 			&rf.InputIfIndex, &rf.OutputIfIndex,

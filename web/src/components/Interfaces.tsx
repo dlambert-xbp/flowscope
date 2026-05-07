@@ -1,7 +1,26 @@
 import { useQuery } from '@tanstack/react-query'
 import { useState, type ReactNode } from 'react'
-import { api, fmt } from '../api'
+import { api, fmt, labelExporter, labelInterface } from '../api'
 import type { InterfaceRow, InterfaceTimeseriesPoint } from '../api'
+
+function TwoLine({
+  primary,
+  secondary,
+}: {
+  primary: ReactNode
+  secondary?: ReactNode
+}) {
+  return (
+    <div className="min-w-0 max-w-full">
+      <div className="font-mono truncate">{primary}</div>
+      {secondary && (
+        <div className="font-mono italic text-faint text-[10.5px] truncate">
+          {secondary}
+        </div>
+      )}
+    </div>
+  )
+}
 
 export function Interfaces({
   rows,
@@ -25,11 +44,21 @@ export function Interfaces({
         </div>
       )}
       {rows.length > 0 && (
-        <table className="w-full">
+        <table className="w-full table-fixed">
+          <colgroup>
+            <col style={{ width: '24%' }} />
+            <col style={{ width: '24%' }} />
+            <col />
+            <col />
+            <col />
+            <col />
+            <col style={{ width: '92px' }} />
+            <col style={{ width: '80px' }} />
+          </colgroup>
           <thead>
             <tr>
               <th>exporter</th>
-              <th className="r">ifindex</th>
+              <th>interface</th>
               <th className="r">in latest</th>
               <th className="r">out latest</th>
               <th className="r">in peak</th>
@@ -41,10 +70,16 @@ export function Interfaces({
           <tbody>
             {rows.map((r) => {
               const isActive = active?.exporter === r.exporter && active?.ifindex === r.ifindex
+              const eLbl = labelExporter(r)
+              const iLbl = labelInterface(r)
               return (
                 <tr key={`${r.exporter}_${r.ifindex}`} className="hover:bg-surface">
-                  <td className="n">{r.exporter}</td>
-                  <td className="r n">{r.ifindex}</td>
+                  <td>
+                    <TwoLine primary={eLbl.primary} secondary={eLbl.secondary || undefined} />
+                  </td>
+                  <td>
+                    <TwoLine primary={iLbl.primary} secondary={iLbl.secondary || undefined} />
+                  </td>
                   <td className="r n">{fmt.bps(r.in_bps_latest)}</td>
                   <td className="r n">{fmt.bps(r.out_bps_latest)}</td>
                   <td className="r n text-accent">{fmt.bps(r.in_bps_peak)}</td>
@@ -104,11 +139,17 @@ function InterfaceChart({ exporter, ifindex }: { exporter: string; ifindex: numb
     refetchInterval: 5000,
   })
   const points = ts.data?.points ?? []
+  const meta = ts.data
+  const exporterLabel =
+    meta?.sys_name ? `${meta.sys_name} · ${meta.exporter}` : (meta?.exporter ?? exporter)
+  const ifaceLabel =
+    meta?.if_descr ? meta.if_descr : `ifindex ${ifindex}`
+  const aliasLabel = meta?.if_alias ?? ''
   return (
     <div className="border-b border-line">
       <SectionHead
-        title={`${exporter} · ifindex ${ifindex}`}
-        sub="counter timeseries · 5 min"
+        title={`${ifaceLabel} · ${exporterLabel}`}
+        sub={aliasLabel ? aliasLabel : 'counter timeseries · 5 min'}
         right={<SourceBadge>SOURCE · COUNTERS · 1s SAMPLE</SourceBadge>}
       />
       <div className="px-4 py-3 bg-surface">
