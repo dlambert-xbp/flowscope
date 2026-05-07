@@ -14,8 +14,29 @@ export type FilterKey =
 export type Filter = {
   key: FilterKey
   value: string
-  // Optional human label used in chips; falls back to value when absent.
+  // Human form of the value, for chip rendering (e.g. "https" for "443").
   label?: string
+  // Human form of the key, for chip rendering. Most callers can rely on
+  // keyLabelFor() defaults; this override is for cases where the same
+  // underlying key carries a different concept in context — clicking a
+  // dst_port in the Services panel produces "service · https", not
+  // "dst port · https".
+  keyLabel?: string
+}
+
+// keyLabelFor is the default human form of a FilterKey for chip
+// rendering. Triggers can override via Filter.keyLabel.
+const KEY_LABELS: Record<FilterKey, string> = {
+  exporter: 'exporter',
+  src_addr: 'src',
+  dst_addr: 'dst',
+  src_port: 'src port',
+  dst_port: 'dst port',
+  proto: 'proto',
+}
+
+export function keyLabelFor(key: FilterKey): string {
+  return KEY_LABELS[key]
 }
 
 const ALLOWED: ReadonlySet<string> = new Set<FilterKey>([
