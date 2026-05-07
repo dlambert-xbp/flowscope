@@ -350,6 +350,184 @@ func isNoRows(err error) bool {
 	return err.Error() == "sql: no rows in result set"
 }
 
+// Alert is the current state of one alert as derived from the
+// append-only alert_events ledger via argMax aggregation. Fields
+// match the JSON the api returns to the React Alerts tab.
+type Alert struct {
+	ID           string            `json:"id"` // hash of (rule_id, scope, group_key)
+	RuleID       string            `json:"rule_id"`
+	Severity     string            `json:"severity"`
+	State        string            `json:"state"`
+	Scope        string            `json:"scope"`
+	GroupKey     string            `json:"group_key"`
+	Title        string            `json:"title"`
+	Body         string            `json:"body"`
+	Runbook      string            `json:"runbook"`
+	Actor        string            `json:"actor"`
+	OpenedAt     time.Time         `json:"opened_at"`
+	LastActiveAt time.Time         `json:"last_active_at"`
+	Labels       map[string]string `json:"labels"`
+}
+
+// AlertSummary is the four-bucket count over the open + recent
+// closed sets, used by the Alerts tab summary stats.
+type AlertSummary struct {
+	OpenCritical   uint64 `json:"open_critical"`
+	OpenWarning    uint64 `json:"open_warning"`
+	OpenInfo       uint64 `json:"open_info"`
+	Acknowledged   uint64 `json:"acknowledged"`
+	ClosedLast24h  uint64 `json:"closed_last_24h"`
+}
+
+// QueryAlerts returns the current alert set, optionally filtered by
+// state ('open' returns opened+heartbeat collapsed; 'acknowledged'
+// returns ack'd; 'closed' returns last 24h of closed). Empty state
+// returns everything in the open + acknowledged buckets.
+func QueryAlerts(ctx context.Context, conn driver.Conn, state string) ([]Alert, error) {
+	q := `
+WITH latest AS (
+    SELECT
+        rule_id,
+        scope,
+        group_key,
+        argMax(state, ts)    AS state,
+        argMax(severity, ts) AS severity,
+        argMax(title, ts)    AS title,
+        argMax(body, ts)     AS body,
+        argMax(runbook, ts)  AS runbook,
+        argMax(actor, ts)    AS actor,
+        argMax(labels, ts)   AS labels,
+        min(ts)              AS opened_at,
+        max(ts)              AS last_active_at
+    FROM alert_events
+    WHERE ts >= now() - INTERVAL 7 DAY
+    GROUP BY rule_id, scope, group_key
+)
+SELECT
+    cityHash64(concat(rule_id, '|', scope, '|', group_key)) AS id,
+    rule_id, severity, state, scope, group_key,
+    title, body, runbook, actor, opened_at, last_active_at, labels
+FROM latest
+WHERE ` + alertStatePredicate(state) + `
+ORDER BY opened_at DESC`
+	rows, err := conn.Query(ctx, q)
+	if err != nil {
+		return nil, fmt.Errorf("store: query alerts: %w", err)
+	}
+	defer rows.Close()
+	out := make([]Alert, 0, 32)
+	for rows.Next() {
+		var (
+			a   Alert
+			id  uint64
+		)
+		if err := rows.Scan(
+			&id, &a.RuleID, &a.Severity, &a.State, &a.Scope, &a.GroupKey,
+			&a.Title, &a.Body, &a.Runbook, &a.Actor,
+			&a.OpenedAt, &a.LastActiveAt, &a.Labels,
+		); err != nil {
+			return nil, fmt.Errorf("store: scan alert: %w", err)
+		}
+		// Render the id as 16-char hex for stable URLs and JSON.
+		a.ID = fmt.Sprintf("%016x", id)
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// alertStatePredicate maps the api query parameter to a SQL WHERE.
+// Treats 'opened' and 'heartbeat' as the same operator-facing state.
+func alertStatePredicate(state string) string {
+	switch state {
+	case "open":
+		return "state IN ('opened', 'heartbeat')"
+	case "acknowledged":
+		return "state = 'acknowledged'"
+	case "closed":
+		return "state = 'closed' AND last_active_at >= now() - INTERVAL 24 HOUR"
+	default:
+		return "state IN ('opened', 'heartbeat', 'acknowledged')"
+	}
+}
+
+// QueryAlertSummary returns the bucket counts used by the Alerts tab
+// summary stats. Single round-trip; uses the same `latest` CTE shape
+// as QueryAlerts.
+func QueryAlertSummary(ctx context.Context, conn driver.Conn) (*AlertSummary, error) {
+	const q = `
+WITH latest AS (
+    SELECT
+        rule_id, scope, group_key,
+        argMax(state, ts)    AS state,
+        argMax(severity, ts) AS severity,
+        max(ts)              AS last_active_at
+    FROM alert_events
+    WHERE ts >= now() - INTERVAL 7 DAY
+    GROUP BY rule_id, scope, group_key
+)
+SELECT
+    countIf(state IN ('opened','heartbeat') AND severity = 'critical') AS open_critical,
+    countIf(state IN ('opened','heartbeat') AND severity = 'warning')  AS open_warning,
+    countIf(state IN ('opened','heartbeat') AND severity = 'info')     AS open_info,
+    countIf(state = 'acknowledged') AS acked,
+    countIf(state = 'closed' AND last_active_at >= now() - INTERVAL 24 HOUR) AS closed_24h
+FROM latest`
+	row := conn.QueryRow(ctx, q)
+	var s AlertSummary
+	if err := row.Scan(
+		&s.OpenCritical, &s.OpenWarning, &s.OpenInfo, &s.Acknowledged, &s.ClosedLast24h,
+	); err != nil {
+		return nil, fmt.Errorf("store: query alert summary: %w", err)
+	}
+	return &s, nil
+}
+
+// AckAlert appends an acknowledged event for an alert. The alert id
+// is the cityHash64-hex returned by QueryAlerts; we look up the
+// (rule_id, scope, group_key) tuple via the same hash and write an
+// 'acknowledged' row carrying the operator's name.
+func AckAlert(ctx context.Context, conn driver.Conn, id string, actor string) error {
+	return appendStateTransition(ctx, conn, id, "acknowledged", actor, "alert acknowledged by operator")
+}
+
+// CloseAlert appends a closed event. Operators may close manually
+// even before the engine auto-closes (e.g. silenced or false positive).
+func CloseAlert(ctx context.Context, conn driver.Conn, id string, actor string) error {
+	return appendStateTransition(ctx, conn, id, "closed", actor, "manually closed by operator")
+}
+
+func appendStateTransition(ctx context.Context, conn driver.Conn, id, state, actor, body string) error {
+	const lookup = `
+SELECT rule_id, scope, group_key, argMax(severity, ts), argMax(title, ts), argMax(runbook, ts), argMax(labels, ts)
+FROM alert_events
+WHERE cityHash64(concat(rule_id, '|', scope, '|', group_key)) = reinterpretAsUInt64(reverse(unhex(?)))
+GROUP BY rule_id, scope, group_key
+LIMIT 1`
+	row := conn.QueryRow(ctx, lookup, id)
+	var (
+		ruleID, scope, groupKey, severity, title, runbook string
+		labels                                            map[string]string
+	)
+	if err := row.Scan(&ruleID, &scope, &groupKey, &severity, &title, &runbook, &labels); err != nil {
+		if isNoRows(err) {
+			return ErrNotFound
+		}
+		return fmt.Errorf("store: lookup alert %s: %w", id, err)
+	}
+	if labels == nil {
+		labels = map[string]string{}
+	}
+	const ins = `INSERT INTO alert_events
+		(ts, rule_id, severity, state, scope, group_key, title, body, runbook, actor, labels)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	if err := conn.Exec(ctx, ins,
+		time.Now().UTC(), ruleID, severity, state, scope, groupKey, title, body, runbook, actor, labels,
+	); err != nil {
+		return fmt.Errorf("store: append %s: %w", state, err)
+	}
+	return nil
+}
+
 // FlowFilter narrows top-N queries by exporter, 5-tuple, or protocol.
 // Empty / zero fields mean "no filter on this dimension". Parameters
 // are bound through the driver — never interpolated into SQL — so

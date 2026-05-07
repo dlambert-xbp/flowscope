@@ -4,6 +4,7 @@ import { api, fmt } from './api'
 import { Overview } from './components/Overview'
 import { Flows } from './components/Flows'
 import { Devices } from './components/Devices'
+import { Alerts } from './components/Alerts'
 
 type Tab = 'overview' | 'flows' | 'devices' | 'alerts'
 
@@ -20,7 +21,7 @@ export function App() {
         {tab === 'overview' && <Overview />}
         {tab === 'flows' && <Flows />}
         {tab === 'devices' && <Devices />}
-        {tab === 'alerts' && <ComingSoon name={tab} />}
+        {tab === 'alerts' && <Alerts />}
       </main>
       <Cmd />
     </div>
@@ -187,13 +188,3 @@ function Kbd({ children }: { children: ReactNode }) {
   )
 }
 
-/* ----------------------------- Coming-soon placeholder ----------------------------- */
-
-function ComingSoon({ name }: { name: Tab }) {
-  return (
-    <div className="p-8 text-dim text-[13px] font-mono">
-      <div className="text-faint text-[10.5px] uppercase tracking-[0.16em] mb-2">{name} tab</div>
-      <p>Not yet wired in this slice. The backend endpoints land first; the UI follows in the next slice.</p>
-    </div>
-  )
-}

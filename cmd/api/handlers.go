@@ -159,6 +159,82 @@ func (h *handlers) topConversations(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// alerts lists alerts in the supplied state bucket.
+//
+//	GET /api/alerts?state=open|acknowledged|closed
+//
+// state defaults to "open+acknowledged" combined when omitted.
+func (h *handlers) alerts(w http.ResponseWriter, r *http.Request) {
+	state := r.URL.Query().Get("state")
+	rows, err := store.QueryAlerts(r.Context(), h.conn, state)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"count":  len(rows),
+		"alerts": rows,
+		"state":  state,
+	})
+}
+
+// alertSummary returns the four-bucket counts for the Alerts tab
+// summary stats.
+//
+//	GET /api/alerts/summary
+func (h *handlers) alertSummary(w http.ResponseWriter, r *http.Request) {
+	s, err := store.QueryAlertSummary(r.Context(), h.conn)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, s)
+}
+
+// ackAlert marks one alert as acknowledged.
+//
+//	POST /api/alerts/{id}/ack
+func (h *handlers) ackAlert(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	actor := actorFromRequest(r)
+	if err := store.AckAlert(r.Context(), h.conn, id, actor); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "alert not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": id, "state": "acknowledged"})
+}
+
+// closeAlert closes one alert manually.
+//
+//	POST /api/alerts/{id}/close
+func (h *handlers) closeAlert(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	actor := actorFromRequest(r)
+	if err := store.CloseAlert(r.Context(), h.conn, id, actor); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "alert not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": id, "state": "closed"})
+}
+
+// actorFromRequest pulls the operator identity. With OIDC the actor
+// comes from the JWT subject claim; until that ships we accept an
+// X-Operator header and fall back to "anonymous".
+func actorFromRequest(r *http.Request) string {
+	if v := r.Header.Get("X-Operator"); v != "" {
+		return v
+	}
+	return "anonymous"
+}
+
 // devices lists every exporter that produced at least one flow in
 // the trailing window.
 //

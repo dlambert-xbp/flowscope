@@ -62,6 +62,30 @@ export type Device = {
   iface_count: number
 }
 
+export type Alert = {
+  id: string
+  rule_id: string
+  severity: 'critical' | 'warning' | 'info'
+  state: 'opened' | 'heartbeat' | 'closed' | 'acknowledged'
+  scope: string
+  group_key: string
+  title: string
+  body: string
+  runbook: string
+  actor: string
+  opened_at: string
+  last_active_at: string
+  labels: Record<string, string>
+}
+
+export type AlertSummary = {
+  open_critical: number
+  open_warning: number
+  open_info: number
+  acknowledged: number
+  closed_last_24h: number
+}
+
 export type TopTalker = {
   src_addr: string
   dst_addr: string
@@ -136,6 +160,21 @@ export const api = {
     getJSON<Device>(
       `/api/devices/${encodeURIComponent(exporter)}?window=${windowSec}s`,
     ),
+  alerts: (state?: 'open' | 'acknowledged' | 'closed') =>
+    getJSON<{ count: number; alerts: Alert[]; state: string }>(
+      state ? `/api/alerts?state=${state}` : `/api/alerts`,
+    ),
+  alertSummary: () => getJSON<AlertSummary>(`/api/alerts/summary`),
+  ackAlert: (id: string) =>
+    fetch(`/api/alerts/${encodeURIComponent(id)}/ack`, { method: 'POST' }).then((r) => {
+      if (!r.ok) throw new Error(`ack ${id} → ${r.status}`)
+      return r.json()
+    }),
+  closeAlert: (id: string) =>
+    fetch(`/api/alerts/${encodeURIComponent(id)}/close`, { method: 'POST' }).then((r) => {
+      if (!r.ok) throw new Error(`close ${id} → ${r.status}`)
+      return r.json()
+    }),
   topTalkers: (filters: URLSearchParams, windowSec = 300, limit = 20) =>
     getJSON<TopResponse<TopTalker>>(
       withFilters(`/api/top/talkers?window=${windowSec}s&limit=${limit}`, filters),
