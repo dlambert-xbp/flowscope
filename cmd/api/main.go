@@ -65,6 +65,10 @@ func run() error {
 	r.Get("/api/flows/recent", h.recentFlows)
 	r.Get("/api/interfaces", h.interfaces)
 	r.Get("/api/interfaces/{exporter}/{ifindex}/timeseries", h.interfaceTimeseries)
+	r.Get("/api/top/talkers", h.topTalkers)
+	r.Get("/api/top/services", h.topServices)
+	r.Get("/api/top/protocols", h.topProtocols)
+	r.Get("/api/top/conversations", h.topConversations)
 	r.Method("GET", "/metrics", obs.Handler())
 
 	// Live HTML dashboard at /. Served from embedded assets so the

@@ -52,6 +52,47 @@ export type InterfaceTimeseries = {
   points: InterfaceTimeseriesPoint[]
 }
 
+export type TopTalker = {
+  src_addr: string
+  dst_addr: string
+  bytes: number
+  packets: number
+  flows: number
+}
+
+export type TopService = {
+  dst_port: number
+  proto: number
+  bytes: number
+  flows: number
+}
+
+export type TopProtocol = {
+  proto: number
+  bytes: number
+  packets: number
+  flows: number
+}
+
+export type TopConversation = {
+  src_addr: string
+  dst_addr: string
+  src_port: number
+  dst_port: number
+  proto: number
+  bytes: number
+  packets: number
+  flows: number
+  last_seen: string
+}
+
+export type TopResponse<T> = {
+  count: number
+  rows: T[]
+  source: string
+  window: string
+}
+
 async function getJSON<T>(url: string): Promise<T> {
   const r = await fetch(url, { cache: 'no-store' })
   if (!r.ok) throw new Error(`${url} → ${r.status} ${r.statusText}`)
@@ -72,6 +113,20 @@ export const api = {
   interfaceTimeseries: (exporter: string, ifindex: number, seconds = 300) =>
     getJSON<InterfaceTimeseries>(
       `/api/interfaces/${exporter}/${ifindex}/timeseries?seconds=${seconds}`,
+    ),
+  topTalkers: (windowSec = 300, limit = 20) =>
+    getJSON<TopResponse<TopTalker>>(
+      `/api/top/talkers?window=${windowSec}s&limit=${limit}`,
+    ),
+  topServices: (windowSec = 300, limit = 20) =>
+    getJSON<TopResponse<TopService>>(
+      `/api/top/services?window=${windowSec}s&limit=${limit}`,
+    ),
+  topProtocols: (windowSec = 300) =>
+    getJSON<TopResponse<TopProtocol>>(`/api/top/protocols?window=${windowSec}s`),
+  topConversations: (windowSec = 300, limit = 20) =>
+    getJSON<TopResponse<TopConversation>>(
+      `/api/top/conversations?window=${windowSec}s&limit=${limit}`,
     ),
 }
 

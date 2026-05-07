@@ -63,6 +63,73 @@ func (h *handlers) recentFlows(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// topTalkers / topServices / topProtocols / topConversations all
+// share a window= query parameter. Limit is shared too where
+// applicable. Source label = "flows" since they aggregate the flows
+// table; counter-sample-derived rates live behind /api/interfaces/...
+func (h *handlers) topTalkers(w http.ResponseWriter, r *http.Request) {
+	window := parseWindow(r.URL.Query().Get("window"), 5*time.Minute)
+	limit := parseInt(r.URL.Query().Get("limit"), 20)
+	rows, err := store.QueryTopTalkers(r.Context(), h.conn, window, limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"count": len(rows),
+		"rows":  rows,
+		"source": "flows",
+		"window": window.String(),
+	})
+}
+
+func (h *handlers) topServices(w http.ResponseWriter, r *http.Request) {
+	window := parseWindow(r.URL.Query().Get("window"), 5*time.Minute)
+	limit := parseInt(r.URL.Query().Get("limit"), 20)
+	rows, err := store.QueryTopServices(r.Context(), h.conn, window, limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"count": len(rows),
+		"rows":  rows,
+		"source": "flows",
+		"window": window.String(),
+	})
+}
+
+func (h *handlers) topProtocols(w http.ResponseWriter, r *http.Request) {
+	window := parseWindow(r.URL.Query().Get("window"), 5*time.Minute)
+	rows, err := store.QueryTopProtocols(r.Context(), h.conn, window)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"count": len(rows),
+		"rows":  rows,
+		"source": "flows",
+		"window": window.String(),
+	})
+}
+
+func (h *handlers) topConversations(w http.ResponseWriter, r *http.Request) {
+	window := parseWindow(r.URL.Query().Get("window"), 5*time.Minute)
+	limit := parseInt(r.URL.Query().Get("limit"), 20)
+	rows, err := store.QueryTopConversations(r.Context(), h.conn, window, limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"count": len(rows),
+		"rows":  rows,
+		"source": "flows",
+		"window": window.String(),
+	})
+}
+
 // interfaces returns one row per (exporter, ifindex) seen in the
 // trailing window, ranked by peak bandwidth.
 //

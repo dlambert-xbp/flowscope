@@ -2,6 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { useEffect, useState, type ReactNode } from 'react'
 import { api, fmt } from './api'
 import { Overview } from './components/Overview'
+import { Flows } from './components/Flows'
 
 type Tab = 'overview' | 'flows' | 'devices' | 'alerts'
 
@@ -16,7 +17,8 @@ export function App() {
       <Bar tab={tab} onTab={setTab} />
       <main className="overflow-auto">
         {tab === 'overview' && <Overview />}
-        {tab !== 'overview' && <ComingSoon name={tab} />}
+        {tab === 'flows' && <Flows />}
+        {tab !== 'overview' && tab !== 'flows' && <ComingSoon name={tab} />}
       </main>
       <Cmd />
     </div>

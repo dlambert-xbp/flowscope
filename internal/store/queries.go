@@ -210,6 +210,195 @@ ORDER BY ts`
 	return out, rows.Err()
 }
 
+// TopTalker is a (src, dst) pair aggregated over a window. Returned by
+// /api/top/talkers.
+type TopTalker struct {
+	SrcAddr string `json:"src_addr"`
+	DstAddr string `json:"dst_addr"`
+	Bytes   uint64 `json:"bytes"`
+	Packets uint64 `json:"packets"`
+	Flows   uint64 `json:"flows"`
+}
+
+// TopService is a (dst_port, proto) aggregate. Returned by /api/top/services.
+type TopService struct {
+	DstPort uint16 `json:"dst_port"`
+	Proto   uint8  `json:"proto"`
+	Bytes   uint64 `json:"bytes"`
+	Flows   uint64 `json:"flows"`
+}
+
+// TopProtocol is one row per IP protocol number with share-of-total.
+// Returned by /api/top/protocols.
+type TopProtocol struct {
+	Proto   uint8  `json:"proto"`
+	Bytes   uint64 `json:"bytes"`
+	Packets uint64 `json:"packets"`
+	Flows   uint64 `json:"flows"`
+}
+
+// TopConversation is a full 5-tuple aggregate. Returned by
+// /api/top/conversations.
+type TopConversation struct {
+	SrcAddr  string    `json:"src_addr"`
+	DstAddr  string    `json:"dst_addr"`
+	SrcPort  uint16    `json:"src_port"`
+	DstPort  uint16    `json:"dst_port"`
+	Proto    uint8     `json:"proto"`
+	Bytes    uint64    `json:"bytes"`
+	Packets  uint64    `json:"packets"`
+	Flows    uint64    `json:"flows"`
+	LastSeen time.Time `json:"last_seen"`
+}
+
+// QueryTopTalkers returns the N largest src→dst byte aggregates over
+// the trailing window.
+func QueryTopTalkers(ctx context.Context, conn driver.Conn, window time.Duration, limit int) ([]TopTalker, error) {
+	if window <= 0 {
+		window = 5 * time.Minute
+	}
+	if limit <= 0 || limit > 200 {
+		limit = 20
+	}
+	const q = `
+SELECT src_addr, dst_addr,
+       sum(bytes)   AS bytes,
+       sum(packets) AS packets,
+       count()      AS flows
+FROM flows
+WHERE observed >= now() - INTERVAL ? SECOND
+GROUP BY src_addr, dst_addr
+ORDER BY bytes DESC
+LIMIT ?`
+	rows, err := conn.Query(ctx, q, uint64(window.Seconds()), uint64(limit))
+	if err != nil {
+		return nil, fmt.Errorf("store: query top talkers: %w", err)
+	}
+	defer rows.Close()
+	out := make([]TopTalker, 0, limit)
+	for rows.Next() {
+		var (
+			t   TopTalker
+			src netip.Addr
+			dst netip.Addr
+		)
+		if err := rows.Scan(&src, &dst, &t.Bytes, &t.Packets, &t.Flows); err != nil {
+			return nil, fmt.Errorf("store: scan top talker: %w", err)
+		}
+		t.SrcAddr = src.Unmap().String()
+		t.DstAddr = dst.Unmap().String()
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// QueryTopServices returns the N largest (dst_port, proto) byte
+// aggregates over the trailing window.
+func QueryTopServices(ctx context.Context, conn driver.Conn, window time.Duration, limit int) ([]TopService, error) {
+	if window <= 0 {
+		window = 5 * time.Minute
+	}
+	if limit <= 0 || limit > 200 {
+		limit = 20
+	}
+	const q = `
+SELECT dst_port, proto,
+       sum(bytes) AS bytes,
+       count()    AS flows
+FROM flows
+WHERE observed >= now() - INTERVAL ? SECOND
+GROUP BY dst_port, proto
+ORDER BY bytes DESC
+LIMIT ?`
+	rows, err := conn.Query(ctx, q, uint64(window.Seconds()), uint64(limit))
+	if err != nil {
+		return nil, fmt.Errorf("store: query top services: %w", err)
+	}
+	defer rows.Close()
+	out := make([]TopService, 0, limit)
+	for rows.Next() {
+		var s TopService
+		if err := rows.Scan(&s.DstPort, &s.Proto, &s.Bytes, &s.Flows); err != nil {
+			return nil, fmt.Errorf("store: scan top service: %w", err)
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
+// QueryTopProtocols returns one row per IP protocol number, ordered by
+// total bytes desc.
+func QueryTopProtocols(ctx context.Context, conn driver.Conn, window time.Duration) ([]TopProtocol, error) {
+	if window <= 0 {
+		window = 5 * time.Minute
+	}
+	const q = `
+SELECT proto,
+       sum(bytes)   AS bytes,
+       sum(packets) AS packets,
+       count()      AS flows
+FROM flows
+WHERE observed >= now() - INTERVAL ? SECOND
+GROUP BY proto
+ORDER BY bytes DESC`
+	rows, err := conn.Query(ctx, q, uint64(window.Seconds()))
+	if err != nil {
+		return nil, fmt.Errorf("store: query top protocols: %w", err)
+	}
+	defer rows.Close()
+	out := make([]TopProtocol, 0, 16)
+	for rows.Next() {
+		var p TopProtocol
+		if err := rows.Scan(&p.Proto, &p.Bytes, &p.Packets, &p.Flows); err != nil {
+			return nil, fmt.Errorf("store: scan top protocol: %w", err)
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// QueryTopConversations returns the N largest 5-tuple aggregates over
+// the trailing window.
+func QueryTopConversations(ctx context.Context, conn driver.Conn, window time.Duration, limit int) ([]TopConversation, error) {
+	if window <= 0 {
+		window = 5 * time.Minute
+	}
+	if limit <= 0 || limit > 200 {
+		limit = 20
+	}
+	const q = `
+SELECT src_addr, dst_addr, src_port, dst_port, proto,
+       sum(bytes)   AS bytes,
+       sum(packets) AS packets,
+       count()      AS flows,
+       max(observed) AS last_seen
+FROM flows
+WHERE observed >= now() - INTERVAL ? SECOND
+GROUP BY src_addr, dst_addr, src_port, dst_port, proto
+ORDER BY bytes DESC
+LIMIT ?`
+	rows, err := conn.Query(ctx, q, uint64(window.Seconds()), uint64(limit))
+	if err != nil {
+		return nil, fmt.Errorf("store: query top conversations: %w", err)
+	}
+	defer rows.Close()
+	out := make([]TopConversation, 0, limit)
+	for rows.Next() {
+		var (
+			c   TopConversation
+			src netip.Addr
+			dst netip.Addr
+		)
+		if err := rows.Scan(&src, &dst, &c.SrcPort, &c.DstPort, &c.Proto, &c.Bytes, &c.Packets, &c.Flows, &c.LastSeen); err != nil {
+			return nil, fmt.Errorf("store: scan top conversation: %w", err)
+		}
+		c.SrcAddr = src.Unmap().String()
+		c.DstAddr = dst.Unmap().String()
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
 // QueryRecentFlows returns the most recent N rows from the flows table,
 // newest first. Limit is clamped to [1, 1000].
 func QueryRecentFlows(ctx context.Context, conn driver.Conn, limit int) ([]RecentFlow, error) {
