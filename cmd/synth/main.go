@@ -1,6 +1,5 @@
 // Command synth generates synthetic NetFlow v5 and sFlow v5 traffic
-// for development and load testing. It replaces the Python-era
-// synth_flows.py and now also exercises the sFlow ingest path.
+// for development and load testing.
 //
 //	# NetFlow v5 only
 //	go run ./cmd/synth -- --target 127.0.0.1:2055 --rate 5000 --duration 30s
