@@ -3,6 +3,7 @@ import { useEffect, useState, type ReactNode } from 'react'
 import { api, fmt } from './api'
 import { Overview } from './components/Overview'
 import { Flows } from './components/Flows'
+import { Devices } from './components/Devices'
 
 type Tab = 'overview' | 'flows' | 'devices' | 'alerts'
 
@@ -18,7 +19,8 @@ export function App() {
       <main className="overflow-auto">
         {tab === 'overview' && <Overview />}
         {tab === 'flows' && <Flows />}
-        {tab !== 'overview' && tab !== 'flows' && <ComingSoon name={tab} />}
+        {tab === 'devices' && <Devices />}
+        {tab === 'alerts' && <ComingSoon name={tab} />}
       </main>
       <Cmd />
     </div>

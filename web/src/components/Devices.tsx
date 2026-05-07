@@ -1,0 +1,490 @@
+import { useQuery } from '@tanstack/react-query'
+import { useState, type ReactNode } from 'react'
+import { api, fmt } from '../api'
+import type { Device, InterfaceRow, RecentFlow } from '../api'
+
+// Devices tab — directory of exporters seen in flows on the left,
+// feature view of the selected exporter on the right with three
+// sub-tabs (Summary / Interfaces / Flows). SNMP-driven enrichment
+// (model, OS, uptime, location) lands in a later slice; for now the
+// view shows what we know from observed flows + counter samples.
+export function Devices() {
+  const list = useQuery({
+    queryKey: ['devices'],
+    queryFn: () => api.devices(300),
+    refetchInterval: 5000,
+  })
+  const devices = list.data?.devices ?? []
+  const [selected, setSelected] = useState<string | null>(null)
+
+  // Auto-select the first device on first load if nothing is selected.
+  if (selected === null && devices.length > 0) {
+    setSelected(devices[0].exporter)
+  }
+
+  return (
+    <div className="grid h-full" style={{ gridTemplateColumns: '280px 1fr' }}>
+      <Directory
+        devices={devices}
+        selected={selected}
+        onSelect={setSelected}
+        loading={list.isLoading}
+      />
+      <Feature exporter={selected} />
+    </div>
+  )
+}
+
+/* ----------------------------- Directory ----------------------------- */
+
+function Directory({
+  devices,
+  selected,
+  onSelect,
+  loading,
+}: {
+  devices: Device[]
+  selected: string | null
+  onSelect: (e: string) => void
+  loading: boolean
+}) {
+  const [filter, setFilter] = useState('')
+  const filtered = devices.filter((d) =>
+    filter === '' ? true : d.exporter.includes(filter),
+  )
+  return (
+    <aside className="border-r border-line bg-surface flex flex-col overflow-hidden">
+      <div className="p-3 border-b border-line">
+        <input
+          placeholder="filter exporters…"
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+          className="w-full h-7 px-2 bg-ink border border-line text-[12.5px] outline-none focus:border-accent"
+        />
+      </div>
+      <div className="overflow-auto">
+        <div className="px-3 py-2 text-[10px] uppercase tracking-[0.16em] font-mono text-faint flex justify-between">
+          <span>exporters</span>
+          <span>{loading ? '…' : `${filtered.length}/${devices.length}`}</span>
+        </div>
+        {filtered.length === 0 && !loading && (
+          <div className="px-3 py-6 text-[12px] font-mono text-dim">
+            {devices.length === 0
+              ? 'no exporters seen in window'
+              : 'no matches'}
+          </div>
+        )}
+        {filtered.map((d) => (
+          <DirectoryRow
+            key={d.exporter}
+            d={d}
+            active={d.exporter === selected}
+            onSelect={() => onSelect(d.exporter)}
+          />
+        ))}
+      </div>
+    </aside>
+  )
+}
+
+function DirectoryRow({
+  d,
+  active,
+  onSelect,
+}: {
+  d: Device
+  active: boolean
+  onSelect: () => void
+}) {
+  const since = secondsSince(d.last_seen)
+  const dot =
+    since < 60 ? 'bg-ok' : since < 300 ? 'bg-warn' : 'bg-crit'
+  return (
+    <button
+      onClick={onSelect}
+      className={`w-full text-left px-3 py-2 border-b border-line-soft flex items-center gap-3 hover:bg-hover ${
+        active ? 'bg-accent-wash' : ''
+      }`}
+    >
+      <span className={`w-1.5 h-1.5 rounded-full ${dot} shrink-0`} />
+      <span className="font-mono text-[12.5px] truncate">{d.exporter}</span>
+      <span className="ml-auto font-mono text-[10.5px] text-faint shrink-0 tabular">
+        {fmt.bps((d.bytes * 8) / 300)}
+      </span>
+    </button>
+  )
+}
+
+/* ----------------------------- Feature view ----------------------------- */
+
+type SubTab = 'summary' | 'interfaces' | 'flows'
+
+function Feature({ exporter }: { exporter: string | null }) {
+  const [sub, setSub] = useState<SubTab>('summary')
+  if (!exporter) {
+    return (
+      <div className="p-8 text-dim font-mono text-[13px]">
+        Select an exporter from the directory.
+      </div>
+    )
+  }
+  return (
+    <article className="overflow-auto">
+      <FeatureHeader exporter={exporter} />
+      <SubTabs active={sub} onChange={setSub} />
+      <div>
+        {sub === 'summary' && <SummaryTab exporter={exporter} />}
+        {sub === 'interfaces' && <InterfacesTab exporter={exporter} />}
+        {sub === 'flows' && <FlowsTab exporter={exporter} />}
+      </div>
+    </article>
+  )
+}
+
+function FeatureHeader({ exporter }: { exporter: string }) {
+  const q = useQuery({
+    queryKey: ['device', exporter],
+    queryFn: () => api.device(exporter, 300),
+    refetchInterval: 5000,
+  })
+  const d = q.data
+  const since = d ? secondsSince(d.last_seen) : Infinity
+  const status =
+    since < 60 ? 'online' : since < 300 ? 'silent' : 'offline'
+  const tone =
+    status === 'online' ? 'text-ok' : status === 'silent' ? 'text-warn' : 'text-crit'
+  return (
+    <header className="px-6 pt-6 pb-4 border-b border-line bg-surface">
+      <div className="flex items-center gap-3 text-[10.5px] uppercase tracking-[0.1em] font-semibold text-dim mb-1">
+        <span className={tone}>● {status}</span>
+        <span className="font-mono text-[10.5px] text-faint normal-case tracking-[0.02em]">
+          last seen {d ? fmt.time(d.last_seen).slice(11, 19) + 'Z' : '—'}
+        </span>
+        <span className="font-mono text-[10.5px] text-faint normal-case tracking-[0.02em]">
+          first seen {d ? fmt.time(d.first_seen).slice(11, 19) + 'Z' : '—'}
+        </span>
+      </div>
+      <h1 className="font-mono text-[26px] font-semibold tracking-tight text-text leading-[1.1]">
+        {exporter}
+      </h1>
+      <p className="text-[13.5px] text-dim mt-1.5 max-w-[78ch] leading-[1.5]">
+        Exporter inferred from observed flow records. SNMP-driven inventory
+        (model, OS version, location, contact) wires in when the SNMP
+        service ships;{' '}
+        {d?.iface_count ? (
+          <>
+            <span className="text-text font-medium">
+              {fmt.num(d.iface_count)} interface{d.iface_count === 1 ? '' : 's'}
+            </span>{' '}
+            currently emit counter samples.
+          </>
+        ) : (
+          'no counter samples seen yet — counter-sample-derived bandwidth requires an sFlow / gNMI capable exporter.'
+        )}
+      </p>
+      <SpecRow d={d} />
+    </header>
+  )
+}
+
+function SpecRow({ d }: { d?: Device }) {
+  const cells: { k: string; v: string; mono?: boolean }[] = [
+    { k: 'address', v: d?.exporter ?? '—', mono: true },
+    { k: 'flows · 5m', v: d ? fmt.num(d.flows) : '—', mono: true },
+    { k: 'volume · 5m', v: d ? fmt.bytes(d.bytes) : '—' },
+    { k: 'avg rate', v: d ? fmt.bps((d.bytes * 8) / 300) : '—' },
+    { k: 'interfaces', v: d ? fmt.num(d.iface_count) : '—', mono: true },
+    {
+      k: 'first seen',
+      v: d ? fmt.time(d.first_seen).slice(11, 19) + 'Z' : '—',
+      mono: true,
+    },
+  ]
+  return (
+    <div className="grid grid-cols-3 md:grid-cols-6 mt-4 border-t border-l border-line">
+      {cells.map((c, i) => (
+        <div
+          key={i}
+          className="px-3 py-2.5 border-r border-b border-line"
+        >
+          <div className="text-[10px] uppercase tracking-[0.1em] text-faint font-semibold mb-0.5">
+            {c.k}
+          </div>
+          <div className={`text-[14px] tabular text-text ${c.mono ? 'font-mono' : ''}`}>
+            {c.v}
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function SubTabs({ active, onChange }: { active: SubTab; onChange: (s: SubTab) => void }) {
+  return (
+    <div className="flex border-b border-line bg-ink">
+      <Tab id="summary" active={active} onChange={onChange}>Summary</Tab>
+      <Tab id="interfaces" active={active} onChange={onChange}>Interfaces</Tab>
+      <Tab id="flows" active={active} onChange={onChange}>Flows</Tab>
+    </div>
+  )
+}
+
+function Tab({
+  id,
+  active,
+  onChange,
+  children,
+}: {
+  id: SubTab
+  active: SubTab
+  onChange: (s: SubTab) => void
+  children: ReactNode
+}) {
+  const selected = id === active
+  return (
+    <button
+      onClick={() => onChange(id)}
+      className={`relative px-4 py-2.5 text-[13px] border-r border-line ${
+        selected ? 'text-text' : 'text-dim hover:text-text hover:bg-surface'
+      }`}
+    >
+      {children}
+      {selected && <span className="absolute left-0 right-0 -bottom-px h-0.5 bg-accent" />}
+    </button>
+  )
+}
+
+/* ----------------------------- Summary tab ----------------------------- */
+
+function SummaryTab({ exporter }: { exporter: string }) {
+  return (
+    <div className="px-6 py-5 space-y-5">
+      <Section title="Recent activity" sub="last 60s of flows">
+        <RecentFlowsMini exporter={exporter} limit={6} />
+      </Section>
+      <Section title="Top interfaces" sub="counter samples · 5 min" right="SOURCE · COUNTERS">
+        <InterfacesMini exporter={exporter} />
+      </Section>
+    </div>
+  )
+}
+
+function Section({
+  title,
+  sub,
+  right,
+  children,
+}: {
+  title: string
+  sub?: string
+  right?: string
+  children: ReactNode
+}) {
+  return (
+    <section>
+      <div className="flex items-baseline gap-3 pb-2 border-b border-line">
+        <span className="text-[11px] uppercase tracking-[0.1em] text-dim font-semibold">{title}</span>
+        {sub && <span className="font-mono text-[11px] text-faint">{sub}</span>}
+        {right && (
+          <span className="ml-auto font-mono text-[10px] tracking-[0.06em] text-accent">{right}</span>
+        )}
+      </div>
+      <div className="pt-2">{children}</div>
+    </section>
+  )
+}
+
+function RecentFlowsMini({ exporter, limit }: { exporter: string; limit: number }) {
+  const q = useQuery({
+    queryKey: ['device-recent', exporter, limit],
+    queryFn: () => api.recentFlows(limit, exporter),
+    refetchInterval: 2000,
+  })
+  const flows = q.data?.flows ?? []
+  if (q.isLoading) return <p className="text-dim font-mono text-[12px]">loading…</p>
+  if (flows.length === 0) {
+    return <p className="text-dim font-mono text-[12px]">no flows yet</p>
+  }
+  return (
+    <ul className="font-mono text-[12px] space-y-1">
+      {flows.map((f, i) => (
+        <li key={i} className="flex gap-3 text-dim">
+          <span className="text-faint">{fmt.time(f.observed).slice(11, 19)}</span>
+          <span className="text-accent">{fmt.proto(f.proto)}</span>
+          <span className="truncate">
+            {f.src_addr}:{f.src_port} <span className="text-faint">→</span>{' '}
+            {f.dst_addr}:{f.dst_port}
+          </span>
+          <span className="ml-auto text-text tabular shrink-0">{fmt.bytes(f.bytes)}</span>
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+function InterfacesMini({ exporter }: { exporter: string }) {
+  const q = useQuery({
+    queryKey: ['device-ifaces', exporter],
+    queryFn: () => api.interfaces(300, exporter),
+    refetchInterval: 5000,
+  })
+  const ifaces = q.data?.interfaces ?? []
+  if (q.isLoading) return <p className="text-dim font-mono text-[12px]">loading…</p>
+  if (ifaces.length === 0) {
+    return (
+      <p className="text-dim font-mono text-[12px]">
+        no counter samples · sFlow / gNMI required for authoritative rates
+      </p>
+    )
+  }
+  return (
+    <table className="w-full">
+      <thead>
+        <tr>
+          <th className="r">ifindex</th>
+          <th className="r">in (latest)</th>
+          <th className="r">out (latest)</th>
+          <th className="r">in peak</th>
+          <th className="r">out peak</th>
+          <th className="r">last seen</th>
+        </tr>
+      </thead>
+      <tbody>
+        {ifaces.slice(0, 10).map((i: InterfaceRow) => (
+          <tr key={i.ifindex} className="hover:bg-surface">
+            <td className="r n">{i.ifindex}</td>
+            <td className="r n">{fmt.bps(i.in_bps_latest)}</td>
+            <td className="r n">{fmt.bps(i.out_bps_latest)}</td>
+            <td className="r n text-accent">{fmt.bps(i.in_bps_peak)}</td>
+            <td className="r n text-ok">{fmt.bps(i.out_bps_peak)}</td>
+            <td className="r n text-faint">{fmt.time(i.last_seen).slice(11, 19)}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  )
+}
+
+/* ----------------------------- Interfaces tab ----------------------------- */
+
+function InterfacesTab({ exporter }: { exporter: string }) {
+  const q = useQuery({
+    queryKey: ['device-ifaces-full', exporter],
+    queryFn: () => api.interfaces(300, exporter),
+    refetchInterval: 5000,
+  })
+  const ifaces = q.data?.interfaces ?? []
+  return (
+    <div>
+      <div className="flex items-baseline gap-3 px-4 py-3 border-b border-line">
+        <span className="text-[11px] uppercase tracking-[0.1em] text-dim font-semibold">
+          All interfaces
+        </span>
+        <span className="font-mono text-[11px] text-faint">
+          {q.isLoading ? 'loading…' : `${ifaces.length} active · 5 min`}
+        </span>
+        <span className="ml-auto font-mono text-[10px] tracking-[0.06em] text-accent">
+          SOURCE · COUNTERS
+        </span>
+      </div>
+      {ifaces.length === 0 ? (
+        <div className="px-4 py-8 text-center text-[12px] font-mono text-dim">
+          no counter samples for this exporter · NetFlow-only sources do not produce them
+        </div>
+      ) : (
+        <table className="w-full">
+          <thead>
+            <tr>
+              <th className="r">ifindex</th>
+              <th className="r">in (latest)</th>
+              <th className="r">out (latest)</th>
+              <th className="r">in peak</th>
+              <th className="r">out peak</th>
+              <th className="r">last seen</th>
+            </tr>
+          </thead>
+          <tbody>
+            {ifaces.map((i: InterfaceRow) => (
+              <tr key={i.ifindex} className="hover:bg-surface">
+                <td className="r n">{i.ifindex}</td>
+                <td className="r n">{fmt.bps(i.in_bps_latest)}</td>
+                <td className="r n">{fmt.bps(i.out_bps_latest)}</td>
+                <td className="r n text-accent">{fmt.bps(i.in_bps_peak)}</td>
+                <td className="r n text-ok">{fmt.bps(i.out_bps_peak)}</td>
+                <td className="r n text-faint">{fmt.time(i.last_seen).slice(11, 19)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  )
+}
+
+/* ----------------------------- Flows tab ----------------------------- */
+
+function FlowsTab({ exporter }: { exporter: string }) {
+  const q = useQuery({
+    queryKey: ['device-flows', exporter],
+    queryFn: () => api.recentFlows(50, exporter),
+    refetchInterval: 2000,
+  })
+  const flows = q.data?.flows ?? []
+  return (
+    <div>
+      <div className="flex items-baseline gap-3 px-4 py-3 border-b border-line">
+        <span className="text-[11px] uppercase tracking-[0.1em] text-dim font-semibold">
+          Recent flows
+        </span>
+        <span className="font-mono text-[11px] text-faint">
+          {q.isLoading ? 'loading…' : `${flows.length} most recent`}
+        </span>
+        <span className="ml-auto font-mono text-[10px] tracking-[0.06em] text-faint">
+          REFRESH · 2s
+        </span>
+      </div>
+      {flows.length === 0 ? (
+        <div className="px-4 py-8 text-center text-[12px] font-mono text-dim">
+          no flows yet for this exporter
+        </div>
+      ) : (
+        <table className="w-full">
+          <thead>
+            <tr>
+              <th>time</th>
+              <th>source</th>
+              <th>src → dst</th>
+              <th>proto</th>
+              <th className="r">packets</th>
+              <th className="r">bytes</th>
+            </tr>
+          </thead>
+          <tbody>
+            {flows.map((f: RecentFlow, i: number) => (
+              <tr key={i} className="hover:bg-surface">
+                <td className="n text-faint">{fmt.time(f.observed).slice(11, 23)}</td>
+                <td className="n text-dim">{f.source}</td>
+                <td className="n">
+                  {f.src_addr}:{f.src_port}{' '}
+                  <span className="text-faint">→</span>{' '}
+                  {f.dst_addr}:{f.dst_port}
+                </td>
+                <td className="font-mono text-accent">{fmt.proto(f.proto)}</td>
+                <td className="r n">{fmt.num(f.packets)}</td>
+                <td className="r n">{fmt.bytes(f.bytes)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  )
+}
+
+/* ----------------------------- Helpers ----------------------------- */
+
+function secondsSince(iso: string): number {
+  const t = new Date(iso).getTime()
+  if (Number.isNaN(t)) return Infinity
+  return Math.max(0, (Date.now() - t) / 1000)
+}

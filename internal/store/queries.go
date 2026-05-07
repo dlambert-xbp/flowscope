@@ -103,12 +103,24 @@ WHERE observed >= now() - INTERVAL ? SECOND`
 // recent peak in_bps + out_bps. Rates come from successive-sample
 // diffs — see comment in QueryInterfaceTimeseries.
 //
-// Window defaults to 5 minutes when zero or negative.
-func QueryInterfaces(ctx context.Context, conn driver.Conn, window time.Duration) ([]InterfaceRow, error) {
+// If exporter is non-empty, the result is filtered to that single
+// exporter. Window defaults to 5 minutes when zero or negative.
+func QueryInterfaces(ctx context.Context, conn driver.Conn, window time.Duration, exporter string) ([]InterfaceRow, error) {
 	if window <= 0 {
 		window = 5 * time.Minute
 	}
-	const q = `
+	exporterPredicate := ""
+	args := []any{uint64(window.Seconds())}
+	if exporter != "" {
+		addr, err := netip.ParseAddr(exporter)
+		if err != nil {
+			return nil, fmt.Errorf("store: invalid exporter address: %w", err)
+		}
+		exporterPredicate = " AND exporter = ?"
+		bytes := addr.As16()
+		args = append(args, bytes[:])
+	}
+	q := `
 WITH diffed AS (
     SELECT
         ts,
@@ -118,7 +130,7 @@ WITH diffed AS (
         toFloat64(out_octets - lagInFrame(out_octets) OVER w) AS d_out,
         date_diff('millisecond', lagInFrame(ts) OVER w, ts) AS dt_ms
     FROM iface_counter_samples
-    WHERE ts >= now() - INTERVAL ? SECOND
+    WHERE ts >= now() - INTERVAL ? SECOND` + exporterPredicate + `
     WINDOW w AS (PARTITION BY exporter, ifindex ORDER BY ts)
 )
 SELECT
@@ -134,7 +146,7 @@ WHERE dt_ms > 0
 GROUP BY exporter, ifindex
 ORDER BY (in_peak + out_peak) DESC
 LIMIT 50`
-	rows, err := conn.Query(ctx, q, uint64(window.Seconds()))
+	rows, err := conn.Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("store: query interfaces: %w", err)
 	}
@@ -209,6 +221,133 @@ ORDER BY ts`
 		out.Points = append(out.Points, p)
 	}
 	return out, rows.Err()
+}
+
+// Device is one exporter's traffic summary over a window. Returned by
+// /api/devices. The platform infers exporters from observed flows;
+// SNMP-driven inventory enrichment (model, OS, uptime, location)
+// arrives in a later slice.
+type Device struct {
+	Exporter   string    `json:"exporter"`
+	Flows      uint64    `json:"flows"`
+	Bytes      uint64    `json:"bytes"`
+	Packets    uint64    `json:"packets"`
+	FirstSeen  time.Time `json:"first_seen"`
+	LastSeen   time.Time `json:"last_seen"`
+	IfaceCount uint64    `json:"iface_count"`
+}
+
+// QueryDevices lists every exporter that produced flow records in the
+// trailing window, ranked by total bytes. iface_count is the number
+// of unique ifindex values that produced counter samples in the same
+// window — populated only for sFlow / gNMI-capable exporters.
+func QueryDevices(ctx context.Context, conn driver.Conn, window time.Duration) ([]Device, error) {
+	if window <= 0 {
+		window = 5 * time.Minute
+	}
+	const q = `
+SELECT
+    f.exporter   AS exporter,
+    f.flows      AS flows,
+    f.bytes      AS bytes,
+    f.packets    AS packets,
+    f.first_seen AS first_seen,
+    f.last_seen  AS last_seen,
+    ifNull(i.iface_count, 0) AS iface_count
+FROM (
+    SELECT
+        exporter,
+        count() AS flows,
+        sum(bytes)   AS bytes,
+        sum(packets) AS packets,
+        min(observed) AS first_seen,
+        max(observed) AS last_seen
+    FROM flows
+    WHERE observed >= now() - INTERVAL ? SECOND
+    GROUP BY exporter
+) AS f
+LEFT JOIN (
+    SELECT exporter, uniq(ifindex) AS iface_count
+    FROM iface_counter_samples
+    WHERE ts >= now() - INTERVAL ? SECOND
+    GROUP BY exporter
+) AS i ON f.exporter = i.exporter
+ORDER BY f.bytes DESC`
+	w := uint64(window.Seconds())
+	rows, err := conn.Query(ctx, q, w, w)
+	if err != nil {
+		return nil, fmt.Errorf("store: query devices: %w", err)
+	}
+	defer rows.Close()
+	out := make([]Device, 0, 16)
+	for rows.Next() {
+		var (
+			d        Device
+			exporter netip.Addr
+		)
+		if err := rows.Scan(&exporter, &d.Flows, &d.Bytes, &d.Packets, &d.FirstSeen, &d.LastSeen, &d.IfaceCount); err != nil {
+			return nil, fmt.Errorf("store: scan device: %w", err)
+		}
+		d.Exporter = exporter.Unmap().String()
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// QueryDevice returns the same shape as one row of QueryDevices,
+// scoped to the supplied exporter address. Empty result (no flows in
+// window) returns ErrNotFound — the api maps this to 404.
+func QueryDevice(ctx context.Context, conn driver.Conn, exporter netip.Addr, window time.Duration) (*Device, error) {
+	if window <= 0 {
+		window = 5 * time.Minute
+	}
+	const q = `
+SELECT
+    count() AS flows,
+    sum(bytes)   AS bytes,
+    sum(packets) AS packets,
+    min(observed) AS first_seen,
+    max(observed) AS last_seen
+FROM flows
+WHERE observed >= now() - INTERVAL ? SECOND AND exporter = ?
+GROUP BY exporter`
+	expBytes := exporter.As16()
+	row := conn.QueryRow(ctx, q, uint64(window.Seconds()), expBytes[:])
+	var d Device
+	if err := row.Scan(&d.Flows, &d.Bytes, &d.Packets, &d.FirstSeen, &d.LastSeen); err != nil {
+		// clickhouse-go returns sql.ErrNoRows wrapped on empty groups
+		if isNoRows(err) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("store: query device: %w", err)
+	}
+	d.Exporter = exporter.Unmap().String()
+
+	// Interface count for this exporter.
+	const qi = `
+SELECT uniq(ifindex)
+FROM iface_counter_samples
+WHERE ts >= now() - INTERVAL ? SECOND AND exporter = ?`
+	if err := conn.QueryRow(ctx, qi, uint64(window.Seconds()), expBytes[:]).Scan(&d.IfaceCount); err != nil {
+		// Non-fatal; counter samples may not exist for NetFlow-only
+		// exporters.
+		d.IfaceCount = 0
+	}
+	return &d, nil
+}
+
+// ErrNotFound is returned by single-row queries when the row does not
+// exist. The api layer maps this to HTTP 404.
+var ErrNotFound = fmt.Errorf("not found")
+
+func isNoRows(err error) bool {
+	if err == nil {
+		return false
+	}
+	// clickhouse-go scans return "sql: no rows in result set" via the
+	// stdlib database/sql sentinel; matching by string keeps us free
+	// of a database/sql import here.
+	return err.Error() == "sql: no rows in result set"
 }
 
 // FlowFilter narrows top-N queries by exporter, 5-tuple, or protocol.
@@ -469,23 +608,36 @@ LIMIT ?`
 }
 
 // QueryRecentFlows returns the most recent N rows from the flows table,
-// newest first. Limit is clamped to [1, 1000].
-func QueryRecentFlows(ctx context.Context, conn driver.Conn, limit int) ([]RecentFlow, error) {
+// newest first. If exporter is non-empty, results are filtered to that
+// single exporter. Limit is clamped to [1, 1000].
+func QueryRecentFlows(ctx context.Context, conn driver.Conn, limit int, exporter string) ([]RecentFlow, error) {
 	if limit <= 0 {
 		limit = 100
 	}
 	if limit > 1000 {
 		limit = 1000
 	}
-	const q = `
+	exporterPredicate := ""
+	args := []any{}
+	if exporter != "" {
+		addr, err := netip.ParseAddr(exporter)
+		if err != nil {
+			return nil, fmt.Errorf("store: invalid exporter address: %w", err)
+		}
+		exporterPredicate = " WHERE exporter = ?"
+		bytes := addr.As16()
+		args = append(args, bytes[:])
+	}
+	q := `
 SELECT
     observed, exporter, src_addr, dst_addr,
     src_port, dst_port, proto, bytes, packets,
     input_ifindex, output_ifindex, source
-FROM flows
+FROM flows` + exporterPredicate + `
 ORDER BY observed DESC
 LIMIT ?`
-	rows, err := conn.Query(ctx, q, uint64(limit))
+	args = append(args, uint64(limit))
+	rows, err := conn.Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("store: query recent flows: %w", err)
 	}

@@ -52,6 +52,16 @@ export type InterfaceTimeseries = {
   points: InterfaceTimeseriesPoint[]
 }
 
+export type Device = {
+  exporter: string
+  flows: number
+  bytes: number
+  packets: number
+  first_seen: string
+  last_seen: string
+  iface_count: number
+}
+
 export type TopTalker = {
   src_addr: string
   dst_addr: string
@@ -102,17 +112,29 @@ async function getJSON<T>(url: string): Promise<T> {
 export const api = {
   summary: (windowSec = 300) =>
     getJSON<Summary>(`/api/summary?window=${windowSec}s`),
-  recentFlows: (limit = 20) =>
+  recentFlows: (limit = 20, exporter?: string) =>
     getJSON<{ count: number; flows: RecentFlow[] }>(
-      `/api/flows/recent?limit=${limit}`,
+      exporter
+        ? `/api/flows/recent?limit=${limit}&exporter=${encodeURIComponent(exporter)}`
+        : `/api/flows/recent?limit=${limit}`,
     ),
-  interfaces: (windowSec = 300) =>
+  interfaces: (windowSec = 300, exporter?: string) =>
     getJSON<{ count: number; interfaces: InterfaceRow[]; source: string; window: string }>(
-      `/api/interfaces?window=${windowSec}s`,
+      exporter
+        ? `/api/interfaces?window=${windowSec}s&exporter=${encodeURIComponent(exporter)}`
+        : `/api/interfaces?window=${windowSec}s`,
     ),
   interfaceTimeseries: (exporter: string, ifindex: number, seconds = 300) =>
     getJSON<InterfaceTimeseries>(
       `/api/interfaces/${exporter}/${ifindex}/timeseries?seconds=${seconds}`,
+    ),
+  devices: (windowSec = 300) =>
+    getJSON<{ count: number; devices: Device[]; window: string }>(
+      `/api/devices?window=${windowSec}s`,
+    ),
+  device: (exporter: string, windowSec = 300) =>
+    getJSON<Device>(
+      `/api/devices/${encodeURIComponent(exporter)}?window=${windowSec}s`,
     ),
   topTalkers: (filters: URLSearchParams, windowSec = 300, limit = 20) =>
     getJSON<TopResponse<TopTalker>>(

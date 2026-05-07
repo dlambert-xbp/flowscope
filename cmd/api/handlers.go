@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/netip"
 	"strconv"
@@ -47,14 +48,15 @@ func (h *handlers) summary(w http.ResponseWriter, r *http.Request) {
 
 // recentFlows returns the most recent flows, newest first.
 //
-//	GET /api/flows/recent?limit=100
+//	GET /api/flows/recent?limit=100&exporter=10.2.0.11
 //
-// Limit defaults to 100, max 1000.
+// Limit defaults to 100, max 1000. exporter is optional.
 func (h *handlers) recentFlows(w http.ResponseWriter, r *http.Request) {
 	limit := parseInt(r.URL.Query().Get("limit"), 100)
-	flows, err := store.QueryRecentFlows(r.Context(), h.conn, limit)
+	exporter := r.URL.Query().Get("exporter")
+	flows, err := store.QueryRecentFlows(r.Context(), h.conn, limit, exporter)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -157,15 +159,57 @@ func (h *handlers) topConversations(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// devices lists every exporter that produced at least one flow in
+// the trailing window.
+//
+//	GET /api/devices?window=300s
+func (h *handlers) devices(w http.ResponseWriter, r *http.Request) {
+	window := parseWindow(r.URL.Query().Get("window"), 5*time.Minute)
+	rows, err := store.QueryDevices(r.Context(), h.conn, window)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"count":   len(rows),
+		"devices": rows,
+		"window":  window.String(),
+	})
+}
+
+// device returns the summary for a single exporter.
+//
+//	GET /api/devices/{exporter}?window=300s
+func (h *handlers) device(w http.ResponseWriter, r *http.Request) {
+	exporterStr := chi.URLParam(r, "exporter")
+	exporter, err := netip.ParseAddr(exporterStr)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid exporter address")
+		return
+	}
+	window := parseWindow(r.URL.Query().Get("window"), 5*time.Minute)
+	d, err := store.QueryDevice(r.Context(), h.conn, exporter, window)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "no flows from this exporter in the requested window")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, d)
+}
+
 // interfaces returns one row per (exporter, ifindex) seen in the
 // trailing window, ranked by peak bandwidth.
 //
-//	GET /api/interfaces?window=300s
+//	GET /api/interfaces?window=300s&exporter=10.2.0.11
 func (h *handlers) interfaces(w http.ResponseWriter, r *http.Request) {
 	window := parseWindow(r.URL.Query().Get("window"), 5*time.Minute)
-	rows, err := store.QueryInterfaces(r.Context(), h.conn, window)
+	exporter := r.URL.Query().Get("exporter")
+	rows, err := store.QueryInterfaces(r.Context(), h.conn, window, exporter)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
