@@ -1,5 +1,0 @@
-flask>=2.3.0
-waitress>=3.0.0
-apscheduler>=3.10.0
-cryptography>=41.0.0
-pysnmp>=6.2.0

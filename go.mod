@@ -2,7 +2,10 @@ module github.com/dlambert-xbp/flowscope
 
 go 1.24.1
 
-require github.com/ClickHouse/clickhouse-go/v2 v2.46.0
+require (
+	github.com/ClickHouse/clickhouse-go/v2 v2.46.0
+	github.com/go-chi/chi/v5 v5.2.5
+)
 
 require (
 	github.com/ClickHouse/ch-go v0.71.0 // indirect

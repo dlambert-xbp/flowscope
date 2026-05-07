@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>FlowScope · Live</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --ink:#0c0d0e; --surf:#131416; --raise:#181a1d; --line:#23262b;
+    --text:#e8e6e0; --dim:#9a958c; --faint:#6b6862;
+    --accent:#ff5b1f; --crit:#e04646; --warn:#d4a017; --ok:#5a9c5f;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{
+    font-family:'IBM Plex Sans',system-ui,-apple-system,sans-serif;
+    background:var(--ink);color:var(--text);
+    font-size:13.5px;line-height:1.5;
+    -webkit-font-smoothing:antialiased;
+  }
+  .mono{font-family:'IBM Plex Mono',ui-monospace,monospace;font-variant-numeric:tabular-nums}
+  .topbar{
+    display:flex;align-items:center;gap:24px;padding:14px 28px;
+    background:var(--surf);border-bottom:1px solid var(--line);
+  }
+  .brand{font-weight:700;letter-spacing:-.01em;font-size:16px}
+  .brand .accent{color:var(--accent)}
+  .topbar .vital{display:flex;gap:18px;font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:var(--dim);margin-left:auto;align-items:center}
+  .topbar .vital strong{color:var(--text);font-weight:600}
+  .live-dot{width:7px;height:7px;border-radius:50%;background:var(--ok);animation:pulse 2.4s ease-in-out infinite;display:inline-block;margin-right:6px;vertical-align:middle}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.45}}
+
+  main{padding:28px;max-width:1280px;margin:0 auto}
+  .lead{
+    font-size:15.5px;color:var(--dim);max-width:780px;margin-bottom:24px;
+    border-left:2px solid var(--accent);padding:4px 0 4px 16px;line-height:1.6;
+  }
+  .lead em{color:var(--text);font-style:normal;font-weight:600}
+
+  .grid{display:grid;grid-template-columns:repeat(4,1fr);gap:0;border:1px solid var(--line)}
+  .tile{padding:18px 20px;border-right:1px solid var(--line);border-bottom:1px solid var(--line);background:var(--surf)}
+  .tile:nth-child(4n){border-right:0}
+  .tile:nth-last-child(-n+4){border-bottom:0}
+  .tile .k{
+    font-size:10.5px;color:var(--dim);text-transform:uppercase;letter-spacing:.16em;
+    font-family:'IBM Plex Mono',monospace;font-weight:600;margin-bottom:8px;
+  }
+  .tile .v{font-size:30px;font-weight:600;letter-spacing:-.02em;color:var(--text);font-variant-numeric:tabular-nums;line-height:1.05}
+  .tile .v.accent{color:var(--accent)}
+  .tile .sub{font-size:11.5px;color:var(--faint);margin-top:6px;font-family:'IBM Plex Mono',monospace}
+
+  section{margin-top:32px}
+  h2{
+    font-size:11px;text-transform:uppercase;letter-spacing:.18em;color:var(--dim);
+    font-family:'IBM Plex Mono',monospace;font-weight:700;margin-bottom:12px;
+    padding-bottom:8px;border-bottom:1px solid var(--line);
+  }
+
+  table{width:100%;border-collapse:collapse;font-size:12.5px}
+  th{
+    text-align:left;padding:10px 14px 10px 0;font-size:10.5px;
+    text-transform:uppercase;letter-spacing:.12em;color:var(--faint);
+    font-family:'IBM Plex Mono',monospace;font-weight:700;
+    border-bottom:1px solid var(--line);
+  }
+  th.right{text-align:right}
+  td{padding:9px 14px 9px 0;border-bottom:1px solid var(--line);font-family:'IBM Plex Mono',monospace}
+  td.right{text-align:right;font-variant-numeric:tabular-nums}
+  tr:hover td{background:var(--raise)}
+  .proto{color:var(--accent);font-weight:500}
+
+  .footer{margin-top:48px;padding-top:18px;border-top:1px solid var(--line);font-size:11.5px;color:var(--faint);font-family:'IBM Plex Mono',monospace;display:flex;justify-content:space-between}
+  .footer a{color:var(--accent);text-decoration:none}
+  .footer a:hover{text-decoration:underline}
+
+  .err{color:var(--crit)}
+  .empty{padding:24px;text-align:center;color:var(--dim);font-family:'IBM Plex Mono',monospace;font-size:12px;border:1px dashed var(--line)}
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">FlowScope<span class="accent">.</span></div>
+  <div class="vital">
+    <span><span class="live-dot"></span><strong id="status">connecting</strong></span>
+    <span>flows/s · <strong id="rate">—</strong></span>
+    <span>exporters · <strong id="exp">—</strong></span>
+    <span>last update · <strong id="last">—</strong></span>
+  </div>
+</header>
+
+<main>
+  <p class="lead" id="lead">
+    Connecting to <em>/api/summary</em> for the trailing five minutes…
+  </p>
+
+  <div class="grid">
+    <div class="tile"><div class="k">flows · 5m</div><div class="v mono accent" id="m_flows">—</div><div class="sub" id="m_flows_sub">window 5 min</div></div>
+    <div class="tile"><div class="k">bytes · 5m</div><div class="v mono" id="m_bytes">—</div><div class="sub" id="m_bytes_sub">total transferred</div></div>
+    <div class="tile"><div class="k">packets · 5m</div><div class="v mono" id="m_packets">—</div><div class="sub" id="m_packets_sub">total counted</div></div>
+    <div class="tile"><div class="k">exporters seen</div><div class="v mono" id="m_exp">—</div><div class="sub" id="m_exp_sub">unique sources</div></div>
+  </div>
+
+  <section>
+    <h2>Recent flows · newest first</h2>
+    <div id="recent_wrap" class="empty">loading…</div>
+  </section>
+
+  <div class="footer">
+    <span>FlowScope api · v1 · trading-terminal placeholder · React app to follow</span>
+    <span><a href="/api/summary">/api/summary</a> · <a href="/api/flows/recent">/api/flows/recent</a> · <a href="/healthz">/healthz</a></span>
+  </div>
+</main>
+
+<script>
+  const fmt = new Intl.NumberFormat('en-US');
+  const fmtBytes = (n) => {
+    if (n == null) return '—';
+    const u = ['B','KiB','MiB','GiB','TiB','PiB'];
+    let i = 0, v = Number(n);
+    while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+    return v.toFixed(v >= 100 || i === 0 ? 0 : 1) + ' ' + u[i];
+  };
+  const fmtTime = (iso) => {
+    if (!iso) return '—';
+    try { return new Date(iso).toISOString().replace('T',' ').slice(0,19) + 'Z'; }
+    catch { return iso; }
+  };
+
+  let lastFlows = 0;
+  async function tick() {
+    try {
+      const r = await fetch('/api/summary?window=300s', { cache: 'no-store' });
+      if (!r.ok) throw new Error('summary http ' + r.status);
+      const s = await r.json();
+      document.getElementById('status').textContent = 'live';
+      document.getElementById('status').classList.remove('err');
+      document.getElementById('m_flows').textContent = fmt.format(s.flows || 0);
+      document.getElementById('m_bytes').textContent = fmtBytes(s.bytes || 0);
+      document.getElementById('m_packets').textContent = fmt.format(s.packets || 0);
+      document.getElementById('m_exp').textContent = fmt.format(s.exporters || 0);
+      const rate = ((s.flows - lastFlows) / 2).toFixed(0);
+      lastFlows = s.flows || 0;
+      document.getElementById('rate').textContent = isFinite(rate) ? rate : '—';
+      document.getElementById('exp').textContent = s.exporters || 0;
+      document.getElementById('last').textContent = fmtTime(s.newest);
+      const expN = s.exporters || 0;
+      const flowsN = s.flows || 0;
+      document.getElementById('lead').innerHTML =
+        flowsN === 0
+          ? `Connected to ClickHouse but the <em>flows</em> table is empty. Drive synthetic traffic with <em>go run ./cmd/synth -- --target localhost:2055 --rate 5000</em>.`
+          : `Trailing 5 min: <em>${fmt.format(flowsN)}</em> flows from <em>${expN}</em> exporters carrying <em>${fmtBytes(s.bytes)}</em> across <em>${fmt.format(s.packets)}</em> packets.`;
+    } catch (e) {
+      document.getElementById('status').textContent = 'error';
+      document.getElementById('status').classList.add('err');
+      document.getElementById('lead').innerHTML = `Connection error: <em class="err">${e.message}</em>`;
+    }
+
+    try {
+      const r = await fetch('/api/flows/recent?limit=12', { cache: 'no-store' });
+      if (!r.ok) throw new Error('recent http ' + r.status);
+      const body = await r.json();
+      renderRecent(body.flows || []);
+    } catch (e) {
+      document.getElementById('recent_wrap').innerHTML = `<div class="err">recent flows: ${e.message}</div>`;
+    }
+  }
+  function renderRecent(flows) {
+    const wrap = document.getElementById('recent_wrap');
+    if (!flows.length) {
+      wrap.className = 'empty';
+      wrap.textContent = 'no flows yet — drive synth to populate';
+      return;
+    }
+    wrap.className = '';
+    let h = '<table><thead><tr>'
+      + '<th>time</th><th>src → dst</th><th>proto</th><th class="right">port</th><th class="right">packets</th><th class="right">bytes</th>'
+      + '</tr></thead><tbody>';
+    for (const f of flows) {
+      const proto = ({1:'icmp',6:'tcp',17:'udp',47:'gre',50:'esp'})[f.proto] || ('p' + f.proto);
+      h += `<tr>
+        <td>${fmtTime(f.observed).slice(11,19)}</td>
+        <td>${f.src_addr}:${f.src_port} → ${f.dst_addr}:${f.dst_port}</td>
+        <td><span class="proto">${proto}</span></td>
+        <td class="right">${f.dst_port}</td>
+        <td class="right">${fmt.format(f.packets)}</td>
+        <td class="right">${fmtBytes(f.bytes)}</td>
+      </tr>`;
+    }
+    h += '</tbody></table>';
+    wrap.innerHTML = h;
+  }
+  tick();
+  setInterval(tick, 2000);
+</script>
+</body>
+</html>
