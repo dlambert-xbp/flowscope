@@ -7,7 +7,7 @@ import type {
   TopProtocol,
   TopConversation,
 } from '../api'
-import { useFilters, toQuery, type Filter, type FilterKey } from '../filters'
+import { useFilters, toQuery, keyLabelFor, type Filter, type FilterKey } from '../filters'
 
 // Flows tab — top-N panels narrowed by a composable filter set. Click
 // any value (talker src, talker dst, service port, protocol, full
@@ -57,7 +57,7 @@ function FilterBar({
       <Chip neutral>window · 5 min</Chip>
       {filters.map((f) => (
         <Chip key={`${f.key}_${f.value}`} onRemove={() => onRemove(f.key, f.value)}>
-          <span className="text-faint">{f.key} ·</span> {f.label ?? f.value}
+          <span className="text-faint">{f.keyLabel ?? keyLabelFor(f.key)} ·</span> {f.label ?? f.value}
         </Chip>
       ))}
       {has ? (
@@ -184,6 +184,7 @@ function ServicesList({ qs, onAdd }: { qs: URLSearchParams; onAdd: (f: Filter) =
               value={String(r.dst_port)}
               onAdd={onAdd}
               label={`${serviceFor(r.dst_port) ?? `port ${r.dst_port}`}`}
+              keyLabel="service"
             >
               <span className="text-text">{serviceFor(r.dst_port) ?? `port ${r.dst_port}`}</span>
             </FilterTrigger>{' '}
@@ -281,18 +282,20 @@ function FilterTrigger({
   k,
   value,
   label,
+  keyLabel,
   onAdd,
   children,
 }: {
   k: FilterKey
   value: string
   label?: string
+  keyLabel?: string
   onAdd: (f: Filter) => void
   children: ReactNode
 }) {
   return (
     <button
-      onClick={() => onAdd({ key: k, value, label })}
+      onClick={() => onAdd({ key: k, value, label, keyLabel })}
       className="hover:text-accent hover:underline decoration-dotted underline-offset-2"
     >
       {children}
