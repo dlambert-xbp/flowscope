@@ -1,59 +1,102 @@
-# FlowScope — NetFlow / sFlow collector & dashboard
+# FlowScope
 
-A self-contained traffic-flow visualization system. It receives NetFlow v5,
-NetFlow v9, IPFIX, and sFlow v5 from any standard exporter (Arista, Cisco,
-Juniper, MikroTik, Linux `softflowd`, etc.) and shows you:
+Self-hostable enterprise network observability — flow, state, and (soon)
+streaming telemetry — in one cohesive product. Receivers, not interrogators.
 
-- All exporting devices that have spoken to it
-- Every interface (by ifIndex) seen on each device, with **ingress and egress**
-  byte/packet counters
-- Live per-flow records (5-tuple, in/out interfaces, bytes, packets)
-- Top talkers, top destination ports, protocol breakdown
-- A 3-minute live timeseries chart of total throughput
+- **Flow ingest** — NetFlow v5, NetFlow v9, IPFIX, sFlow v5
+- **State & inventory** — SNMP v2c / v3, on-demand walks (no fleet-wide polling)
+- **Alert engine** — rule evaluation with dedup + grouping, per-event ledger in ClickHouse
+- **Dashboard** — React 19 SPA, themed, brand bar + tabs (Overview, Flows, Devices, Alerts, Settings)
+- **Storage** — ClickHouse warm tier today; cold-tier policy and 3-replica + Keeper coordination on the roadmap
 
-Single file backend, single file frontend. No external dashboard service. No
-agents. Runs on Python 3.9+.
+The product vision and the *why* live in [VISION.md](VISION.md). The
+developer-facing layout and rules of the road are in [CLAUDE.md](CLAUDE.md).
+The build-and-run manual is [BUILD.md](BUILD.md). Open work is in
+[TASKS.md](TASKS.md).
+
+> The original Python single-file collector lives on the [`v1` branch](https://github.com/dlambert-xbp/flowscope/tree/v1).
+> This README describes the v1 (Go + ClickHouse + React) line that supersedes it.
 
 ---
 
 ## Quick start
 
-```bash
-cd flowscope
-pip install -r requirements.txt
-python app.py
-```
-
-That's it. Open `http://<host>:8080`.
-
-By default the collector listens on:
-
-| Protocol | UDP port |
-|----------|----------|
-| NetFlow v5/v9, IPFIX | **2055** |
-| sFlow v5 | **6343** |
-| Web dashboard | **8080** (TCP) |
-
-Override any of them:
+Brings up ClickHouse + ingest + snmp + alert + api + web with one command.
+Synthetic traffic in a second terminal so all the views populate immediately.
 
 ```bash
-python app.py --netflow-port 9995 --sflow-port 6343 --web-port 8080
+docker compose up --build
 ```
 
-If you bind to a port < 1024 (e.g. the standard sFlow 6343 is fine but some
-people prefer 162 etc.) you'll need root or `setcap`:
+Wait for these log lines:
+
+```
+flowscope-clickhouse  | <Information> Application: Ready for connections
+flowscope-ingest      | clickhouse migrations applied
+flowscope-ingest      | flowscope ingest started
+flowscope-api         | flowscope api started addr=:8080
+```
+
+Then in a second terminal, drive synthetic NetFlow v9 + sFlow at the
+collector:
 
 ```bash
-sudo setcap cap_net_bind_service=+ep $(which python3)
+go run ./cmd/synth -- --target localhost:2055 --rate 5000 --duration 60s
 ```
+
+Open the dashboard:
+
+- **Web UI** — <http://localhost/>
+- **JSON API** — <http://localhost:8080/api/summary>
+- **Prometheus metrics** — `:9100` (ingest), `:9101` (alert), `:9102` (snmp)
+
+To shut down (preserving ClickHouse data): `docker compose down`.
+To wipe data too: `docker compose down -v`.
 
 ---
 
-## Configuring an Arista switch
+## What's running
+
+```
+                +---------------+         +-----------------+
+  switches ---> |  cmd/ingest   | ----->  |   ClickHouse    |
+  (UDP 2055,    |  (Go)         |   ┌->   |  flowscope.*    |
+   6343)        +---------------+   │     +-----------------+
+                                    │              ^
+                +---------------+   │              │
+   operator --> |   cmd/snmp    | --┘     ┌--------+--------┐
+   (per-       |   (Go)         |         │                 │
+    exporter   +---------------+   +-----------+    +--------------+
+    creds)                          | cmd/alert |    |   cmd/api    |
+                                    |  (Go)     |    |  (Go, :8080) |
+                                    +-----------+    +--------------+
+                                                            ^
+                                                            │  REST + WS
+                                                            │
+                                                       +----+-----+
+                                                       |   web    |
+                                                       | (React,  |
+                                                       |  :80)    |
+                                                       +----------+
+```
+
+| Component | Port | Purpose |
+|---|---|---|
+| `cmd/ingest` | 2055/udp, 6343/udp, 9100/tcp | UDP receivers + ClickHouse batcher; `record.Emit` is the single fan-out point |
+| `cmd/api`    | 8080/tcp | JSON REST; reads ClickHouse + serves a fallback live HTML at `/` |
+| `cmd/alert`  | 9101/tcp | Rule evaluation tick (default 10s); writes `alert_events` ledger |
+| `cmd/snmp`   | 9102/tcp | On-demand walks via gosnmp; encrypted v2c/v3 credential store |
+| `web`        | 80/tcp | React 19 + Vite SPA, nginx-served, `/api/*` proxied to api:8080 |
+
+There is no `cmd/gnmi` yet — Phase 3 in [VISION.md](VISION.md).
+
+---
+
+## Configuring exporters
 
 Replace `<collector-ip>` with the IP of the host running FlowScope.
 
-### sFlow (recommended for Arista — hardware accelerated, samples real packets)
+### sFlow on Arista (recommended — hardware-accelerated, real packets)
 
 ```
 configure
@@ -63,20 +106,15 @@ sflow polling-interval 10
 sflow sample 10000
 sflow run
 end
-write
 ```
 
-`sflow sample 10000` means roughly 1-in-10000 packets are sampled. Lower the
-number to see more flows; raise it to reduce CPU/bandwidth on the switch.
-
 `polling-interval 10` makes the switch send absolute interface byte/packet
-counters every 10 seconds, which is what populates the **Interfaces** tab
-with accurate per-port totals.
+counters every 10 seconds. FlowScope diffs successive counter samples to
+produce authoritative bytes/sec on the Interfaces tab.
 
 ### NetFlow v9 / IPFIX on Arista
 
 ```
-configure
 flow tracking hardware
    tracker FLOWSCOPE
       record export on inactive timeout 15
@@ -89,14 +127,7 @@ flow tracking hardware
 !
 interface Ethernet1
    flow tracker hardware FLOWSCOPE
-interface Ethernet2
-   flow tracker hardware FLOWSCOPE
-end
-write
 ```
-
-Enable `flow tracker hardware FLOWSCOPE` on every interface you want to
-monitor.
 
 ### Cisco IOS / IOS-XE — NetFlow v9
 
@@ -122,120 +153,98 @@ sudo apt install softflowd
 sudo softflowd -i eth0 -n <collector-ip>:2055 -v 9
 ```
 
-### Synthetic data generator (no network needed at all)
+### Synthetic traffic (no network needed at all)
 
-The repo includes `synth_flows.py`, which simulates two Arista switches and
-one router sending realistic-looking flows so you can exercise every view
-without any real hardware:
-
-```bash
-# In one terminal:
-python app.py
-
-# In another:
-python synth_flows.py --target 127.0.0.1 --duration 300 --rate 30
-```
-
-It will:
-
-- Send sFlow v5 from two simulated switches (`10.10.1.1`, `10.10.1.2`) with
-  flow samples and 5-second counter samples for each interface
-- Send NetFlow v9 from a simulated router (`127.0.0.1`) with templates
-  re-sent every 30 seconds
-- Generate a realistic mix of HTTPS/HTTP/DNS/SSH/SMB/RDP/SNMP/NTP/BGP traffic
-- Designate one persistent "noisy talker" doing big transfers so the top
-  talkers view is interesting
-- Maintain monotonically-increasing per-interface byte/packet counters so
-  the Interfaces tab shows authoritative absolute totals
-
-Useful for demos, screenshots, and verifying the collector before you wire
-it up to real switches.
-
----
-
-## How the views are built
-
-- **Overview** — aggregates the most recent flows in the in-memory ring buffer
-  (5000 records) into top talkers, top ports, protocol mix, and a per-second
-  bytes timeseries.
-- **Interfaces** — totals are accumulated from every flow's `input_if` /
-  `output_if` field. With sFlow, when the switch sends *counter samples* (every
-  `polling-interval` seconds), absolute counters from the device replace the
-  estimates — these are authoritative.
-- **Live Flows** — a streaming view of the most recent 100 flow records, with
-  src/dst, ports, protocol, in/out ifIndex, byte count.
-- **Filtering** — clicking a device in the sidebar filters everything to that
-  exporter. Clicking an interface card jumps to the live flow view filtered
-  to that ifIndex.
-
----
-
-## Persistence
-
-Flow records are also written to a local SQLite file (`flowscope.db`). Records
-older than 6 hours are pruned every 5 minutes. The web UI works exclusively
-from in-memory state for speed; the SQLite store is there so you can run
-ad-hoc analysis from the command line:
+`cmd/synth` simulates two switches and a router sending realistic-looking
+mixed NetFlow v9 + sFlow (flow + counter samples), so every tab populates:
 
 ```bash
-sqlite3 flowscope.db "
-  SELECT exporter, src_ip, dst_ip, sum(bytes) AS b
-  FROM flows
-  WHERE ts > strftime('%s','now') - 3600
-  GROUP BY exporter, src_ip, dst_ip
-  ORDER BY b DESC
-  LIMIT 20;
-"
+go run ./cmd/synth -- --target 127.0.0.1:2055 --rate 5000 --duration 60s
 ```
 
 ---
 
 ## REST API
 
-All endpoints return JSON. Optional `?exporter=<ip>` filter on most.
+Source of truth: each handler in [cmd/api/handlers.go](cmd/api/handlers.go).
+`api/openapi.yaml` is on the roadmap. All endpoints return JSON; most accept
+`?exporter=<ip>` to filter to a single exporter.
 
 | Path | Description |
 |------|-------------|
-| `GET /api/summary` | Collector stats (uptime, packet/flow counts, ports). |
-| `GET /api/devices` | All exporters seen, with last-seen and flow counts. |
-| `GET /api/interfaces` | Per-(exporter, ifIndex) ingress/egress totals. |
-| `GET /api/flows/recent?limit=200` | Most recent flow records. |
-| `GET /api/top/talkers?limit=20` | Top src→dst pairs by bytes. |
-| `GET /api/top/ports?limit=15` | Top destination ports by bytes. |
-| `GET /api/protocols` | Bytes/flows broken out by L4 protocol. |
-| `GET /api/timeseries?seconds=300` | Per-second ingress/egress byte totals. |
+| `GET /api/summary?window=300s` | Overview aggregates over a trailing window |
+| `GET /api/devices` | All exporters seen, with last-seen and flow counts |
+| `GET /api/devices/{exporter}` | Single device + counters |
+| `GET /api/devices/{exporter}/inventory` | SNMP-derived sysDescr / ifTable |
+| `GET /api/interfaces` | Per-(exporter, ifIndex) ingress/egress totals |
+| `GET /api/interfaces/{exporter}/{ifindex}/timeseries?seconds=N` | Bucketed bytes/sec; response carries `"source": "counters" \| "flows"` |
+| `GET /api/flows/recent?limit=200` | Most recent flow records |
+| `GET /api/top/talkers` / `/top/services` / `/top/protocols` / `/top/conversations` | Top-N panels |
+| `GET /api/alerts`, `/api/alerts/summary` | Alert ledger reads |
+| `POST /api/alerts/{id}/ack`, `POST /api/alerts/{id}/close` | Alert state transitions |
+| `GET /api/snmp/credentials`, `PUT /api/snmp/credentials/{exporter}` | Per-exporter v2c / v3 credential CRUD (encrypted at rest) |
+| `POST /api/snmp/credentials/{exporter}/test` | Validate a credential without saving |
+
+WebSocket live-stream (`/api/stream`) is described in [VISION.md](VISION.md) §3
+but not yet implemented — the SPA polls today.
 
 ---
 
-## Limitations & honest notes
+## Status — honest snapshot (May 2026)
 
-- **Sampled, not exhaustive.** sFlow is statistical sampling by design; with
-  a sample rate of 1/10000, byte totals shown are extrapolations from the
-  recent ring buffer, not exact wire totals. The counter-sample-driven
-  numbers on the Interfaces tab *are* exact (they come from the switch's
-  hardware counters). NetFlow v9 records every flow, so its totals are exact
-  per-flow but bucketed by the switch's active/inactive timers.
-- **Interface names.** Standard NetFlow only carries `ifIndex`, not the human
-  name. The dashboard shows `if<index>`. To get nice names like
-  `Ethernet1/1`, an SNMP polling layer would be needed; this is intentionally
-  out of scope here to keep the project to a single file.
-- **In-memory state.** The 5000-flow ring buffer is enough for live viewing
-  but isn't sized for forensic retention — that's what the SQLite store is
-  for, and you can lift the 6-hour prune in `db_prune_loop()` if you want.
-- **No authentication.** Bind it to a management network or put it behind a
-  reverse proxy with auth before exposing it.
-- **IPv6 in NetFlow v9.** Field IDs 27/28 are decoded; less-common fields
-  (MPLS labels, BGP attributes, etc.) are skipped — they don't affect totals.
+**Working end-to-end on the local docker compose stack:**
+
+- NetFlow v5 + v9 + IPFIX parsing with template cache
+- sFlow v5 flow + counter samples; counter-diff timeseries with flow fallback
+- ClickHouse warm tier (7-day TTL) with idempotent migrations
+- API surface above, plus per-interface timeseries and per-exporter filtering
+- React 19 SPA: Overview, Flows (with filter chips), Devices (directory + per-device sub-tabs), Alerts, Settings
+- Alert engine with two built-in rules (`exporter_silent`, `heavy_talker`), dedup + grouping, ack/close from UI
+- SNMP v2c walks; v3 USM walks (USM stack still needs a real-lab handshake test)
+- Per-exporter encrypted credential storage (AES-256-GCM under HKDF-SHA256)
+- 49 Go unit tests; race detector runs clean on Linux CI hosts
+
+**Not yet built / known limitations:**
+
+- **No auth** on `/api/*` — `X-Auth-Token` is the Phase-1 plan; today every endpoint is open
+- **Master key in env var** — `FLOWSCOPE_SNMP_KEY` is a literal in `docker-compose.yml`. `internal/secrets` (env / file / Key Vault) is not yet implemented
+- **No notification fan-out** — engine writes the ledger, but webhook / email / syslog workers are not wired
+- **Single-replica everything** — no leader election in `cmd/alert` (two replicas would dupe-fire), no UDP load balancer in front of ingest, single-node ClickHouse, no cold-tier policy
+- **No `cmd/gnmi`** — streaming telemetry ingest is Phase 3
+- **No Helm chart** — compose is dev-only; production needs the Helm chart described in [VISION.md](VISION.md) §8
+- **No CI workflow files** — `golangci-lint`, `go test -race`, `vitest`, `playwright`, `helm lint` are intended gates but `.github/workflows/` is empty
+- **OpenAPI spec missing** — `api/openapi.yaml` is the documented source of truth but doesn't exist yet; the TS client is hand-written in [web/src/api.ts](web/src/api.ts)
+- **No Playwright e2e** — the contract test in CI doesn't exist
+- **No integration tests** against a real ClickHouse — testcontainers-go is on the list
+
+The full open-tasks list with prioritization is in [TASKS.md](TASKS.md).
 
 ---
 
-## Files
+## Repository layout
 
 ```
-flowscope/
-├── app.py             # Collector + Flask API + SQLite (single file)
-├── requirements.txt
-├── README.md
-└── web/
-    └── index.html     # Dashboard (single file)
+.
+├── cmd/                          # One main.go per binary
+│   ├── ingest/  api/  alert/  snmp/  synth/
+├── internal/                     # Shared Go packages
+│   ├── record/    # canonical Flow + Emit fan-out
+│   ├── netflow/   # v5 + v9/IPFIX parsers, template cache
+│   ├── sflow/     # sFlow v5 (flow + counter samples)
+│   ├── store/     # ClickHouse client + batchers + migrations
+│   ├── snmpx/     # gosnmp wrapper, encrypted credential store, scheduler
+│   ├── alerteng/  # rule engine + built-in rules
+│   └── obs/       # Prometheus + structured logging
+├── web/                          # React 19 + Vite SPA
+├── deploy/
+│   ├── clickhouse/               # users.d for the local container
+│   └── infra/                    # Bicep + cloud-init for the Azure VM path
+├── docker-compose.yml
+└── go.mod
 ```
+
+---
+
+## License
+
+TBD — pick one before first external release.

@@ -76,7 +76,7 @@ make gen-client                             # → web/src/api/generated/
 helm lint deploy/helm/flowscope
 helm template deploy/helm/flowscope > /tmp/rendered.yaml
 
-# Synthetic traffic (Go tool, replaces the old synth_flows.py)
+# Synthetic traffic
 go run ./cmd/synth -- --target 127.0.0.1:2055 --rate 50000 --duration 60s
 ```
 
