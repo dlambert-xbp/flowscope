@@ -23,7 +23,7 @@ docker compose up --build
 
 There are no tests, no linter config, and no build step — `app.py` and `web/index.html` are run as-is.
 
-Environment variable overrides (also honored inside the Docker image): `FLOWSCOPE_NETFLOW_PORT`, `FLOWSCOPE_SFLOW_PORT`, `FLOWSCOPE_WEB_PORT`, `FLOWSCOPE_WEB_HOST`, `FLOWSCOPE_DB_PATH`, `FLOWSCOPE_AUTH_TOKEN`, `FLOWSCOPE_SNMP_WORKERS` (default 8).
+Environment variable overrides (also honored inside the Docker image): `FLOWSCOPE_NETFLOW_PORT`, `FLOWSCOPE_SFLOW_PORT`, `FLOWSCOPE_WEB_PORT`, `FLOWSCOPE_WEB_HOST`, `FLOWSCOPE_DB_PATH`, `FLOWSCOPE_AUTH_TOKEN`, `FLOWSCOPE_SNMP_WORKERS` (default 8), `FLOWSCOPE_WEB_THREADS` (waitress worker pool, default 32).
 
 `FLOWSCOPE_AUTH_TOKEN` (optional): when set, every `/api/*` request must include `X-Auth-Token: <value>`. Unset = no auth (current behavior). The static dashboard shell is not gated; the browser prompts for the token on first 401 and caches it in `sessionStorage`. Token comparison is constant-time. Does not provide TLS — terminate TLS at a reverse proxy.
 
@@ -47,7 +47,7 @@ FlowScope is **two single-file programs** (`app.py` backend, `web/index.html` fr
    - `db_prune_tick` — every 5 minutes, deletes rows in `flows` and `iface_counter_samples` older than 6h.
 5. **waitress.serve** — production WSGI server (replaced `app.run()`). Request handlers read shared state under the locks.
 
-All shared mutable state (`recent_flows`, `interface_stats`, `devices`, `stats`, `interface_issues`) is guarded by **`state_lock`**. The SQLite connection is shared and guarded by **`db_lock`** (WAL mode). Any new state read or written from multiple threads must take the appropriate lock.
+All shared mutable state (`recent_flows`, `interface_stats`, `devices`, `stats`) is guarded by **`state_lock`**. The SQLite connection is shared and guarded by **`db_lock`** (WAL mode). Any new state read or written from multiple threads must take the appropriate lock.
 
 ### Data flow: parser → `record_flow` → three stores
 
@@ -85,11 +85,9 @@ The agent address from the sFlow datagram header overrides the UDP source IP as 
 
 Endpoints listed in the README (`/api/summary`, `/api/devices`, `/api/interfaces`, `/api/flows/recent`, `/api/top/talkers`, `/api/top/ports`, `/api/protocols`, `/api/timeseries`). Most accept `?exporter=<ip>` for filtering; flows + timeseries also accept `?ifindex=<n>`. If you add an endpoint, follow the same pattern: read state under `state_lock`, copy out, release the lock, then aggregate.
 
-Per-interface drill-down endpoints (used by the Interfaces tab modal):
+Per-interface drill-down endpoint (used by the Interfaces tab modal):
 - `GET  /api/interfaces/<exporter>/<ifindex>/timeseries?seconds=N` — bucketed ingress/egress rate. Source: counter-sample diffs when available, flow-derived fallback otherwise. Response includes `"source": "counters" | "flows"`.
-- `POST /api/interfaces/<exporter>/<ifindex>/flag` — body `{"note": "..."}`, upserts a row in `interface_issues`.
-- `DELETE /api/interfaces/<exporter>/<ifindex>/flag` — clears the flag.
-The base `/api/interfaces` response carries the extended SNMP fields (`admin_status`, `oper_status`, `in_errors`, `out_errors`, `in_discards`, `out_discards`, `mtu`, `mac`) plus `flagged` / `flag_note` for each row.
+The base `/api/interfaces` response carries the extended SNMP fields (`admin_status`, `oper_status`, `in_errors`, `out_errors`, `in_discards`, `out_discards`, `mtu`, `mac`) for each row.
 
 ## Constraints worth knowing
 

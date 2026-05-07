@@ -84,11 +84,6 @@ interface_stats = defaultdict(lambda: {
     "mac":             None,
 })
 
-# (exporter, ifindex) -> {"flagged_ts": float, "note": str}.
-# Populated from interface_issues table at startup; mutated by the flag/unflag
-# endpoints. All access under state_lock.
-interface_issues = {}
-
 # Devices we've heard from
 devices = {}  # exporter_ip -> {first_seen, last_seen, flow_count, type, hostname}
 
@@ -314,17 +309,6 @@ def db_init():
         CREATE INDEX IF NOT EXISTS idx_iface_counter_samples
         ON iface_counter_samples(exporter, ifindex, ts)
     """)
-    # User-flagged interfaces ("Mark as possible issue"). One row per flagged
-    # interface; clearing the flag deletes the row.
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS interface_issues (
-            exporter   TEXT NOT NULL,
-            ifindex    INTEGER NOT NULL,
-            flagged_ts REAL NOT NULL,
-            note       TEXT,
-            PRIMARY KEY (exporter, ifindex)
-        )
-    """)
     for row in conn.execute("SELECT exporter, label FROM exporter_labels"):
         exporter_labels[row[0]] = row[1]
     for row in conn.execute("SELECT exporter, ifindex, label FROM interface_labels"):
@@ -410,12 +394,6 @@ def db_init():
         s["out_discards"] = row[10]
         s["mtu"]          = row[11]
         s["mac"]          = row[12]
-    for row in conn.execute(
-            "SELECT exporter, ifindex, flagged_ts, note FROM interface_issues"):
-        interface_issues[(row[0], row[1])] = {
-            "flagged_ts": row[2],
-            "note":       row[3] or "",
-        }
     conn.commit()
     return conn
 
@@ -1381,7 +1359,6 @@ def api_interfaces():
         for (exp, ifidx), s in interface_stats.items():
             if exporter_filter and exp != exporter_filter:
                 continue
-            issue = interface_issues.get((exp, ifidx))
             rows.append({
                 "exporter":        exp,
                 "ifindex":         ifidx,
@@ -1402,9 +1379,6 @@ def api_interfaces():
                 "out_discards":    s.get("out_discards"),
                 "mtu":             s.get("mtu"),
                 "mac":             s.get("mac"),
-                "flagged":         issue is not None,
-                "flag_note":       (issue or {}).get("note") or "",
-                "flag_ts":         (issue or {}).get("flagged_ts"),
             })
     rows.sort(key=lambda r: (r["exporter"], r["ifindex"]))
     return jsonify(rows)
@@ -1521,47 +1495,6 @@ def api_interface_timeseries(exporter, ifindex):
         "egress":      [s / bucket_size for s in sum_out],
         "source":      "flows",
     })
-
-
-@app.route("/api/interfaces/<exporter>/<int:ifindex>/flag", methods=["POST", "DELETE"])
-def api_interface_flag(exporter, ifindex):
-    """Flag or clear an interface as a possible issue.
-
-    POST   { "note": "..." }   set/update the flag (note is optional)
-    DELETE                     clear the flag
-    """
-    key = (exporter, ifindex)
-    if request.method == "DELETE":
-        try:
-            with db_lock:
-                db_conn.execute(
-                    "DELETE FROM interface_issues WHERE exporter = ? AND ifindex = ?",
-                    (exporter, ifindex))
-                db_conn.commit()
-        except Exception as e:
-            return jsonify({"ok": False, "error": str(e)}), 500
-        with state_lock:
-            interface_issues.pop(key, None)
-        return jsonify({"ok": True, "flagged": False})
-
-    payload = request.get_json(silent=True) or {}
-    note = (payload.get("note") or "").strip()
-    now  = time.time()
-    try:
-        with db_lock:
-            db_conn.execute("""
-                INSERT INTO interface_issues (exporter, ifindex, flagged_ts, note)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(exporter, ifindex) DO UPDATE SET
-                    flagged_ts = excluded.flagged_ts,
-                    note       = excluded.note
-            """, (exporter, ifindex, now, note))
-            db_conn.commit()
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
-    with state_lock:
-        interface_issues[key] = {"flagged_ts": now, "note": note}
-    return jsonify({"ok": True, "flagged": True, "flag_ts": now, "flag_note": note})
 
 
 @app.route("/api/exporters/<exporter>/label", methods=["PUT", "POST", "DELETE"])
@@ -2600,8 +2533,9 @@ def main():
     crypto_state = "configured" if snmp_crypto.is_configured() else "no key set"
     print(f"[snmp]   scheduler running ({mode}; FLOWSCOPE_SNMP_KEY: {crypto_state}; "
           f"workers={SNMP_POLL_WORKERS})")
-    print(f"[web]    http://{WEB_HOST}:{WEB_PORT} (waitress)")
-    waitress_serve(app, host=WEB_HOST, port=WEB_PORT, threads=8)
+    web_threads = int(os.environ.get("FLOWSCOPE_WEB_THREADS", 32))
+    print(f"[web]    http://{WEB_HOST}:{WEB_PORT} (waitress, threads={web_threads})")
+    waitress_serve(app, host=WEB_HOST, port=WEB_PORT, threads=web_threads)
 
 
 if __name__ == "__main__":

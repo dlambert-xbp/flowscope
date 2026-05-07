@@ -868,21 +868,11 @@ footer .live-stale { color: var(--danger); }
 }
 .iface-modal-chart .source-badge.counters { color: var(--accent); }
 .iface-modal-chart .source-badge.flows    { color: var(--accent-2); }
-.iface-modal-flag-note {
-    color: var(--text-dim);
-    font-size: 11px;
-    font-style: italic;
-}
 .iface-modal-head-meta {
     color: var(--text-dim);
     font-weight: 400;
     margin-left: 8px;
     font-size: 11px;
-}
-.iface-flag-icon {
-    color: var(--accent-2);
-    margin-left: 6px;
-    cursor: help;
 }
 tr.clickable-row { cursor: pointer; }
 tr.clickable-row:hover td { background: var(--bg-3); }
@@ -2534,11 +2524,7 @@ function renderInterfaces() {
         { key: "display", label: "Name",
           value: r => r.display,
           render: r => `<td>
-              <span style="font-weight:500">${escapeHtml(r.display)}</span>${
-                  r.flagged ? `<span class="iface-flag-icon" title="${
-                      escapeHtml(r.flag_note || "Marked as possible issue")
-                  }">⚠</span>` : ""
-              }
+              <span style="font-weight:500">${escapeHtml(r.display)}</span>
               <span class="edit-ico"
                     data-edit-iface="${escapeHtml(r.exporter)}|${r.ifindex}"
                     data-current="${escapeHtml(r.label || "")}"
@@ -2627,8 +2613,7 @@ function wireInterfaceTable() {
 // ===== Per-interface detail modal =====
 // Opens a wide modal showing all SNMP stats and a live ingress/egress chart
 // (sFlow counter samples preferred; flow-derived fallback for NetFlow-only
-// exporters). Range buttons mirror the Overview chart. The "Mark as possible
-// issue" button toggles a server-side flag persisted in interface_issues.
+// exporters). Range buttons mirror the Overview chart.
 let ifaceModalUplot = null;
 
 function openInterfaceModal(exporter, ifindex) {
@@ -2655,14 +2640,12 @@ function openInterfaceModal(exporter, ifindex) {
                         `<button data-seconds="${r.seconds}"${
                             currentRange === r.seconds ? ' class="active"' : ""
                         }>${r.label}</button>`).join("")}</span>
-                    <span data-role="flag-note" class="iface-modal-flag-note"></span>
                 </div>
                 <div class="iface-modal-chart" data-role="chart">
                     <span class="source-badge" data-role="source"></span>
                 </div>
             </div>
             <div class="modal-foot">
-                <button data-act="flag-toggle"></button>
                 <button data-act="close" class="primary">Close</button>
             </div>
         </div>`;
@@ -2673,8 +2656,6 @@ function openInterfaceModal(exporter, ifindex) {
     const chartEl  = ov.querySelector('[data-role="chart"]');
     const sourceEl = ov.querySelector('[data-role="source"]');
     const rangeEl  = ov.querySelector('[data-role="range"]');
-    const flagBtn  = ov.querySelector('[data-act="flag-toggle"]');
-    const flagNote = ov.querySelector('[data-role="flag-note"]');
     const closeBtn = ov.querySelector('[data-act="close"]');
 
     function renderHeader() {
@@ -2682,12 +2663,7 @@ function openInterfaceModal(exporter, ifindex) {
         const aliasBit = currentIface.alias
             ? ` · ${escapeHtml(currentIface.alias)}` : "";
         headEl.innerHTML = `
-            <span style="font-weight:500">${escapeHtml(display)}</span>${
-                currentIface.flagged
-                    ? `<span class="iface-flag-icon" title="${
-                          escapeHtml(currentIface.flag_note || "Marked as possible issue")
-                      }">⚠</span>` : ""
-            }
+            <span style="font-weight:500">${escapeHtml(display)}</span>
             <span class="iface-modal-head-meta">
                 if${currentIface.ifindex} · ${escapeHtml(currentIface.exporter)}${aliasBit}
             </span>`;
@@ -2736,19 +2712,6 @@ function openInterfaceModal(exporter, ifindex) {
                 discardsTotal > 0 ? "warn" : ""),
             statCell("Last seen", timeAgo(i.last_seen)),
         ].join("");
-    }
-
-    function renderFlagControls() {
-        if (currentIface.flagged) {
-            flagBtn.textContent = "Clear flag";
-            flagBtn.className   = "danger";
-            flagNote.textContent = currentIface.flag_note
-                ? `Flagged: ${currentIface.flag_note}` : "Flagged.";
-        } else {
-            flagBtn.textContent = "Mark as possible issue";
-            flagBtn.className   = "";
-            flagNote.textContent = "";
-        }
     }
 
     function destroyChart() {
@@ -2831,47 +2794,6 @@ function openInterfaceModal(exporter, ifindex) {
         loadChart();
     });
 
-    flagBtn.addEventListener("click", async () => {
-        try {
-            const flagPath = `/api/interfaces/${encodeURIComponent(exporter)}/${ifindex}/flag`;
-            if (currentIface.flagged) {
-                await apiSend(flagPath, "DELETE");
-                currentIface.flagged   = false;
-                currentIface.flag_note = "";
-            } else {
-                const note = await appPrompt(
-                    "Mark as possible issue",
-                    "Add an optional note (leave blank to flag without one):", "");
-                // appPrompt clears state.paused on close; our modal is still
-                // open, so re-pause to keep auto-refresh suppressed.
-                state.paused = true;
-                if (note === null) return;        // cancelled
-                const j = await apiSend(flagPath, "POST", { note: note || "" });
-                currentIface.flagged   = true;
-                currentIface.flag_note = (j && j.flag_note) || note || "";
-            }
-            // Mirror the change into state.interfaces so the underlying
-            // table picks up the ⚠ on the next soft refresh.
-            const live = state.interfaces.find(
-                x => x.exporter === exporter && x.ifindex === ifindex);
-            if (live) {
-                live.flagged   = currentIface.flagged;
-                live.flag_note = currentIface.flag_note;
-            }
-            renderHeader();
-            renderFlagControls();
-            // Re-render the underlying interfaces table so the ⚠ appears
-            // immediately rather than waiting for the next refresh.
-            if (state.activeTab === "interfaces") {
-                softReplaceTable("interfaces", renderInterfaces());
-                wireInterfaceTable();
-            }
-        } catch (e) {
-            await appAlert("Flag failed", "Could not update flag: " + e.message);
-            state.paused = true;
-        }
-    });
-
     function close() {
         destroyChart();
         ov.remove();
@@ -2885,7 +2807,6 @@ function openInterfaceModal(exporter, ifindex) {
 
     renderHeader();
     renderStats();
-    renderFlagControls();
     loadChart();
 }
 
