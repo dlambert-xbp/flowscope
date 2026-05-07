@@ -105,13 +105,32 @@
   </div>
 
   <section>
+    <h2 style="display:flex;align-items:baseline;justify-content:space-between">
+      <span>Top interfaces · counter samples authoritative</span>
+      <span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--accent);text-transform:none;letter-spacing:.04em;font-weight:500">SOURCE · COUNTERS</span>
+    </h2>
+    <div id="iface_wrap" class="empty">loading…</div>
+    <div id="iface_chart_wrap" style="display:none;margin-top:18px">
+      <h2 style="margin-top:24px">
+        <span id="iface_chart_title">interface timeseries</span>
+      </h2>
+      <svg id="iface_chart" viewBox="0 0 800 200" preserveAspectRatio="none" style="width:100%;height:200px;display:block;border:1px solid var(--line);background:var(--surf)"></svg>
+      <div style="margin-top:8px;display:flex;gap:18px;font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:var(--dim)">
+        <span><span style="display:inline-block;width:10px;height:2px;background:var(--accent);vertical-align:middle"></span> in · <strong id="iface_in_now" style="color:var(--text)">—</strong></span>
+        <span><span style="display:inline-block;width:10px;height:2px;background:var(--ok);vertical-align:middle"></span> out · <strong id="iface_out_now" style="color:var(--text)">—</strong></span>
+        <span style="margin-left:auto"><a href="#" id="iface_close" style="color:var(--dim)">close</a></span>
+      </div>
+    </div>
+  </section>
+
+  <section>
     <h2>Recent flows · newest first</h2>
     <div id="recent_wrap" class="empty">loading…</div>
   </section>
 
   <div class="footer">
     <span>FlowScope api · v1 · trading-terminal placeholder · React app to follow</span>
-    <span><a href="/api/summary">/api/summary</a> · <a href="/api/flows/recent">/api/flows/recent</a> · <a href="/healthz">/healthz</a></span>
+    <span><a href="/api/summary">/api/summary</a> · <a href="/api/flows/recent">/api/flows/recent</a> · <a href="/api/interfaces">/api/interfaces</a> · <a href="/metrics">/metrics</a></span>
   </div>
 </main>
 
@@ -193,8 +212,116 @@
     h += '</tbody></table>';
     wrap.innerHTML = h;
   }
+
+  // ----- interfaces -----
+  const fmtBps = (n) => {
+    if (n == null) return '—';
+    const u = ['bps','kbps','Mbps','Gbps','Tbps'];
+    let i = 0, v = Number(n);
+    while (v >= 1000 && i < u.length - 1) { v /= 1000; i++; }
+    return v.toFixed(v >= 100 || i === 0 ? 0 : 1) + ' ' + u[i];
+  };
+  let activeIface = null;
+
+  async function tickIfaces() {
+    try {
+      const r = await fetch('/api/interfaces?window=300s', { cache: 'no-store' });
+      if (!r.ok) throw new Error('http ' + r.status);
+      const body = await r.json();
+      renderIfaces(body.interfaces || []);
+    } catch (e) {
+      document.getElementById('iface_wrap').innerHTML = `<div class="err">interfaces: ${e.message}</div>`;
+    }
+    if (activeIface) await tickChart();
+  }
+  function renderIfaces(rows) {
+    const wrap = document.getElementById('iface_wrap');
+    if (!rows.length) {
+      wrap.className = 'empty';
+      wrap.textContent = 'no counter samples yet — sFlow exporters or synth-sFlow needed';
+      return;
+    }
+    wrap.className = '';
+    let h = '<table><thead><tr>'
+      + '<th>exporter</th><th class="right">ifindex</th><th class="right">in (latest)</th><th class="right">out (latest)</th><th class="right">in peak</th><th class="right">out peak</th><th></th>'
+      + '</tr></thead><tbody>';
+    for (const r of rows) {
+      const id = r.exporter + '_' + r.ifindex;
+      h += `<tr>
+        <td>${r.exporter}</td>
+        <td class="right">${r.ifindex}</td>
+        <td class="right">${fmtBps(r.in_bps_latest)}</td>
+        <td class="right">${fmtBps(r.out_bps_latest)}</td>
+        <td class="right">${fmtBps(r.in_bps_peak)}</td>
+        <td class="right">${fmtBps(r.out_bps_peak)}</td>
+        <td class="right"><a href="#" data-iface='${JSON.stringify({e:r.exporter,i:r.ifindex})}' class="proto">chart →</a></td>
+      </tr>`;
+    }
+    h += '</tbody></table>';
+    wrap.innerHTML = h;
+    wrap.querySelectorAll('a[data-iface]').forEach(a => {
+      a.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        const d = JSON.parse(a.getAttribute('data-iface'));
+        openChart(d.e, d.i);
+      });
+    });
+  }
+  function openChart(exp, idx) {
+    activeIface = { exp, idx };
+    document.getElementById('iface_chart_title').textContent = `${exp} · ifindex ${idx} · 5 min counter timeseries`;
+    document.getElementById('iface_chart_wrap').style.display = 'block';
+    tickChart();
+  }
+  document.getElementById('iface_close').addEventListener('click', (ev) => {
+    ev.preventDefault();
+    activeIface = null;
+    document.getElementById('iface_chart_wrap').style.display = 'none';
+  });
+  async function tickChart() {
+    if (!activeIface) return;
+    try {
+      const r = await fetch(`/api/interfaces/${activeIface.exp}/${activeIface.idx}/timeseries?seconds=300`, { cache: 'no-store' });
+      if (!r.ok) throw new Error('http ' + r.status);
+      const body = await r.json();
+      drawChart(body.points || []);
+    } catch (e) {
+      document.getElementById('iface_chart').innerHTML = `<text x="10" y="20" fill="#e04646" font-family="IBM Plex Mono">timeseries: ${e.message}</text>`;
+    }
+  }
+  function drawChart(pts) {
+    const svg = document.getElementById('iface_chart');
+    if (!pts.length) {
+      svg.innerHTML = `<text x="10" y="20" fill="#9a958c" font-family="IBM Plex Mono" font-size="10">no points yet — wait for the next counter sample interval</text>`;
+      return;
+    }
+    const W = 800, H = 200, pad = 8;
+    const xs = pts.map(p => new Date(p.ts).getTime());
+    const xMin = xs[0], xMax = xs[xs.length-1] || (xMin+1);
+    const yMax = Math.max(1, ...pts.map(p => Math.max(p.in_bps, p.out_bps)));
+    const sx = (x) => pad + (x - xMin) / (xMax - xMin || 1) * (W - 2*pad);
+    const sy = (y) => H - pad - y / yMax * (H - 2*pad);
+
+    const inPath = pts.map((p,i) => `${i===0?'M':'L'}${sx(xs[i]).toFixed(1)},${sy(p.in_bps).toFixed(1)}`).join('');
+    const outPath = pts.map((p,i) => `${i===0?'M':'L'}${sx(xs[i]).toFixed(1)},${sy(p.out_bps).toFixed(1)}`).join('');
+
+    let grid = '';
+    for (let i = 1; i < 4; i++) {
+      const y = (H/4)*i;
+      grid += `<line x1="0" x2="${W}" y1="${y}" y2="${y}" stroke="#23262b" stroke-dasharray="2 4"/>`;
+    }
+    svg.innerHTML = grid
+      + `<path d="${inPath}" fill="none" stroke="#ff5b1f" stroke-width="1.5"/>`
+      + `<path d="${outPath}" fill="none" stroke="#5a9c5f" stroke-width="1.5"/>`;
+    const last = pts[pts.length-1];
+    document.getElementById('iface_in_now').textContent = fmtBps(last.in_bps);
+    document.getElementById('iface_out_now').textContent = fmtBps(last.out_bps);
+  }
+
   tick();
+  tickIfaces();
   setInterval(tick, 2000);
+  setInterval(tickIfaces, 5000);
 </script>
 </body>
 </html>

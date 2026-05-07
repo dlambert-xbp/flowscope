@@ -3,10 +3,12 @@ package main
 import (
 	"encoding/json"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
+	"github.com/go-chi/chi/v5"
 
 	"github.com/dlambert-xbp/flowscope/internal/store"
 )
@@ -59,6 +61,61 @@ func (h *handlers) recentFlows(w http.ResponseWriter, r *http.Request) {
 		"count": len(flows),
 		"flows": flows,
 	})
+}
+
+// interfaces returns one row per (exporter, ifindex) seen in the
+// trailing window, ranked by peak bandwidth.
+//
+//	GET /api/interfaces?window=300s
+func (h *handlers) interfaces(w http.ResponseWriter, r *http.Request) {
+	window := parseWindow(r.URL.Query().Get("window"), 5*time.Minute)
+	rows, err := store.QueryInterfaces(r.Context(), h.conn, window)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"count":      len(rows),
+		"interfaces": rows,
+		"source":     "counters",
+		"window":     window.String(),
+	})
+}
+
+// interfaceTimeseries returns bytes/sec rates derived from successive
+// counter samples. Per VISION.md §3.3, this is the AUTHORITATIVE rate.
+//
+//	GET /api/interfaces/{exporter}/{ifindex}/timeseries?seconds=300
+func (h *handlers) interfaceTimeseries(w http.ResponseWriter, r *http.Request) {
+	exporterStr := chi.URLParam(r, "exporter")
+	ifindexStr := chi.URLParam(r, "ifindex")
+
+	exporter, err := netip.ParseAddr(exporterStr)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid exporter address")
+		return
+	}
+	ifindex64, err := strconv.ParseUint(ifindexStr, 10, 32)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid ifindex")
+		return
+	}
+
+	seconds := parseInt(r.URL.Query().Get("seconds"), 300)
+	if seconds < 1 {
+		seconds = 1
+	}
+	if seconds > 24*60*60 {
+		seconds = 24 * 60 * 60
+	}
+	window := time.Duration(seconds) * time.Second
+
+	ts, err := store.QueryInterfaceTimeseries(r.Context(), h.conn, exporter, uint32(ifindex64), window)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, ts)
 }
 
 // parseWindow parses a Go duration string with a default. Bounded to
