@@ -2,100 +2,174 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+This document is the developer-facing companion to [VISION.md](VISION.md). VISION.md describes *what* the product is and *why*; this file describes *how* the codebase is laid out and the rules for changing it.
+
+## Stack at a glance
+
+- **Backend services**: Go 1.23+ — `ingest`, `api`, `alert`, `snmp`, `gnmi`. One module, multiple internal packages, multiple binaries built from `cmd/<service>/main.go`.
+- **Frontend**: React 19 + TypeScript + Vite. Tailwind + shadcn/ui + TanStack Query + Recharts + react-flow. Lives in `web/`.
+- **Storage**: ClickHouse (warm + cold via TTL tiering). In-process Go ring buffer per ingest replica for sub-second hot views.
+- **Deployment**: Helm chart targeting AKS or Azure Container Apps. Bicep/Terraform module for the Azure substrate (LB, AKS, ClickHouse, Key Vault).
+- **Auth**: API token via `X-Auth-Token` (Phase 1) → OIDC/Entra ID (Phase 2). Master keys read from Azure Key Vault via Workload Identity, never from env vars in prod.
+
+## Repository layout
+
+```
+.
+├── cmd/                          # Service entrypoints (one main.go per binary)
+│   ├── ingest/
+│   ├── api/
+│   ├── alert/
+│   ├── snmp/
+│   └── gnmi/
+├── internal/                     # Shared Go packages, not importable externally
+│   ├── record/                   # Canonical flow record + Emit fan-out
+│   ├── netflow/                  # v5/v9/IPFIX parsers, template cache
+│   ├── sflow/                    # sFlow v5 parser (flow + counter samples)
+│   ├── store/                    # ClickHouse client, schema migrations, batchers
+│   ├── snmpx/                    # gosnmp wrapper, encrypted credential store
+│   ├── gnmix/                    # openconfig/gnmic wrapper, subscription manager
+│   ├── alerteng/                 # Rule evaluation, dedup, grouping, channels
+│   ├── secrets/                  # Key Vault / file / env loader, single interface
+│   └── obs/                      # Prometheus metrics, structured logging helpers
+├── api/openapi.yaml              # Source of truth for the REST contract
+├── web/                          # React SPA (Vite project)
+│   ├── src/
+│   ├── package.json
+│   └── vite.config.ts
+├── deploy/
+│   ├── helm/flowscope/           # Helm chart published per release
+│   └── infra/                    # Bicep or Terraform for Azure substrate
+├── test/
+│   ├── golden/                   # Captured pcaps + expected records, per parser
+│   └── e2e/                      # Playwright specs
+└── go.mod
+```
+
 ## Commands
 
 ```bash
-# Install dependencies (Python 3.9+: Flask, waitress, APScheduler, pysnmp, cryptography)
-pip install -r requirements.txt
+# Backend
+go build ./...                              # Compile all binaries
+go test -race ./...                         # Unit tests with race detector (required before merge)
+go test -race -tags=integration ./...       # Integration tests (hit a local ClickHouse)
+golangci-lint run                           # Lint
+go run ./cmd/ingest                         # Run ingest locally
+go run ./cmd/api                            # Run api locally
 
-# Run the collector + dashboard (binds 2055/udp, 6343/udp, 8080/tcp)
-python app.py
+# Frontend
+cd web && npm install
+cd web && npm run dev                       # Vite dev server with HMR
+cd web && npm run build                     # Production bundle
+cd web && npm run typecheck
+cd web && npm run lint
+cd web && npm run test                      # Vitest
+cd web && npm run e2e                       # Playwright (requires backend running)
 
-# Override ports
-python app.py --netflow-port 9995 --sflow-port 6343 --web-port 8080
-
-# Generate synthetic traffic against a running collector (no real switch needed)
-python synth_flows.py --target 127.0.0.1 --duration 300 --rate 30
-
-# Container build / run
+# Local stack via docker compose (ClickHouse + all services)
 docker compose up --build
+
+# OpenAPI client regen (after editing api/openapi.yaml)
+make gen-client                             # → web/src/api/generated/
+
+# Helm chart smoke test
+helm lint deploy/helm/flowscope
+helm template deploy/helm/flowscope > /tmp/rendered.yaml
+
+# Synthetic traffic (Go tool, replaces the old synth_flows.py)
+go run ./cmd/synth -- --target 127.0.0.1:2055 --rate 50000 --duration 60s
 ```
 
-There are no tests, no linter config, and no build step — `app.py` and `web/index.html` are run as-is.
+CI gates (every PR): `go test -race`, `golangci-lint`, `vitest`, `playwright` against an ephemeral compose stack, `helm lint`, container image build + sign.
 
-Environment variable overrides (also honored inside the Docker image): `FLOWSCOPE_NETFLOW_PORT`, `FLOWSCOPE_SFLOW_PORT`, `FLOWSCOPE_WEB_PORT`, `FLOWSCOPE_WEB_HOST`, `FLOWSCOPE_DB_PATH`, `FLOWSCOPE_AUTH_TOKEN`, `FLOWSCOPE_SNMP_WORKERS` (default 8), `FLOWSCOPE_WEB_THREADS` (waitress worker pool, default 32).
+## Configuration surface
 
-`FLOWSCOPE_AUTH_TOKEN` (optional): when set, every `/api/*` request must include `X-Auth-Token: <value>`. Unset = no auth (current behavior). The static dashboard shell is not gated; the browser prompts for the token on first 401 and caches it in `sessionStorage`. Token comparison is constant-time. Does not provide TLS — terminate TLS at a reverse proxy.
+All services read configuration from environment variables, with Key Vault references resolved at startup via `internal/secrets`.
 
-`FLOWSCOPE_SNMP_KEY` (required for v3 SNMP profiles): master key for AES-256-GCM encryption of v3 passphrases at rest. HKDF-SHA256 derives a 32-byte key from this string. **The value MUST stay constant across restarts** — change it and existing v3 profiles cannot decrypt. Generate with `python -c "import secrets; print(secrets.token_urlsafe(32))"`.
+| Variable | Service | Purpose |
+|---|---|---|
+| `FLOWSCOPE_NETFLOW_PORT` | ingest | UDP listener (default 2055) |
+| `FLOWSCOPE_SFLOW_PORT` | ingest | UDP listener (default 6343) |
+| `FLOWSCOPE_IPFIX_PORT` | ingest | UDP listener (default 4739) |
+| `FLOWSCOPE_HTTP_ADDR` | api | Listen address (default `:8080`) |
+| `FLOWSCOPE_CLICKHOUSE_DSN` | all | ClickHouse cluster DSN |
+| `FLOWSCOPE_AUTH_TOKEN_REF` | api | Key Vault reference for the API auth token |
+| `FLOWSCOPE_SNMP_KEY_REF` | snmp | Key Vault reference for the SNMP master key |
+| `FLOWSCOPE_LOG_LEVEL` | all | `debug` / `info` / `warn` / `error` |
+| `FLOWSCOPE_SNMP_WORKERS` | snmp | Worker pool size (default 8) |
+| `FLOWSCOPE_SNMP_MOCK` | snmp | `1` to use mock client; build-tag-gated |
 
-`FLOWSCOPE_SNMP_MOCK` (optional, dev-only): set to `1` to use the deterministic mock SNMP client instead of pysnmp-lextudio. Mock returns synthetic ifDescr/ifAlias/ifSpeed and ignores credentials. Default off.
+`FLOWSCOPE_SNMP_KEY_REF` resolves to a master key the snmp service uses to derive an AES-256-GCM key via HKDF-SHA256 for credential encryption at rest. The resolved value MUST stay constant across restarts — rotating it invalidates every stored v3 credential.
 
 ## Architecture
 
-FlowScope is **two single-file programs** (`app.py` backend, `web/index.html` frontend) plus an optional traffic synthesizer (`synth_flows.py`). Keep this shape — the project's stated goal is a self-contained collector with no agents, no external dashboard, and no build pipeline.
+### Concurrency model (Go)
 
-### Concurrency model in `app.py`
+- **`ingest`**: one goroutine per UDP listener, fan-in via buffered channels into a parser worker pool, then into `record.Emit` which writes to (a) the in-process hot ring and (b) the ClickHouse batch writer goroutine. Backpressure is explicit — if the batch writer can't keep up, the parser pool blocks on the channel and dropped-packet counters increment on the listener side.
+- **`api`**: `net/http` with `chi` for routing, stateless. WebSocket endpoint streams hot-ring updates and Overview metrics. Reads come from ClickHouse with prepared queries and a small per-request cache.
+- **`alert`**: singleton via leader election (using a ClickHouse Keeper lock or equivalent). Single evaluation loop on a ticker; rules are pure functions over query results, idempotent.
+- **`snmp`**: `errgroup`-managed worker pool sized via `FLOWSCOPE_SNMP_WORKERS`. Per-device cadence stored in the `devices` table. In-flight walks deduped by `(exporter, oid)` key.
+- **`gnmi`**: long-lived gRPC streams, one goroutine per subscription, fan-in to a single writer goroutine that emits records via `record.Emit` (same fan-out point as flow ingest).
 
-`main()` starts UDP-listener threads, RDNS workers, an APScheduler `BackgroundScheduler`, and then hands control to **waitress** as the WSGI server:
+Shared mutable state across goroutines uses `sync.RWMutex` or channels — never both, never bare globals. Every shared struct has a comment naming the lock that guards it. The race detector runs on every CI invocation.
 
-1. `netflow_listener` — daemon thread, UDP recv loop on `NETFLOW_PORT`. Dispatches by version word: 5 → `parse_netflow_v5`, 9/10 → `parse_netflow_v9` (NetFlow v9 and IPFIX share enough wire format that they use the same parser).
-2. `sflow_listener` — daemon thread, UDP recv loop on `SFLOW_PORT` → `parse_sflow_v5`.
-3. `rdns_loop` / `endpoint_rdns_loop` — best-effort PTR resolution for exporter and endpoint IPs.
-4. APScheduler jobs:
-   - `snmp_scheduler_tick` — runs every 1s, walks `devices`, dispatches eligible polls to `snmp_pool` (a `ThreadPoolExecutor`, default 8 workers, override via `FLOWSCOPE_SNMP_WORKERS`). Per-device interval comes from the binding (default 15s); failures bypass the interval so a flapping device retries on the next tick. The scheduler skips devices with an in-flight future to avoid stacking.
-   - `db_prune_tick` — every 5 minutes, deletes rows in `flows` and `iface_counter_samples` older than 6h.
-5. **waitress.serve** — production WSGI server (replaced `app.run()`). Request handlers read shared state under the locks.
+### Data flow: parser → `record.Emit` → fan-out
 
-All shared mutable state (`recent_flows`, `interface_stats`, `devices`, `stats`) is guarded by **`state_lock`**. The SQLite connection is shared and guarded by **`db_lock`** (WAL mode). Any new state read or written from multiple threads must take the appropriate lock.
+Every parser (NetFlow v5, NetFlow v9/IPFIX, sFlow v5) produces a canonical `record.Flow` and calls `record.Emit(ctx, rec)`. `Emit` is the **single fan-out point** that:
 
-### Data flow: parser → `record_flow` → three stores
+1. Pushes to the in-process hot ring (`internal/record/ring.go`) for sub-second live views.
+2. Hands off to the ClickHouse batch writer (`internal/store/batcher.go`), which accumulates and flushes every N records or T milliseconds, whichever comes first.
+3. Updates per-exporter / per-interface counter aggregates used by the Overview tab.
 
-Every parser ultimately calls `record_flow(rec)`, which is the single fan-out point that writes into:
-
-- `recent_flows` — `deque(maxlen=5000)` ring buffer used by all live API views.
-- `interface_stats` — `defaultdict` keyed by `(exporter_ip, ifindex)`. Updated *additively* from each flow's `input_if`/`output_if`.
-- `devices` — exporter IP → first/last-seen and flow count.
-- SQLite `flows` table — append-only, pruned to ~6h.
-
-**Important asymmetry for sFlow counter samples.** `parse_sflow_counters_sample` writes directly into `interface_stats` and **replaces** (not adds to) `ingress_bytes`/`ingress_packets`/`egress_bytes`/`egress_packets` with the absolute counters reported by the device. These hardware counter values are authoritative; the additive flow-derived numbers are estimates. When changing how interface totals are computed, preserve this "counter samples win" behavior — the README documents it as a feature.
-
-The same parser also persists each sample to the **`iface_counter_samples`** SQLite table (`exporter`, `ifindex`, `ts`, `in_octets`, `out_octets`, `in_pkts`, `out_pkts`). The per-interface timeseries endpoint (`/api/interfaces/<exp>/<idx>/timeseries`) diffs successive samples to compute authoritative bytes/sec rates. When no counter samples exist (NetFlow-only exporters), it falls back to flow-derived bucketing and returns `{"source": "flows"}` instead of `{"source": "counters"}`.
+**Asymmetry for sFlow / gNMI counter samples.** Counter samples bypass the flow-derived aggregation path and write directly to `iface_counter_samples` in ClickHouse with absolute octets/packets. The per-interface timeseries endpoint diffs successive counter samples to compute authoritative bytes/sec. When no counter samples exist (NetFlow-only exporters), it falls back to flow-bucketed aggregation and labels the response `"source": "flows"`. This `counters > flows` invariant is non-negotiable — see VISION.md §3.3.
 
 ### NetFlow v9 / IPFIX templates
 
-NetFlow v9 / IPFIX data records are unparseable until the matching template flowset arrives. Templates are stored in the module-level `templates` dict keyed by `(exporter, source_id, template_id)` and looked up when data flowsets are decoded. Field IDs FlowScope cares about are listed in `NF9_FIELDS` (bytes, packets, protocol, ports, IPv4/IPv6 addrs, input/output ifIndex). Other fields are skipped by advancing past their declared length — this is intentional and keeps the parser tolerant of unknown fields.
+Templates are stored per ingest replica in `internal/netflow.TemplateCache`, keyed by `(exporter, source_id, template_id)`. Data flowsets that arrive before their template is seen are dropped and a `nf9_template_miss_total` counter increments. The 5-tuple-hashed UDP load balancer ensures a given exporter consistently lands on the same replica, so template state is reliably colocated with data records from that exporter. Field IDs FlowScope cares about are listed in `internal/netflow/fields.go`; unknown fields are skipped by declared length.
 
 ### sFlow v5 parser
 
-`parse_sflow_v5` dispatches by sample format (`tag & 0xFFF`):
+`sflow.Parse` dispatches by sample format (`tag & 0xFFF`):
 
-- 1 / 3 — flow_sample / flow_sample_expanded → `parse_sflow_flow_sample` → `parse_sflow_raw_header` (decodes Ethernet/VLAN/IPv4/IPv6/TCP/UDP from the sampled raw packet).
-- 2 / 4 — counters_sample / counters_sample_expanded → `parse_sflow_counters_sample` (writes absolute interface totals).
-
-The expanded variants use 8-byte (type+index) input/output interface fields instead of the packed 32-bit form; both are handled.
+- 1 / 3 — flow_sample / flow_sample_expanded → `parseFlowSample` → `parseRawHeader` (Ethernet / VLAN / IPv4/IPv6 / TCP/UDP)
+- 2 / 4 — counters_sample / counters_sample_expanded → `parseCountersSample` (writes absolute interface totals)
 
 The agent address from the sFlow datagram header overrides the UDP source IP as the canonical exporter ID, except when it's `0.0.0.0`.
 
 ### Frontend
 
-`web/index.html` is a single static file (no build, no framework, no bundler) served by Flask from `web/`. It polls the `/api/*` JSON endpoints. All filtering (by exporter, by ifIndex) is implemented as query parameters on those endpoints — the frontend just passes them through.
+The SPA polls REST endpoints via TanStack Query and subscribes to a WebSocket for the Overview tab and live flow tail. All filtering (by exporter, by ifIndex, by 5-tuple) is encoded in the URL via React Router search params and passed through to the API as query parameters. The OpenAPI-generated TS client lives in `web/src/api/generated/` and is regenerated by `make gen-client` whenever `api/openapi.yaml` changes — never hand-edit the generated files.
 
 ### REST API surface
 
-Endpoints listed in the README (`/api/summary`, `/api/devices`, `/api/interfaces`, `/api/flows/recent`, `/api/top/talkers`, `/api/top/ports`, `/api/protocols`, `/api/timeseries`). Most accept `?exporter=<ip>` for filtering; flows + timeseries also accept `?ifindex=<n>`. If you add an endpoint, follow the same pattern: read state under `state_lock`, copy out, release the lock, then aggregate.
+Source of truth: `api/openapi.yaml`. Adding an endpoint means editing the spec, regenerating the TS client, then implementing the Go handler. Drift between handlers and spec is caught by a contract test in CI.
 
-Per-interface drill-down endpoint (used by the Interfaces tab modal):
-- `GET  /api/interfaces/<exporter>/<ifindex>/timeseries?seconds=N` — bucketed ingress/egress rate. Source: counter-sample diffs when available, flow-derived fallback otherwise. Response includes `"source": "counters" | "flows"`.
-The base `/api/interfaces` response carries the extended SNMP fields (`admin_status`, `oper_status`, `in_errors`, `out_errors`, `in_discards`, `out_discards`, `mtu`, `mac`) for each row.
+Key endpoints (full list in the spec):
+
+- `GET /api/summary`, `/api/devices`, `/api/interfaces`, `/api/flows/recent`
+- `GET /api/top/talkers`, `/api/top/ports`, `/api/protocols`, `/api/timeseries`
+- `GET /api/interfaces/{exporter}/{ifindex}/timeseries?seconds=N` — bucketed ingress/egress; response carries `"source": "counters" | "gnmi" | "flows"`
+- `GET /api/alerts`, `POST /api/alerts/{id}/ack`, `POST /api/alerts/{id}/close`
+- `WS  /api/stream` — Overview metrics + live flow tail
+
+Most accept `?exporter=<ip>` for filtering; flows + timeseries also accept `?ifindex=<n>`.
 
 ## Constraints worth knowing
 
-- **No auth on the web/API.** The README states this explicitly — don't add features that assume the dashboard is private; keep it suitable for a management network behind a reverse proxy.
-- **Two-file philosophy.** `app.py` (backend) and `web/index.html` (frontend) stay as-is. Don't split into a package or add a build step. Runtime deps are Flask, waitress, APScheduler, pysnmp, cryptography — keep this set small. SNMP modules (`snmp_client.py`, `snmp_mock.py`, `snmp_crypto.py`) are the established exception; add new top-level modules only when they have a similarly clean isolated concern.
-- **In-memory ring is 5000 flows.** Anything that needs more history must query SQLite, not `recent_flows`.
-- **Adding new top-level `.py` modules requires updating the Dockerfile.** Each module needs an explicit `COPY <module>.py ./` line; missing one crashes the container with `ModuleNotFoundError`.
+- **Pollerless-first.** Receivers, not interrogators. Don't add a periodic SNMP poller for anything that streaming telemetry or sFlow counters can provide.
+- **Counter samples win.** Anywhere the UI shows a rate, prefer counter-sample diffs and fall back to flow buckets, labeling the source.
+- **One fan-out point per data type.** All flows through `record.Emit`. All SNMP through the worker pool. All alerts through the engine. New features extend these, not bypass them.
+- **TLS at the edge, not in the binaries.** Azure Application Gateway, nginx, or Caddy terminates TLS. The Go services speak plain HTTP inside the cluster.
+- **No flow data leaves the customer's tenant.** No SaaS callbacks, no telemetry-back-to-vendor. The only outbound traffic is what the customer explicitly configures (webhook URLs, SMTP relay, syslog server).
+- **Schema migrations are forward-only and idempotent.** They run from a one-shot init container before new pods take traffic. No external migration tool.
 
 ## Working agreement
 
-- **99% confidence rule.** Before making any change, you must be ≥99% confident the change is correct and complete. If you are not, stop and either ask clarifying questions, or write down the specific reasons it may not work (unknown protocol field layouts, untested concurrency interactions, ambiguous user intent, missing dependency, untested platform behavior, etc.) so the user can decide whether to proceed. This applies to code edits, config changes, and dependency additions. A confident plan with explicit caveats is preferred over a guess that compiles.
+- **99% confidence rule.** Before making any change, you must be ≥99% confident the change is correct and complete. If you are not, stop and either ask clarifying questions, or write down the specific reasons it may not work (unknown protocol field layouts, untested concurrency interactions, ambiguous user intent, missing dependency, untested platform behavior, etc.) so the user can decide whether to proceed. This applies to code edits, schema changes, dependency additions, and infra changes. A confident plan with explicit caveats is preferred over a guess that compiles.
+- **Tests gate merges.** A PR that touches a parser must add or update a golden-pcap test. A PR that touches a schema must include the migration and a migration test. A PR that touches a critical user journey must update the Playwright spec. CI enforces this; reviewers enforce it harder.
+- **Race detector is non-negotiable.** `go test -race` runs on every CI invocation. Any new shared state must survive the race detector under concurrent load.
+- **Typed contracts at every boundary.** Go interfaces internally; OpenAPI-generated TS client between api and web. Don't bypass the generated client to "just hit the endpoint" from React.
+- **No silent failures.** Every dropped packet, malformed template, failed walk increments a Prometheus counter and is visible on the Overview tab. If you add a new failure mode, you add the counter in the same PR.
+- **Render on state change.** React click handlers update local state synchronously *before* awaiting fetches. A dashboard that feels broken for 200ms is a dashboard the user does not trust.
+- **No browser pop-ups.** Use the in-app modal primitives (`Dialog`, `AlertDialog`, `Prompt` from the design system). Never `window.prompt` / `confirm` / `alert`.
+- **Adding a new Go binary requires a Helm chart update.** New `cmd/<service>/` needs a Deployment, Service, and (if applicable) HPA + PDB in `deploy/helm/flowscope/templates/`. CI's `helm lint` will catch missing pieces, but reviewers should verify.

@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git cherry-pick *)",
+      "Bash(git commit -m ' *)",
+      "Bash(gh pr create --base main --title 'Cleanup on main: drop flag feature, raise waitress threads, cap container 14 GiB / 3.5 CPUs' --body ' *)",
+      "WebSearch",
+      "Bash(go version *)",
+      "Bash(go mod *)",
+      "Bash(go vet *)",
+      "Bash(go test *)",
+      "Bash(go get *)",
+      "Bash(git rm *)"
+    ]
+  }
+}

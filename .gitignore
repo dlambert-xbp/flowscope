@@ -39,3 +39,15 @@ htmlcov/
 # Local env overrides
 .env
 .env.local
+
+# Go
+bin/
+*.exe
+*.test
+*.out
+
+# Local docker-compose volumes
+.data/
+
+# Claude Code agent worktrees (transient, recreated per agent run)
+.claude/worktrees/
