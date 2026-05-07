@@ -1,26 +1,36 @@
 @import "tailwindcss";
 
-/* FlowScope design tokens — trading-terminal palette from the
-   approved mock at mock/dashboard-final.html. Single accent
-   (signal-orange), semantic-only state colors, monospace data,
-   IBM Plex throughout. */
+/* FlowScope design tokens — trading-terminal palette ported from
+   mock/dashboard-final.html. Single accent (signal-orange),
+   semantic-only state colors with tinted washes for exception bias,
+   IBM Plex throughout, hairline grid as the structural language. */
 @theme {
   --color-ink: #0c0d0e;
-  --color-surf: #131416;
+  --color-surface: #131416;
   --color-raise: #181a1d;
   --color-hover: #1c2026;
   --color-line: #23262b;
+  --color-line-soft: #1a1c20;
 
   --color-text: #e8e6e0;
-  --color-dim: #9a958c;
-  --color-faint: #6b6862;
+  --color-dim: #8b8a85;
+  --color-faint: #5a5b5e;
 
   --color-accent: #ff5b1f;
-  --color-accent-2: #d2451a;
+  --color-accent-dim: #b3431a;
+  --color-accent-wash: rgba(255, 91, 31, 0.10);
 
   --color-crit: #e04646;
+  --color-crit-wash: rgba(224, 70, 70, 0.12);
+
   --color-warn: #d4a017;
+  --color-warn-wash: rgba(212, 160, 23, 0.12);
+
   --color-ok: #5a9c5f;
+  --color-ok-wash: rgba(90, 156, 95, 0.10);
+
+  --color-grid-line: #1c1e22;
+  --color-selection: rgba(255, 91, 31, 0.22);
 
   --font-sans: 'IBM Plex Sans', system-ui, -apple-system, sans-serif;
   --font-mono: 'IBM Plex Mono', ui-monospace, monospace;
@@ -31,6 +41,35 @@ body {
   font-family: var(--font-sans);
   font-feature-settings: 'cv11', 'ss01';
   letter-spacing: -0.005em;
+  font-size: 13px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
 }
 
+::selection { background: var(--color-selection); color: var(--color-text); }
+
+/* Hairline scrollbars, never decorative. */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--color-line); }
+::-webkit-scrollbar-thumb:hover { background: var(--color-line-soft); border: 2px solid var(--color-line); }
+
 .tabular { font-variant-numeric: tabular-nums; }
+.num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+
+/* Tables. Hairline-only, no row separators (just td bottom-border).
+   Matches mock/dashboard-final.html. */
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: left; padding: 6px 12px; font-size: 12px; }
+th {
+  font-weight: 500;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--color-faint);
+  border-bottom: 1px solid var(--color-line);
+  padding: 8px 12px;
+}
+td { border-bottom: 1px solid var(--color-line-soft); }
+td.r, th.r { text-align: right; font-variant-numeric: tabular-nums; }
+td.n, th.n { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }

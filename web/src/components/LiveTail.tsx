@@ -1,0 +1,83 @@
+import { useQuery } from '@tanstack/react-query'
+import { api, fmt } from '../api'
+
+export function LiveTail() {
+  const recent = useQuery({
+    queryKey: ['recent'],
+    queryFn: () => api.recentFlows(20),
+    refetchInterval: 2000,
+  })
+  const flows = recent.data?.flows ?? []
+  return (
+    <section>
+      <div className="flex items-baseline gap-3 px-4 py-3 border-b border-line">
+        <span className="text-[11px] uppercase tracking-[0.1em] text-dim font-semibold">
+          Live tail
+        </span>
+        <span className="font-mono text-[11px] text-faint tabular">
+          {recent.isLoading ? 'loading…' : `${flows.length} most recent`}
+        </span>
+        <span className="ml-auto font-mono text-[10px] tracking-[0.06em] text-faint">
+          REFRESH · 2s
+        </span>
+      </div>
+      {!recent.isLoading && flows.length === 0 ? (
+        <div className="px-4 py-8 text-center text-[12px] font-mono text-dim border-b border-line">
+          no flows yet · drive synth to populate
+        </div>
+      ) : (
+        <table className="w-full">
+          <thead>
+            <tr>
+              <th>time</th>
+              <th>source</th>
+              <th>src → dst</th>
+              <th>proto</th>
+              <th>service</th>
+              <th className="r">packets</th>
+              <th className="r">bytes</th>
+            </tr>
+          </thead>
+          <tbody>
+            {flows.map((f, i) => (
+              <tr key={i} className="hover:bg-surface">
+                <td className="n text-faint">{fmt.time(f.observed).slice(11, 23)}</td>
+                <td className="n text-dim">{f.source}</td>
+                <td className="n">
+                  {f.src_addr}:{f.src_port} <span className="text-faint">→</span>{' '}
+                  {f.dst_addr}:{f.dst_port}
+                </td>
+                <td>
+                  <span className="font-mono text-accent">{fmt.proto(f.proto)}</span>
+                </td>
+                <td className="n text-dim">{serviceFor(f.dst_port)}</td>
+                <td className="r n">{fmt.num(f.packets)}</td>
+                <td className="r n">{fmt.bytes(f.bytes)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </section>
+  )
+}
+
+// Tiny well-known-port lookup. The full IANA list is overkill; the
+// real thing belongs server-side once the api gains a /service-map
+// endpoint.
+function serviceFor(port: number): string {
+  return (
+    ({
+      22: 'ssh',
+      53: 'dns',
+      80: 'http',
+      443: 'https',
+      445: 'smb',
+      3389: 'rdp',
+      161: 'snmp',
+      162: 'snmp-trap',
+      2055: 'netflow',
+      6343: 'sflow',
+    } as Record<number, string>)[port] ?? '—'
+  )
+}

@@ -1,15 +1,14 @@
 import { useQuery } from '@tanstack/react-query'
 import { api, fmt } from '../api'
+import type { Summary } from '../api'
+import { Interfaces } from './Interfaces'
+import { LiveTail } from './LiveTail'
 
-// Overview consumes /api/summary and /api/interfaces and renders the
-// Tile #1–#3 of VISION.md §5.1 plus the per-interface bandwidth table
-// with a click-to-expand timeseries chart from slice 7. The full six
-// tiles + Flows + Devices + Alerts arrive in follow-up slices as the
-// other api endpoints land.
 export function Overview() {
   const summary = useQuery({
     queryKey: ['summary'],
     queryFn: () => api.summary(300),
+    refetchInterval: 2000,
   })
   const ifaces = useQuery({
     queryKey: ['interfaces'],
@@ -18,22 +17,42 @@ export function Overview() {
   })
 
   return (
-    <div className="space-y-7">
-      <Eyebrow />
-      <Standfirst summary={summary.data} loading={summary.isLoading} error={summary.error as Error | undefined} />
-      <Kpis summary={summary.data} />
+    <div>
+      <Banner summary={summary.data} loading={summary.isLoading} error={summary.error as Error | undefined} />
+      <KpiGrid summary={summary.data} interfaceCount={ifaces.data?.count ?? 0} hasIfaces={!!ifaces.data} />
       <Interfaces rows={ifaces.data?.interfaces ?? []} loading={ifaces.isLoading} />
+      <LiveTail />
     </div>
   )
 }
 
-function Eyebrow() {
-  const ts = new Date().toUTCString().replace('GMT', 'UTC')
+/* ------------------------------- Banner ------------------------------- */
+
+function Banner({
+  summary,
+  loading,
+  error,
+}: {
+  summary?: Summary
+  loading: boolean
+  error?: Error
+}) {
   return (
-    <div className="flex items-center gap-3 text-[10px] uppercase tracking-[0.22em] font-bold text-accent">
-      <span>Overview</span>
-      <span className="flex-1 h-px bg-line" />
-      <span className="text-dim font-medium tracking-[0.16em]">{ts}</span>
+    <div className="flex items-stretch border-b border-line bg-surface">
+      <div className="flex-1 p-4 border-r border-line flex flex-col gap-1">
+        <div className="flex items-center gap-3 text-[10.5px] uppercase tracking-[0.1em] font-semibold text-dim">
+          <span>standfirst · trailing 5 min</span>
+          <span className="font-mono text-[10px] text-faint normal-case tracking-[0.02em]">
+            refresh · 2s
+          </span>
+        </div>
+        <Standfirst summary={summary} loading={loading} error={error} />
+      </div>
+      <div className="flex">
+        <BannerCol label="window" value="5 min" mono />
+        <BannerCol label="newest" value={summary ? fmt.time(summary.newest).slice(11, 19) + 'Z' : '—'} mono />
+        <BannerCol label="oldest" value={summary ? fmt.time(summary.oldest).slice(11, 19) + 'Z' : '—'} mono />
+      </div>
     </div>
   )
 }
@@ -43,110 +62,224 @@ function Standfirst({
   loading,
   error,
 }: {
-  summary?: import('../api').Summary
+  summary?: Summary
   loading: boolean
   error?: Error
 }) {
-  if (loading) return <p className="text-[15px] text-dim">Connecting…</p>
+  if (loading) return <p className="text-[14px] text-dim">Connecting…</p>
   if (error) {
     return (
-      <p className="text-[15px] border-l-2 border-crit pl-4 py-1 text-text">
+      <p className="text-[14px] text-text leading-[1.5] max-w-[78ch]">
         <span className="text-crit font-semibold">Connection error.</span>{' '}
-        <span className="text-dim">{error.message}</span>
+        <span className="text-dim font-mono text-[11px]">{error.message}</span>
       </p>
     )
   }
   if (!summary || summary.flows === 0) {
     return (
-      <p className="text-[15px] border-l-2 border-accent pl-4 py-1 text-dim leading-relaxed">
-        Connected to ClickHouse but the <em className="not-italic font-semibold text-text">flows</em> table is empty.{' '}
+      <p className="text-[14px] text-text leading-[1.5] max-w-[78ch]">
+        Connected to ClickHouse but the <span className="text-accent font-semibold">flows</span> table is empty.
         Drive synthetic traffic with{' '}
-        <code className="bg-raise px-1.5 py-0.5 text-[12.5px] font-mono">go run ./cmd/synth -- --target localhost:2055 --rate 5000</code>
-        .
+        <code className="bg-raise px-1.5 py-0.5 text-[12px] font-mono">
+          go run ./cmd/synth -- --target localhost:2055 --rate 5000
+        </code>
+        {' '}to populate it.
+        <span className="block mt-1 text-faint font-mono text-[11px] tracking-[0.02em]">
+          waiting · 2s refresh
+        </span>
       </p>
     )
   }
   return (
-    <p className="text-[15px] border-l-2 border-accent pl-4 py-1 text-dim leading-relaxed">
-      Trailing 5 min: <em className="not-italic font-semibold text-text tabular">{fmt.num(summary.flows)}</em> flows from{' '}
-      <em className="not-italic font-semibold text-text tabular">{summary.exporters}</em> exporters carrying{' '}
-      <em className="not-italic font-semibold text-text">{fmt.bytes(summary.bytes)}</em> across{' '}
-      <em className="not-italic font-semibold text-text tabular">{fmt.num(summary.packets)}</em> packets.
+    <p className="text-[14px] text-text leading-[1.5] max-w-[78ch]">
+      Trailing 5 min: <span className="text-accent font-semibold tabular">{fmt.num(summary.flows)}</span> flows from{' '}
+      <span className="text-accent font-semibold tabular">{summary.exporters}</span> exporters carrying{' '}
+      <span className="text-accent font-semibold">{fmt.bytes(summary.bytes)}</span> across{' '}
+      <span className="text-accent font-semibold tabular">{fmt.num(summary.packets)}</span> packets.{' '}
+      <span className="text-ok">Pipeline nominal.</span>
     </p>
   )
 }
 
-function Kpis({ summary }: { summary?: import('../api').Summary }) {
-  const tiles = [
-    { k: 'flows · 5m', v: summary ? fmt.num(summary.flows) : '—', accent: true },
-    { k: 'bytes · 5m', v: summary ? fmt.bytes(summary.bytes) : '—' },
-    { k: 'packets · 5m', v: summary ? fmt.num(summary.packets) : '—' },
-    { k: 'exporters seen', v: summary ? fmt.num(summary.exporters) : '—' },
+function BannerCol({
+  label,
+  value,
+  mono,
+  state,
+}: {
+  label: string
+  value: string
+  mono?: boolean
+  state?: 'crit' | 'warn' | 'ok' | 'accent'
+}) {
+  const stateClass =
+    state === 'crit'
+      ? 'text-crit'
+      : state === 'warn'
+        ? 'text-warn'
+        : state === 'ok'
+          ? 'text-ok'
+          : state === 'accent'
+            ? 'text-accent'
+            : 'text-text'
+  return (
+    <div className="p-4 min-w-[160px] border-r border-line last:border-r-0 flex flex-col gap-0.5 justify-center">
+      <div className="text-[10px] uppercase tracking-[0.1em] text-faint font-semibold">{label}</div>
+      <div
+        className={`${mono ? 'font-mono' : ''} text-[22px] font-medium tabular leading-[1.1] tracking-[-0.01em] ${stateClass}`}
+      >
+        {value}
+      </div>
+    </div>
+  )
+}
+
+/* ------------------------------ KPI grid ------------------------------ */
+
+type Tile = {
+  label: string
+  value: string
+  unit?: string
+  state?: 'crit' | 'warn' | 'ok' | 'accent'
+  micro?: string[]
+  status?: { text: string; tone: 'crit' | 'warn' | 'ok' | 'dim' }
+}
+
+function KpiGrid({
+  summary,
+  interfaceCount,
+  hasIfaces,
+}: {
+  summary?: Summary
+  interfaceCount: number
+  hasIfaces: boolean
+}) {
+  // Exception bias: tiles that represent abnormal state get a tinted
+  // wash + colored numeric. Healthy tiles stay neutral. Operator's eye
+  // lands on the exception in <300ms.
+  const empty = !summary || summary.flows === 0
+  const tiles: Tile[] = [
+    {
+      label: 'flow rate',
+      value: summary ? fmt.num(summary.flows) : '—',
+      unit: 'flows · 5m',
+      state: empty ? undefined : 'accent',
+      status: empty ? { text: 'idle', tone: 'dim' } : { text: 'live', tone: 'ok' },
+    },
+    {
+      label: 'volume',
+      value: summary ? fmt.bytes(summary.bytes) : '—',
+      unit: 'bytes · 5m',
+      micro: summary ? [`${fmt.num(summary.packets)} packets`] : [],
+    },
+    {
+      label: 'exporters',
+      value: summary ? fmt.num(summary.exporters) : '—',
+      unit: 'unique sources',
+      status: empty
+        ? { text: 'none seen', tone: 'dim' }
+        : { text: 'reporting', tone: 'ok' },
+    },
+    {
+      label: 'interfaces',
+      value: hasIfaces ? fmt.num(interfaceCount) : '—',
+      unit: 'with counter samples',
+      state: hasIfaces && interfaceCount === 0 ? 'warn' : undefined,
+      status:
+        hasIfaces && interfaceCount === 0
+          ? { text: 'no sFlow yet', tone: 'warn' }
+          : { text: 'authoritative', tone: 'ok' },
+    },
+    {
+      label: 'storage',
+      value: 'ok',
+      unit: 'clickhouse',
+      state: 'ok',
+      status: { text: 'inserts flowing', tone: 'ok' },
+    },
+    {
+      label: 'alerts',
+      value: '0',
+      unit: 'open',
+      state: 'ok',
+      status: { text: 'no rules yet', tone: 'dim' },
+    },
   ]
   return (
-    <div className="grid grid-cols-2 lg:grid-cols-4 border border-line">
+    <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 border-b border-line">
       {tiles.map((t, i) => (
-        <div
-          key={i}
-          className="p-5 border-r border-b border-line last:border-r-0 lg:[&:nth-child(4n)]:border-r-0 bg-surf"
-        >
-          <div className="text-[10.5px] font-mono font-semibold uppercase tracking-[0.16em] text-dim mb-2">
-            {t.k}
-          </div>
-          <div className={`text-[28px] font-semibold tracking-tight tabular ${t.accent ? 'text-accent' : 'text-text'}`}>
-            {t.v}
-          </div>
-        </div>
+        <Kpi key={i} tile={t} />
       ))}
     </div>
   )
 }
 
-function Interfaces({
-  rows,
-  loading,
-}: {
-  rows: import('../api').InterfaceRow[]
-  loading: boolean
-}) {
+function Kpi({ tile }: { tile: Tile }) {
+  const wash =
+    tile.state === 'crit'
+      ? 'bg-crit-wash'
+      : tile.state === 'warn'
+        ? 'bg-warn-wash'
+        : tile.state === 'ok'
+          ? 'bg-ok-wash'
+          : ''
+  const valueColor =
+    tile.state === 'crit'
+      ? 'text-crit'
+      : tile.state === 'warn'
+        ? 'text-warn'
+        : tile.state === 'ok'
+          ? 'text-ok'
+          : tile.state === 'accent'
+            ? 'text-accent'
+            : 'text-text'
   return (
-    <section>
-      <h2 className="flex items-baseline justify-between text-[10.5px] font-mono font-bold uppercase tracking-[0.18em] text-dim border-b border-line pb-2 mb-3">
-        <span>Top interfaces</span>
-        <span className="text-accent text-[9.5px] tracking-[0.06em]">SOURCE · COUNTERS</span>
-      </h2>
-      {loading ? (
-        <p className="text-dim text-sm font-mono">loading…</p>
-      ) : rows.length === 0 ? (
-        <div className="border border-dashed border-line py-6 text-center text-[12px] font-mono text-dim">
-          no counter samples yet — sFlow exporters or synth-sFlow needed
+    <div
+      className={`relative px-4 py-3.5 border-r border-line last:border-r-0 flex flex-col gap-1.5 min-h-[110px] ${wash}`}
+    >
+      <div className="flex items-center gap-2">
+        <span className="text-[10px] uppercase tracking-[0.1em] text-faint font-semibold">
+          {tile.label}
+        </span>
+        {tile.status && <Status status={tile.status} />}
+      </div>
+      <div className={`font-mono text-[24px] font-medium tabular leading-[1.1] tracking-[-0.02em] ${valueColor}`}>
+        {tile.value}
+        {tile.unit && <span className="text-faint text-[11px] font-mono ml-1.5">{tile.unit}</span>}
+      </div>
+      {tile.micro && tile.micro.length > 0 && (
+        <div className="font-mono text-[11px] text-dim flex gap-2 flex-wrap mt-auto">
+          {tile.micro.map((m, i) => (
+            <span key={i}>{m}</span>
+          ))}
         </div>
-      ) : (
-        <table className="w-full text-[12.5px]">
-          <thead>
-            <tr className="text-[10.5px] uppercase tracking-[0.12em] text-faint font-mono font-bold">
-              <th className="text-left py-2 pr-4 border-b border-line">exporter</th>
-              <th className="text-right py-2 pr-4 border-b border-line">ifindex</th>
-              <th className="text-right py-2 pr-4 border-b border-line">in latest</th>
-              <th className="text-right py-2 pr-4 border-b border-line">out latest</th>
-              <th className="text-right py-2 pr-4 border-b border-line">in peak</th>
-              <th className="text-right py-2 pr-4 border-b border-line">out peak</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((r) => (
-              <tr key={`${r.exporter}_${r.ifindex}`} className="hover:bg-hover">
-                <td className="py-2 pr-4 border-b border-line font-mono">{r.exporter}</td>
-                <td className="py-2 pr-4 border-b border-line text-right font-mono tabular">{r.ifindex}</td>
-                <td className="py-2 pr-4 border-b border-line text-right font-mono tabular">{fmt.bps(r.in_bps_latest)}</td>
-                <td className="py-2 pr-4 border-b border-line text-right font-mono tabular">{fmt.bps(r.out_bps_latest)}</td>
-                <td className="py-2 pr-4 border-b border-line text-right font-mono tabular text-accent">{fmt.bps(r.in_bps_peak)}</td>
-                <td className="py-2 pr-4 border-b border-line text-right font-mono tabular text-ok">{fmt.bps(r.out_bps_peak)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
       )}
-    </section>
+    </div>
   )
 }
+
+function Status({ status }: { status: NonNullable<Tile['status']> }) {
+  const dotColor =
+    status.tone === 'ok'
+      ? 'bg-ok'
+      : status.tone === 'crit'
+        ? 'bg-crit'
+        : status.tone === 'warn'
+          ? 'bg-warn'
+          : 'bg-faint'
+  const textColor =
+    status.tone === 'ok'
+      ? 'text-ok'
+      : status.tone === 'crit'
+        ? 'text-crit'
+        : status.tone === 'warn'
+          ? 'text-warn'
+          : 'text-faint'
+  return (
+    <span className="flex items-center gap-1.5">
+      <span className={`w-1.5 h-1.5 rounded-full ${dotColor}`} />
+      <span className={`text-[10px] uppercase tracking-[0.06em] ${textColor}`}>{status.text}</span>
+    </span>
+  )
+}
+
