@@ -10,7 +10,7 @@ COPY package.json ./
 # We don't ship a lockfile yet — slice 8 is the bootstrap. A follow-up
 # slice locks it. `npm install` works either way.
 RUN npm install --no-audit --no-fund --loglevel=error
-COPY tsconfig.json tsconfig.node.json vite.config.ts index.html ./
+COPY tsconfig.json vite.config.ts index.html ./
 COPY src ./src
 RUN npm run build
 
