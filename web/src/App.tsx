@@ -89,6 +89,36 @@ function Pair({ label, value }: { label: string; value: string }) {
 /* ----------------------------- Brand + tabs ----------------------------- */
 
 function Bar({ tab, onTab }: { tab: Tab; onTab: (t: Tab) => void }) {
+  const summary = useQuery({
+    queryKey: ['summary', 'bar'],
+    queryFn: () => api.summary(60),
+    refetchInterval: 2000,
+  })
+  const devices = useQuery({
+    queryKey: ['devices', 'bar'],
+    queryFn: () => api.devices(300),
+    refetchInterval: 10_000,
+  })
+  const alertSummary = useQuery({
+    queryKey: ['alertSummary', 'bar'],
+    queryFn: () => api.alertSummary(),
+    refetchInterval: 5_000,
+  })
+
+  const flowCount = summary.isError ? undefined : summary.data?.flows
+  const deviceCount = devices.isError ? undefined : devices.data?.count
+  const openAlertCount = alertSummary.isError
+    ? undefined
+    : alertSummary.data
+      ? alertSummary.data.open_critical +
+        alertSummary.data.open_warning +
+        alertSummary.data.open_info
+      : undefined
+  // Critical alerts get a louder treatment so the operator can spot
+  // them without reading the number. Warning/info still light up the
+  // tab but in the muted style.
+  const alertTone = alertSummary.data && alertSummary.data.open_critical > 0 ? 'crit' : undefined
+
   return (
     <div
       className="grid items-center bg-ink border-b border-line"
@@ -104,9 +134,9 @@ function Bar({ tab, onTab }: { tab: Tab; onTab: (t: Tab) => void }) {
       </div>
       <div className="flex h-full">
         <TabBtn id="overview" active={tab} onTab={onTab} label="Overview" />
-        <TabBtn id="flows" active={tab} onTab={onTab} label="Flows" count="—" />
-        <TabBtn id="devices" active={tab} onTab={onTab} label="Devices" count="—" />
-        <TabBtn id="alerts" active={tab} onTab={onTab} label="Alerts" count="0" />
+        <TabBtn id="flows" active={tab} onTab={onTab} label="Flows" count={fmt.compact(flowCount)} />
+        <TabBtn id="devices" active={tab} onTab={onTab} label="Devices" count={fmt.compact(deviceCount)} />
+        <TabBtn id="alerts" active={tab} onTab={onTab} label="Alerts" count={fmt.compact(openAlertCount)} tone={alertTone} />
         <TabBtn id="settings" active={tab} onTab={onTab} label="Settings" />
       </div>
       <div className="px-4">
@@ -138,14 +168,17 @@ function TabBtn({
   onTab,
   label,
   count,
+  tone,
 }: {
   id: Tab
   active: Tab
   onTab: (t: Tab) => void
   label: string
   count?: string
+  tone?: 'crit'
 }) {
   const selected = active === id
+  const countClass = tone === 'crit' ? 'text-crit' : 'text-faint'
   return (
     <button
       onClick={() => onTab(id)}
@@ -155,7 +188,7 @@ function TabBtn({
       }`}
     >
       <span>{label}</span>
-      {count && <span className="font-mono text-[11px] text-faint tabular">{count}</span>}
+      {count && <span className={`font-mono text-[11px] tabular ${countClass}`}>{count}</span>}
       {selected && <span className="absolute left-0 right-0 -bottom-px h-0.5 bg-accent" />}
     </button>
   )
