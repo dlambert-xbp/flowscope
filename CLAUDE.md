@@ -6,7 +6,7 @@ This document is the developer-facing companion to [VISION.md](VISION.md). VISIO
 
 ## Stack at a glance
 
-- **Backend services**: Go 1.24+ — `ingest`, `api`, `alert`, `snmp`, `gnmi`. One module, multiple internal packages, multiple binaries built from `cmd/<service>/main.go`.
+- **Backend services**: Go 1.25+ — `ingest`, `api`, `alert`, `snmp`, `gnmi`. One module, multiple internal packages, multiple binaries built from `cmd/<service>/main.go`.
 - **Frontend**: React 19 + TypeScript + Vite. Tailwind + shadcn/ui + TanStack Query + Recharts + react-flow. Lives in `web/`.
 - **Storage**: ClickHouse (warm + cold via TTL tiering). In-process Go ring buffer per ingest replica for sub-second hot views.
 - **Deployment**: Helm chart targeting AKS or Azure Container Apps. Bicep/Terraform module for the Azure substrate (LB, AKS, ClickHouse, Key Vault).

@@ -5,8 +5,9 @@ import { Overview } from './components/Overview'
 import { Flows } from './components/Flows'
 import { Devices } from './components/Devices'
 import { Alerts } from './components/Alerts'
+import { Settings } from './components/Settings'
 
-type Tab = 'overview' | 'flows' | 'devices' | 'alerts'
+type Tab = 'overview' | 'flows' | 'devices' | 'alerts' | 'settings'
 
 export function App() {
   const [tab, setTab] = useState<Tab>('overview')
@@ -22,6 +23,7 @@ export function App() {
         {tab === 'flows' && <Flows />}
         {tab === 'devices' && <Devices />}
         {tab === 'alerts' && <Alerts />}
+        {tab === 'settings' && <Settings />}
       </main>
       <Cmd />
     </div>
@@ -105,6 +107,7 @@ function Bar({ tab, onTab }: { tab: Tab; onTab: (t: Tab) => void }) {
         <TabBtn id="flows" active={tab} onTab={onTab} label="Flows" count="—" />
         <TabBtn id="devices" active={tab} onTab={onTab} label="Devices" count="—" />
         <TabBtn id="alerts" active={tab} onTab={onTab} label="Alerts" count="0" />
+        <TabBtn id="settings" active={tab} onTab={onTab} label="Settings" />
       </div>
       <div className="px-4">
         <div className="flex items-center gap-2 px-3 h-7 bg-surface border border-line">

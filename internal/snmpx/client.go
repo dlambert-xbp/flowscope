@@ -50,21 +50,36 @@ type Client interface {
 	Walk(ctx context.Context, target string) (*Inventory, error)
 }
 
-// Config configures a real (non-mock) SNMP client.
+// Config configures a real (non-mock) SNMP client. It carries either
+// a v2c community OR a v3 user + auth/priv set. Use FromCredential to
+// build a Config from a stored Credential (decrypted by the caller).
 type Config struct {
-	// Community string for v2c. v3 support arrives in a follow-up
-	// slice once encrypted credential storage lands.
-	Community string
+	// Version: "v2c" or "v3". Defaults to "v2c" when empty.
+	Version string
 	// Port defaults to 161.
 	Port uint16
 	// Timeout per request. Default 2s.
 	Timeout time.Duration
 	// Retries per request. Default 1.
 	Retries int
+
+	// v2c
+	Community string
+
+	// v3
+	V3Username  string
+	V3AuthProto string // '' | MD5 | SHA | SHA-224 | SHA-256 | SHA-384 | SHA-512
+	V3AuthPass  string
+	V3PrivProto string // '' | DES | AES | AES-192 | AES-256
+	V3PrivPass  string
+	V3Context   string
 }
 
 func (c *Config) defaults() {
-	if c.Community == "" {
+	if c.Version == "" {
+		c.Version = "v2c"
+	}
+	if c.Version == "v2c" && c.Community == "" {
 		c.Community = "public"
 	}
 	if c.Port == 0 {
@@ -78,7 +93,26 @@ func (c *Config) defaults() {
 	}
 }
 
-// RealClient wraps gosnmp.GoSNMP for a single (target, community)
+// FromCredential builds a Config from a (decrypted) Credential. Used
+// by the scheduler at walk time and by the api's /test endpoint.
+func FromCredential(c *Credential) Config {
+	if c == nil {
+		return Config{}
+	}
+	return Config{
+		Version:     c.Version,
+		Port:        c.Port,
+		Community:   c.Community,
+		V3Username:  c.V3Username,
+		V3AuthProto: c.V3AuthProto,
+		V3AuthPass:  c.V3AuthPass,
+		V3PrivProto: c.V3PrivProto,
+		V3PrivPass:  c.V3PrivPass,
+		V3Context:   c.V3Context,
+	}
+}
+
+// RealClient wraps gosnmp.GoSNMP for a single (target, credential)
 // pair. Each Walk call opens a fresh session — gosnmp is not
 // goroutine-safe, and per-target sessions keep failures isolated.
 type RealClient struct {
@@ -95,14 +129,9 @@ func NewClient(c Config) *RealClient {
 func (rc *RealClient) Walk(ctx context.Context, target string) (*Inventory, error) {
 	start := time.Now()
 
-	g := &gosnmp.GoSNMP{
-		Target:    target,
-		Port:      rc.cfg.Port,
-		Community: rc.cfg.Community,
-		Version:   gosnmp.Version2c,
-		Timeout:   rc.cfg.Timeout,
-		Retries:   rc.cfg.Retries,
-		Context:   ctx,
+	g, err := buildGoSNMP(target, rc.cfg, ctx)
+	if err != nil {
+		return nil, err
 	}
 	if err := g.Connect(); err != nil {
 		return nil, fmt.Errorf("snmp connect %s: %w", target, err)
@@ -289,4 +318,86 @@ func oidString(p gosnmp.SnmpPDU) string {
 func timeticksToMs(p gosnmp.SnmpPDU) uint64 {
 	// SNMP TimeTicks are hundredths of seconds.
 	return uint64(integerValue(p)) * 10
+}
+
+// buildGoSNMP constructs a gosnmp.GoSNMP from a Config. The v3 path
+// pulls in the SNMPv3 user-based security model (USM) parameters
+// supported by gosnmp; FromCredential ensures we pass plaintext
+// passphrases (the store decrypts on the way in).
+func buildGoSNMP(target string, cfg Config, ctx context.Context) (*gosnmp.GoSNMP, error) {
+	g := &gosnmp.GoSNMP{
+		Target:  target,
+		Port:    cfg.Port,
+		Timeout: cfg.Timeout,
+		Retries: cfg.Retries,
+		Context: ctx,
+	}
+	switch cfg.Version {
+	case "", "v2c":
+		g.Version = gosnmp.Version2c
+		g.Community = cfg.Community
+	case "v3":
+		g.Version = gosnmp.Version3
+		g.SecurityModel = gosnmp.UserSecurityModel
+		g.MsgFlags = v3MsgFlagsFor(cfg)
+		g.SecurityParameters = &gosnmp.UsmSecurityParameters{
+			UserName:                 cfg.V3Username,
+			AuthenticationProtocol:   v3AuthProto(cfg.V3AuthProto),
+			AuthenticationPassphrase: cfg.V3AuthPass,
+			PrivacyProtocol:          v3PrivProto(cfg.V3PrivProto),
+			PrivacyPassphrase:        cfg.V3PrivPass,
+		}
+		g.ContextName = cfg.V3Context
+	default:
+		return nil, fmt.Errorf("snmpx: unsupported version %q", cfg.Version)
+	}
+	return g, nil
+}
+
+// v3MsgFlagsFor picks the gosnmp message flags by what passphrases
+// are present. authPriv (sign + encrypt) is the default when both
+// are configured; authNoPriv when only auth; noAuthNoPriv otherwise.
+func v3MsgFlagsFor(cfg Config) gosnmp.SnmpV3MsgFlags {
+	switch {
+	case cfg.V3AuthPass != "" && cfg.V3PrivPass != "":
+		return gosnmp.AuthPriv
+	case cfg.V3AuthPass != "":
+		return gosnmp.AuthNoPriv
+	default:
+		return gosnmp.NoAuthNoPriv
+	}
+}
+
+func v3AuthProto(p string) gosnmp.SnmpV3AuthProtocol {
+	switch p {
+	case "MD5":
+		return gosnmp.MD5
+	case "SHA":
+		return gosnmp.SHA
+	case "SHA-224":
+		return gosnmp.SHA224
+	case "SHA-256":
+		return gosnmp.SHA256
+	case "SHA-384":
+		return gosnmp.SHA384
+	case "SHA-512":
+		return gosnmp.SHA512
+	default:
+		return gosnmp.NoAuth
+	}
+}
+
+func v3PrivProto(p string) gosnmp.SnmpV3PrivProtocol {
+	switch p {
+	case "DES":
+		return gosnmp.DES
+	case "AES":
+		return gosnmp.AES
+	case "AES-192":
+		return gosnmp.AES192
+	case "AES-256":
+		return gosnmp.AES256
+	default:
+		return gosnmp.NoPriv
+	}
 }

@@ -116,6 +116,34 @@ export type AlertSummary = {
   closed_last_24h: number
 }
 
+export type SNMPCredential = {
+  exporter: string
+  version: 'v2c' | 'v3'
+  port: number
+  interval_sec: number
+  community?: string
+  v3_username?: string
+  v3_auth_proto?: string
+  v3_auth_pass?: string
+  v3_priv_proto?: string
+  v3_priv_pass?: string
+  v3_context?: string
+  has_community: boolean
+  has_auth_pass: boolean
+  has_priv_pass: boolean
+  updated_at?: string
+  updated_by?: string
+}
+
+export type SNMPTestResult = {
+  ok: boolean
+  error?: string
+  sys_descr?: string
+  sys_name?: string
+  interfaces?: number
+  poll_duration_ms?: number
+}
+
 export type TopTalker = {
   src_addr: string
   dst_addr: string
@@ -209,6 +237,44 @@ export const api = {
       if (!r.ok) throw new Error(`close ${id} → ${r.status}`)
       return r.json()
     }),
+  listCredentials: () =>
+    getJSON<{ count: number; credentials: SNMPCredential[] }>(
+      `/api/snmp/credentials`,
+    ),
+  getCredential: (exporter: string) =>
+    getJSON<SNMPCredential>(
+      `/api/snmp/credentials/${encodeURIComponent(exporter)}`,
+    ),
+  putCredential: async (c: SNMPCredential) => {
+    const r = await fetch(
+      `/api/snmp/credentials/${encodeURIComponent(c.exporter)}`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(c),
+      },
+    )
+    if (!r.ok) {
+      const txt = await r.text()
+      throw new Error(`PUT ${c.exporter} → ${r.status}: ${txt}`)
+    }
+    return r.json()
+  },
+  deleteCredential: async (exporter: string) => {
+    const r = await fetch(`/api/snmp/credentials/${encodeURIComponent(exporter)}`, {
+      method: 'DELETE',
+    })
+    if (!r.ok) throw new Error(`DELETE ${exporter} → ${r.status}`)
+    return r.json()
+  },
+  testCredential: async (exporter: string): Promise<SNMPTestResult> => {
+    const r = await fetch(
+      `/api/snmp/credentials/${encodeURIComponent(exporter)}/test`,
+      { method: 'POST' },
+    )
+    if (!r.ok) throw new Error(`test ${exporter} → ${r.status}`)
+    return r.json()
+  },
   topTalkers: (filters: URLSearchParams, windowSec = 300, limit = 20) =>
     getJSON<TopResponse<TopTalker>>(
       withFilters(`/api/top/talkers?window=${windowSec}s&limit=${limit}`, filters),

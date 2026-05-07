@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -11,13 +12,16 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/go-chi/chi/v5"
 
+	"github.com/dlambert-xbp/flowscope/internal/snmpx"
 	"github.com/dlambert-xbp/flowscope/internal/store"
 )
 
 // handlers groups HTTP handler methods that share a ClickHouse
-// connection. All methods are pure read paths.
+// connection. The optional creds store powers the Settings → SNMP
+// admin endpoints; when nil those endpoints return 503.
 type handlers struct {
-	conn driver.Conn
+	conn  driver.Conn
+	creds snmpx.CredentialStore
 }
 
 // health is a minimal liveness probe used by Kubernetes / Container
@@ -156,6 +160,165 @@ func (h *handlers) topConversations(w http.ResponseWriter, r *http.Request) {
 		"rows":   rows,
 		"source": "flows",
 		"window": window.String(),
+	})
+}
+
+// listCredentials returns every configured SNMP binding with all
+// secrets REDACTED. The has_community / has_auth_pass / has_priv_pass
+// booleans tell the UI whether a secret is present without leaking
+// the value.
+//
+//	GET /api/snmp/credentials
+//
+// 503 when FLOWSCOPE_SNMP_KEY is unset (no credential store is
+// available). The Settings UI surfaces that as a banner.
+func (h *handlers) listCredentials(w http.ResponseWriter, r *http.Request) {
+	if h.creds == nil {
+		writeError(w, http.StatusServiceUnavailable, "credential management disabled (FLOWSCOPE_SNMP_KEY not set)")
+		return
+	}
+	rows, err := h.creds.List(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"count":       len(rows),
+		"credentials": rows,
+	})
+}
+
+// getCredential returns one binding with secrets REDACTED. The api
+// never serves decrypted passphrases — the only consumer of plaintext
+// is the snmp scheduler running in the same trust domain.
+//
+//	GET /api/snmp/credentials/{exporter}
+func (h *handlers) getCredential(w http.ResponseWriter, r *http.Request) {
+	if h.creds == nil {
+		writeError(w, http.StatusServiceUnavailable, "credential management disabled")
+		return
+	}
+	exporter := chi.URLParam(r, "exporter")
+	c, err := h.creds.Get(r.Context(), exporter)
+	if err != nil {
+		if errors.Is(err, snmpx.ErrCredNotFound) {
+			writeError(w, http.StatusNotFound, "no credential configured")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	// Redact secrets before returning.
+	c.Community = ""
+	c.V3AuthPass = ""
+	c.V3PrivPass = ""
+	writeJSON(w, http.StatusOK, c)
+}
+
+// putCredential creates or replaces the binding for {exporter}.
+//
+//	PUT /api/snmp/credentials/{exporter}
+//	Content-Type: application/json
+//	{ "version": "v3", "v3_username": "noc-ro", ... }
+//
+// Empty passphrase fields on PUT mean "leave the existing secret
+// alone". This lets the UI render a "secret already set" indicator
+// without forcing the operator to retype every time they tweak a
+// non-secret field like interval or context.
+func (h *handlers) putCredential(w http.ResponseWriter, r *http.Request) {
+	if h.creds == nil {
+		writeError(w, http.StatusServiceUnavailable, "credential management disabled")
+		return
+	}
+	exporter := chi.URLParam(r, "exporter")
+	var body snmpx.Credential
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	if _, err := netip.ParseAddr(exporter); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid exporter address")
+		return
+	}
+	body.Exporter = exporter
+
+	// Preserve existing secrets when the operator left them blank.
+	if body.Community == "" || body.V3AuthPass == "" || body.V3PrivPass == "" {
+		if existing, err := h.creds.Get(r.Context(), exporter); err == nil {
+			if body.Community == "" {
+				body.Community = existing.Community
+			}
+			if body.V3AuthPass == "" {
+				body.V3AuthPass = existing.V3AuthPass
+			}
+			if body.V3PrivPass == "" {
+				body.V3PrivPass = existing.V3PrivPass
+			}
+		}
+	}
+
+	if err := h.creds.Set(r.Context(), body, actorFromRequest(r)); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "exporter": exporter})
+}
+
+// deleteCredential removes the binding. Subsequent walks fall back
+// to the cluster-wide community / mock client.
+//
+//	DELETE /api/snmp/credentials/{exporter}
+func (h *handlers) deleteCredential(w http.ResponseWriter, r *http.Request) {
+	if h.creds == nil {
+		writeError(w, http.StatusServiceUnavailable, "credential management disabled")
+		return
+	}
+	exporter := chi.URLParam(r, "exporter")
+	if err := h.creds.Delete(r.Context(), exporter); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "exporter": exporter})
+}
+
+// testCredential performs an ad-hoc walk of just sysDescr against
+// the configured binding and returns the result. Cheap, fast, and
+// confirms credentials work without the operator waiting for the
+// next scheduler tick.
+//
+//	POST /api/snmp/credentials/{exporter}/test
+func (h *handlers) testCredential(w http.ResponseWriter, r *http.Request) {
+	if h.creds == nil {
+		writeError(w, http.StatusServiceUnavailable, "credential management disabled")
+		return
+	}
+	exporter := chi.URLParam(r, "exporter")
+	cred, err := h.creds.Get(r.Context(), exporter)
+	if err != nil {
+		if errors.Is(err, snmpx.ErrCredNotFound) {
+			writeError(w, http.StatusNotFound, "no credential configured")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	client := snmpx.NewClient(snmpx.FromCredential(cred))
+	walkCtx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	inv, err := client.Walk(walkCtx, exporter)
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":    false,
+			"error": err.Error(),
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":              true,
+		"sys_descr":       inv.SysDescr,
+		"sys_name":        inv.SysName,
+		"interfaces":      len(inv.Interfaces),
+		"poll_duration_ms": inv.PollDurationMs,
 	})
 }
 

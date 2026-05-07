@@ -74,10 +74,14 @@ services:
       FLOWSCOPE_SNMP_INTERVAL: "15m"
       FLOWSCOPE_SNMP_COMMUNITY: "public"
       FLOWSCOPE_SNMP_WORKERS: "8"
-      # Set to "1" to use the deterministic mock client when there is
-      # no real network reachable from the container. In real deploys,
-      # leave unset and ensure the FlowScope subnet has UDP/161 reach
-      # to your devices.
+      # AES-256-GCM master key for per-exporter credential storage.
+      # MUST be the same value on the api service (set below).
+      # Production: pull from Azure Key Vault via Workload Identity.
+      # Generate with: openssl rand -base64 32
+      FLOWSCOPE_SNMP_KEY: "dev-only-master-key-CHANGE-ME-32-bytes-min"
+      # Mock client: deterministic synthetic inventory keyed by
+      # exporter address. Set to "0" or remove to use the real
+      # gosnmp client against real devices.
       FLOWSCOPE_SNMP_MOCK: "1"
       FLOWSCOPE_METRICS_ADDR: ":9102"
       FLOWSCOPE_LOG_LEVEL: "info"
@@ -119,6 +123,9 @@ services:
     environment:
       FLOWSCOPE_HTTP_ADDR: ":8080"
       FLOWSCOPE_CLICKHOUSE_DSN: "clickhouse://flowscope:flowscope@clickhouse:9000/flowscope"
+      # MUST match the snmp service value above; the api uses it to
+      # encrypt/decrypt credentials posted to /api/snmp/credentials.
+      FLOWSCOPE_SNMP_KEY: "dev-only-master-key-CHANGE-ME-32-bytes-min"
       FLOWSCOPE_LOG_LEVEL: "info"
     mem_limit: 512m
     cpus: 0.5

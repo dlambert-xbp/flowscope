@@ -24,6 +24,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	"github.com/dlambert-xbp/flowscope/internal/obs"
+	"github.com/dlambert-xbp/flowscope/internal/snmpx"
 	"github.com/dlambert-xbp/flowscope/internal/store"
 )
 
@@ -53,13 +54,29 @@ func run() error {
 	}
 	defer conn.Close()
 
+	// Optional SNMP credential store for the Settings → SNMP admin
+	// endpoints. Disabled when FLOWSCOPE_SNMP_KEY is unset; the api
+	// then surfaces the management endpoints as 503 Service
+	// Unavailable so the operator can see why.
+	var creds snmpx.CredentialStore
+	if mk := os.Getenv("FLOWSCOPE_SNMP_KEY"); mk != "" {
+		crypter, err := snmpx.NewCrypter(mk)
+		if err != nil {
+			return fmt.Errorf("snmp crypter: %w", err)
+		}
+		creds = snmpx.NewClickHouseCredentialStore(conn, crypter)
+		slog.Info("snmp credential management enabled")
+	} else {
+		slog.Warn("FLOWSCOPE_SNMP_KEY not set — snmp credential management endpoints will return 503")
+	}
+
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
 	r.Use(requestLogger)
 
-	h := &handlers{conn: conn}
+	h := &handlers{conn: conn, creds: creds}
 	r.Get("/healthz", h.health)
 	r.Get("/api/summary", h.summary)
 	r.Get("/api/flows/recent", h.recentFlows)
@@ -76,6 +93,11 @@ func run() error {
 	r.Get("/api/alerts/summary", h.alertSummary)
 	r.Post("/api/alerts/{id}/ack", h.ackAlert)
 	r.Post("/api/alerts/{id}/close", h.closeAlert)
+	r.Get("/api/snmp/credentials", h.listCredentials)
+	r.Get("/api/snmp/credentials/{exporter}", h.getCredential)
+	r.Put("/api/snmp/credentials/{exporter}", h.putCredential)
+	r.Delete("/api/snmp/credentials/{exporter}", h.deleteCredential)
+	r.Post("/api/snmp/credentials/{exporter}/test", h.testCredential)
 	r.Method("GET", "/metrics", obs.Handler())
 
 	// Live HTML dashboard at /. Served from embedded assets so the

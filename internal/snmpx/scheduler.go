@@ -17,21 +17,29 @@ import (
 // bypass the interval so flapping devices retry on the next tick,
 // and in-flight walks are deduped so a slow device cannot stack
 // work on the worker pool.
+//
+// Credential lookup: for each walk, the scheduler asks creds.Get()
+// for the (decrypted) per-exporter binding. If none is configured
+// the scheduler falls back to the FallbackClient (the old
+// cluster-wide community / mock). This lets the dev loop work with
+// no credential setup while real deployments configure per-target.
 type Scheduler struct {
-	conn        driver.Conn
-	client      Client
-	interval    time.Duration
-	concurrency int
+	conn           driver.Conn
+	creds          CredentialStore
+	fallback       Client
+	interval       time.Duration
+	concurrency    int
 
 	mu         sync.Mutex
-	inFlight   map[string]bool   // exporter → walking now?
+	inFlight   map[string]bool
 	lastWalked map[string]time.Time
 }
 
-// NewScheduler returns a Scheduler that polls each exporter at most
-// once per interval, with at most concurrency walks running at any
-// instant.
-func NewScheduler(conn driver.Conn, client Client, interval time.Duration, concurrency int) *Scheduler {
+// NewScheduler returns a Scheduler. creds may be nil; in that case
+// every walk uses fallback. fallback may also be nil; without it the
+// scheduler logs and skips any exporter without an explicit
+// credential binding.
+func NewScheduler(conn driver.Conn, creds CredentialStore, fallback Client, interval time.Duration, concurrency int) *Scheduler {
 	if interval <= 0 {
 		interval = 15 * time.Minute
 	}
@@ -40,7 +48,8 @@ func NewScheduler(conn driver.Conn, client Client, interval time.Duration, concu
 	}
 	return &Scheduler{
 		conn:        conn,
-		client:      client,
+		creds:       creds,
+		fallback:    fallback,
 		interval:    interval,
 		concurrency: concurrency,
 		inFlight:    make(map[string]bool),
@@ -133,7 +142,12 @@ func (s *Scheduler) walkOne(ctx context.Context, target string) {
 	walkCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	inv, err := s.client.Walk(walkCtx, target)
+	client, err := s.clientFor(walkCtx, target)
+	if err != nil {
+		slog.Warn("snmp: no credential for exporter and no fallback configured", "exporter", target, "err", err)
+		return
+	}
+	inv, err := client.Walk(walkCtx, target)
 	if err != nil {
 		slog.Warn("snmp: walk failed", "exporter", target, "err", err)
 		return
@@ -149,6 +163,27 @@ func (s *Scheduler) walkOne(ctx context.Context, target string) {
 		"duration_ms", inv.PollDurationMs,
 		"status", inv.Status,
 	)
+}
+
+// clientFor returns the SNMP Client to use for target. If a
+// per-exporter credential exists, a new RealClient is built from it.
+// Otherwise the fallback client is used (typically the cluster-wide
+// v2c community or the mock).
+func (s *Scheduler) clientFor(ctx context.Context, target string) (Client, error) {
+	if s.creds != nil {
+		c, err := s.creds.Get(ctx, target)
+		if err == nil {
+			return NewClient(FromCredential(c)), nil
+		}
+		// ErrCredNotFound is the common case; anything else is logged.
+		if err != ErrCredNotFound {
+			slog.Warn("snmp: credential lookup failed", "exporter", target, "err", err)
+		}
+	}
+	if s.fallback != nil {
+		return s.fallback, nil
+	}
+	return nil, fmt.Errorf("no credential and no fallback")
 }
 
 // discoverExporters reads the distinct set of exporters from the

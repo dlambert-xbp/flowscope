@@ -77,24 +77,40 @@ func run() error {
 		}
 	}()
 
-	var client snmpx.Client
-	if mockMode {
-		client = snmpx.NewMock()
-		slog.Info("snmp: using mock client (FLOWSCOPE_SNMP_MOCK=1)")
+	masterKey := os.Getenv("FLOWSCOPE_SNMP_KEY")
+	var creds snmpx.CredentialStore
+	if masterKey != "" {
+		crypter, err := snmpx.NewCrypter(masterKey)
+		if err != nil {
+			return fmt.Errorf("snmp crypter: %w", err)
+		}
+		creds = snmpx.NewClickHouseCredentialStore(conn, crypter)
+		slog.Info("snmp: per-exporter credential store enabled")
 	} else {
-		client = snmpx.NewClient(snmpx.Config{
+		slog.Warn("FLOWSCOPE_SNMP_KEY not set — per-exporter credentials disabled, falling back to env-var community / mock")
+	}
+
+	var fallback snmpx.Client
+	if mockMode {
+		fallback = snmpx.NewMock()
+		slog.Info("snmp: fallback = mock (FLOWSCOPE_SNMP_MOCK=1)")
+	} else {
+		fallback = snmpx.NewClient(snmpx.Config{
+			Version:   "v2c",
 			Community: community,
 			Port:      161,
 			Timeout:   2 * time.Second,
 			Retries:   1,
 		})
+		slog.Info("snmp: fallback = cluster-wide v2c", "community_set", community != "")
 	}
 
-	sched := snmpx.NewScheduler(conn, client, interval, workers)
+	sched := snmpx.NewScheduler(conn, creds, fallback, interval, workers)
 	slog.Info("snmp service starting",
 		"interval", interval.String(),
 		"workers", workers,
-		"mock", mockMode,
+		"creds_enabled", creds != nil,
+		"mock_fallback", mockMode,
 		"metrics", metricsAddr,
 	)
 	return sched.Run(ctx)
