@@ -72,17 +72,19 @@ services:
     environment:
       FLOWSCOPE_CLICKHOUSE_DSN: "clickhouse://flowscope:flowscope@clickhouse:9000/flowscope"
       FLOWSCOPE_SNMP_INTERVAL: "15m"
-      FLOWSCOPE_SNMP_COMMUNITY: "public"
+      # Cluster-wide v2c fallback. Per-exporter v2c / v3 bindings
+      # configured via Settings → SNMP credentials override this.
+      FLOWSCOPE_SNMP_COMMUNITY: "elastiflow"
       FLOWSCOPE_SNMP_WORKERS: "8"
       # AES-256-GCM master key for per-exporter credential storage.
       # MUST be the same value on the api service (set below).
       # Production: pull from Azure Key Vault via Workload Identity.
       # Generate with: openssl rand -base64 32
       FLOWSCOPE_SNMP_KEY: "dev-only-master-key-CHANGE-ME-32-bytes-min"
-      # Mock client: deterministic synthetic inventory keyed by
-      # exporter address. Set to "0" or remove to use the real
-      # gosnmp client against real devices.
-      FLOWSCOPE_SNMP_MOCK: "1"
+      # Real gosnmp client. Set "1" only when there is no network
+      # reachable from the container (returns deterministic synthetic
+      # inventory keyed by exporter address).
+      FLOWSCOPE_SNMP_MOCK: "0"
       FLOWSCOPE_METRICS_ADDR: ":9102"
       FLOWSCOPE_LOG_LEVEL: "info"
     mem_limit: 256m
