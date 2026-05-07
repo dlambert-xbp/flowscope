@@ -1,0 +1,104 @@
+#cloud-config
+# FlowScope ClickHouse VM bootstrap.
+#
+# Tokens replaced at deployment time by clickhouse-vm.bicep:
+#   __CLICKHOUSE_PASSWORD__   ClickHouse `flowscope` user password
+#   __VM_NAME__               VM hostname / cluster identifier
+#
+# Steps:
+#   1. Apt: install ClickHouse server + client from the official repo
+#   2. Filesystem: format /dev/disk/azure/scsi1/lun0 as ext4, mount /var/lib/clickhouse
+#   3. Kernel/limits: raise nofile, disable transparent hugepages (CH guidance)
+#   4. ClickHouse config: bind addresses, listener ports, user creds
+#   5. Start systemd unit, enable on boot
+
+write_files:
+  - path: /etc/clickhouse-server/users.d/flowscope.xml
+    permissions: "0640"
+    owner: clickhouse:clickhouse
+    content: |
+      <clickhouse>
+        <users>
+          <flowscope>
+            <password>__CLICKHOUSE_PASSWORD__</password>
+            <networks>
+              <ip>::/0</ip>
+            </networks>
+            <profile>default</profile>
+            <quota>default</quota>
+            <access_management>1</access_management>
+            <named_collection_control>1</named_collection_control>
+          </flowscope>
+        </users>
+      </clickhouse>
+
+  - path: /etc/clickhouse-server/config.d/listen.xml
+    permissions: "0640"
+    owner: clickhouse:clickhouse
+    content: |
+      <clickhouse>
+        <listen_host>0.0.0.0</listen_host>
+        <listen_host>::</listen_host>
+        <max_open_files>262144</max_open_files>
+      </clickhouse>
+
+  - path: /etc/security/limits.d/clickhouse.conf
+    permissions: "0644"
+    content: |
+      clickhouse soft nofile 262144
+      clickhouse hard nofile 262144
+
+  - path: /etc/sysctl.d/90-flowscope.conf
+    permissions: "0644"
+    content: |
+      vm.max_map_count = 262144
+      net.core.rmem_max = 67108864
+      net.core.wmem_max = 67108864
+
+  - path: /etc/systemd/system/disable-thp.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Disable Transparent Huge Pages (THP) for ClickHouse
+      After=sysinit.target local-fs.target
+      Before=clickhouse-server.service
+      [Service]
+      Type=oneshot
+      ExecStart=/bin/sh -c 'echo never > /sys/kernel/mm/transparent_hugepage/enabled'
+      ExecStart=/bin/sh -c 'echo never > /sys/kernel/mm/transparent_hugepage/defrag'
+      RemainAfterExit=true
+      [Install]
+      WantedBy=basic.target
+
+apt:
+  sources:
+    clickhouse:
+      source: "deb https://packages.clickhouse.com/deb stable main"
+      keyid: 8919F6BD2B48D754
+
+packages:
+  - clickhouse-server
+  - clickhouse-client
+  - xfsprogs
+  - util-linux
+
+runcmd:
+  # 1. Format and mount the data disk under /var/lib/clickhouse
+  - [ bash, -c, "set -e; DEV=/dev/disk/azure/scsi1/lun0; if ! blkid $DEV; then mkfs.ext4 -F -L clickhouse $DEV; fi" ]
+  - [ bash, -c, "echo 'LABEL=clickhouse /var/lib/clickhouse ext4 defaults,nofail,x-systemd.makefs 0 2' >> /etc/fstab" ]
+  - [ systemctl, daemon-reload ]
+  - [ mkdir, -p, /var/lib/clickhouse ]
+  - [ mount, /var/lib/clickhouse ]
+  - [ chown, -R, clickhouse:clickhouse, /var/lib/clickhouse ]
+  # 2. Kernel tuning
+  - [ sysctl, --system ]
+  - [ systemctl, enable, --now, disable-thp.service ]
+  # 3. Bring ClickHouse up and ensure it survives reboot
+  - [ systemctl, enable, --now, clickhouse-server ]
+  # 4. Set the hostname for log clarity
+  - [ hostnamectl, set-hostname, "__VM_NAME__" ]
+
+final_message: |
+  FlowScope ClickHouse bootstrap complete on __VM_NAME__.
+  Native protocol on :9000, HTTP on :8123.
+  User `flowscope` is configured; default user remains unrestricted on localhost only.

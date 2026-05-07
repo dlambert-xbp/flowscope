@@ -1,22 +1,62 @@
+# FlowScope local development stack.
+#
+# Brings up ClickHouse with persistent storage and the Go ingest
+# service. As more services land (api, alert, snmp, gnmi, web), they
+# extend this file.
+#
+# The Python-era stack lives on the `v1` branch.
+
 services:
-  flowscope:
-    build: .
-    image: flowscope:latest
-    container_name: flowscope
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.10
+    container_name: flowscope-clickhouse
     restart: unless-stopped
     ports:
-      - "8080:8080/tcp"     # web dashboard
-      - "2055:2055/udp"     # NetFlow v5/v9/IPFIX
-      - "6343:6343/udp"     # sFlow v5
+      - "8123:8123"   # HTTP interface
+      - "9000:9000"   # native TCP
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
     volumes:
-      - flowscope-data:/data
-    # Cap the container slightly below the host VM (4 vCPU / 16 GiB) so
-    # the host keeps headroom for sshd / journald / docker itself.
-    # mem_limit / cpus are honored by plain `docker compose up` on every
-    # engine; `deploy.resources.limits` is Swarm-only, so we use the
-    # non-Swarm form for reliability.
-    mem_limit: 14g
-    cpus: 3.5
+      - clickhouse-data:/var/lib/clickhouse
+      - clickhouse-logs:/var/log/clickhouse-server
+      - ./deploy/clickhouse/users.d:/etc/clickhouse-server/users.d:ro
+    environment:
+      CLICKHOUSE_DB: flowscope
+      CLICKHOUSE_USER: flowscope
+      CLICKHOUSE_PASSWORD: flowscope
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8123/ping || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+
+  ingest:
+    build:
+      context: .
+      dockerfile: cmd/ingest/Dockerfile
+    image: flowscope-ingest:latest
+    container_name: flowscope-ingest
+    restart: unless-stopped
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    ports:
+      - "2055:2055/udp"   # NetFlow v5/v9/IPFIX
+      - "6343:6343/udp"   # sFlow v5  (parser to follow)
+      - "9100:9100/tcp"   # Prometheus /metrics (when wired)
+    environment:
+      FLOWSCOPE_NETFLOW_ADDR: ":2055"
+      FLOWSCOPE_CLICKHOUSE_DSN: "clickhouse://flowscope:flowscope@clickhouse:9000/flowscope"
+      FLOWSCOPE_LOG_LEVEL: "info"
+    # Sized for a dev box. Production caps come from the Helm chart.
+    mem_limit: 1g
+    cpus: 1.0
 
 volumes:
-  flowscope-data:
+  clickhouse-data:
+  clickhouse-logs:
