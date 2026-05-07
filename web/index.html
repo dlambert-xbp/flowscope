@@ -318,10 +318,35 @@ td.egress  { color: var(--accent-2); }
 }
 .bar-cell .label { position: relative; z-index: 1; }
 
-/* Time series chart */
+/* Clickable drill-down rows in Top Talkers / Top Ports / Protocols. */
+tr.drill-row { cursor: pointer; }
+tr.drill-row:hover td { background: var(--bg-3); }
+tr.drill-row:hover td.proto,
+tr.drill-row:hover td.ingress,
+tr.drill-row:hover td.dim { background: var(--bg-3); }
+tr.drill-row:active td { background: var(--bg-2); }
+
+/* Time series chart — fills its panel body so the chart matches the
+   height set by the sibling panels (Protocols / Top Ports) on the
+   Overview grid. The min-height keeps it sane on narrow viewports
+   where the grid collapses. */
 .timeseries {
     position: relative;
-    height: 220px;
+    width: 100%;
+    height: 100%;
+    min-height: 220px;
+    flex: 1 1 auto;
+}
+.timeseries-host {
+    display: flex;
+    flex-direction: column;
+    margin-bottom: 0;       /* grid-3 controls spacing for siblings */
+}
+.timeseries-host .panel-body {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 240px;
 }
 .ts-legend {
     position: absolute;
@@ -780,6 +805,88 @@ footer .live-stale { color: var(--danger); }
     background: color-mix(in srgb, var(--danger) 15%, transparent);
 }
 
+/* Interface detail modal — wider variant of .modal for the per-interface
+   stats grid + chart. Same overlay/header/footer styling, just sized for
+   real content. */
+.modal.modal-detail {
+    width: min(900px, 92vw);
+    max-width: 92vw;
+    height: min(700px, 88vh);
+    max-height: 88vh;
+    display: flex;
+    flex-direction: column;
+}
+.modal-detail .modal-body {
+    flex: 1 1 auto;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    padding: 14px 18px;
+}
+.iface-modal-stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: 10px;
+}
+.iface-modal-stats .stat {
+    background: var(--bg-2);
+    border: 1px solid var(--line);
+    padding: 8px 10px;
+}
+.iface-modal-stats .stat .k {
+    color: var(--text-faint);
+    font-size: 9px;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    margin-bottom: 3px;
+}
+.iface-modal-stats .stat .v {
+    color: var(--text);
+    font-size: 13px;
+    font-variant-numeric: tabular-nums;
+}
+.iface-modal-stats .stat.up    .v { color: var(--accent); }
+.iface-modal-stats .stat.down  .v { color: var(--danger); }
+.iface-modal-stats .stat.warn  .v { color: var(--accent-2); }
+.iface-modal-chart {
+    flex: 1 1 auto;
+    min-height: 240px;
+    border: 1px solid var(--line);
+    background: var(--bg-2);
+    position: relative;
+    padding: 8px;
+}
+.iface-modal-chart .source-badge {
+    position: absolute;
+    top: 8px; right: 12px;
+    font-size: 10px;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    color: var(--text-faint);
+    z-index: 2;
+}
+.iface-modal-chart .source-badge.counters { color: var(--accent); }
+.iface-modal-chart .source-badge.flows    { color: var(--accent-2); }
+.iface-modal-flag-note {
+    color: var(--text-dim);
+    font-size: 11px;
+    font-style: italic;
+}
+.iface-modal-head-meta {
+    color: var(--text-dim);
+    font-weight: 400;
+    margin-left: 8px;
+    font-size: 11px;
+}
+.iface-flag-icon {
+    color: var(--accent-2);
+    margin-left: 6px;
+    cursor: help;
+}
+tr.clickable-row { cursor: pointer; }
+tr.clickable-row:hover td { background: var(--bg-3); }
+
 /* ===== Phase 4: SNMP page ===== */
 .snmp-chip {
     display: inline-block; margin-left: 6px; padding: 0 6px; font-size: 10px;
@@ -979,6 +1086,7 @@ aside h3.sidebar-h-row {
 <script>
 // ===== State =====
 const RANGE_OPTIONS = [
+    { label: "1m",  seconds: 60    },
     { label: "3m",  seconds: 180   },
     { label: "15m", seconds: 900   },
     { label: "1h",  seconds: 3600  },
@@ -1055,6 +1163,9 @@ const state = {
     activeTab: "overview",
     selectedExporter: null,
     ifindexFilter: null,        // server-side ifindex filter for flows + timeseries
+    talkerFilter: null,         // { a, b } — bidirectional pair filter on Live Flows
+    portFilter: null,           // server-side dst/src port filter on Live Flows
+    protocolFilter: null,       // { num, name } — server-side protocol filter on Live Flows
     timeseriesSeconds: initialRange,
     summary: null,
     devices: [],
@@ -1212,6 +1323,12 @@ function buildParams(extra = {}) {
     const p = new URLSearchParams();
     if (state.selectedExporter) p.set("exporter", state.selectedExporter);
     if (state.ifindexFilter != null) p.set("ifindex", state.ifindexFilter);
+    if (state.talkerFilter) {
+        p.set("talker_a", state.talkerFilter.a);
+        p.set("talker_b", state.talkerFilter.b);
+    }
+    if (state.portFilter != null) p.set("port", state.portFilter);
+    if (state.protocolFilter != null) p.set("protocol", state.protocolFilter.num);
     for (const [k, v] of Object.entries(extra)) p.set(k, v);
     const s = p.toString();
     return s ? "?" + s : "";
@@ -1563,13 +1680,16 @@ function makeTable(id, columns, rows, opts = {}) {
                               ${rows.length === 0 ? "No data yet."
                                                   : "No rows match filter."}
                          </td></tr>`
-                      : visible.map(r => `<tr>${columns.map(c =>
+                      : visible.map(r => {
+                            const rowAttrs = opts.rowAttrs ? opts.rowAttrs(r) : "";
+                            return `<tr${rowAttrs ? " " + rowAttrs : ""}>${columns.map(c =>
                             c.render
                                 ? c.render(r)
                                 : `<td class="${c.cls || ""}">${
                                        escapeHtml(r[c.key] == null ? "" : r[c.key])
                                    }</td>`
-                        ).join("")}</tr>`).join("")
+                        ).join("")}</tr>`;
+                        }).join("")
                     }
                 </tbody>
             </table>
@@ -2187,7 +2307,7 @@ function renderOverview() {
     ).join("");
     return `
         <div class="grid-3">
-            <div class="panel">
+            <div class="panel timeseries-host">
                 <div class="panel-head">
                     <span class="accent">▸</span> ${tsHead}
                     <span class="range-switch" role="group" aria-label="Time range">${rangeButtons}</span>
@@ -2235,7 +2355,12 @@ function renderTopTalkersTable() {
           render: r => `<td class="bar-cell" style="width:25%">
               <div class="bar" style="width:${(r.bytes/max*100).toFixed(1)}%"></div>
           </td>` },
-    ], rows, { defaultSort: "bytes", defaultDir: -1 });
+    ], rows, {
+        defaultSort: "bytes", defaultDir: -1,
+        rowAttrs: r => `class="drill-row" data-drill="talker"`
+            + ` data-talker-a="${escapeHtml(r.src_ip)}"`
+            + ` data-talker-b="${escapeHtml(r.dst_ip)}"`,
+    });
 }
 
 function renderTopPortsTable() {
@@ -2257,7 +2382,10 @@ function renderTopPortsTable() {
               <div class="bar" style="width:${(r.bytes/max*100).toFixed(1)}%"></div>
               <span class="label">${bytesHuman(r.bytes)}</span>
           </td>` },
-    ], rows, { defaultSort: "bytes", defaultDir: -1 });
+    ], rows, {
+        defaultSort: "bytes", defaultDir: -1,
+        rowAttrs: r => `class="drill-row" data-drill="port" data-port="${r.port}"`,
+    });
 }
 
 function renderProtocolTable() {
@@ -2273,7 +2401,12 @@ function renderProtocolTable() {
           </td>` },
         { key: "flows", label: "Flows", cls: "num",
           render: r => `<td class="num dim">${numHuman(r.flows)}</td>` },
-    ], rows, { defaultSort: "bytes", defaultDir: -1 });
+    ], rows, {
+        defaultSort: "bytes", defaultDir: -1,
+        rowAttrs: r => `class="drill-row" data-drill="protocol"`
+            + ` data-proto-num="${r.proto_num != null ? r.proto_num : ""}"`
+            + ` data-proto-name="${escapeHtml(r.protocol)}"`,
+    });
 }
 
 let uplotInstance = null;
@@ -2401,7 +2534,11 @@ function renderInterfaces() {
         { key: "display", label: "Name",
           value: r => r.display,
           render: r => `<td>
-              <span style="font-weight:500">${escapeHtml(r.display)}</span>
+              <span style="font-weight:500">${escapeHtml(r.display)}</span>${
+                  r.flagged ? `<span class="iface-flag-icon" title="${
+                      escapeHtml(r.flag_note || "Marked as possible issue")
+                  }">⚠</span>` : ""
+              }
               <span class="edit-ico"
                     data-edit-iface="${escapeHtml(r.exporter)}|${r.ifindex}"
                     data-current="${escapeHtml(r.label || "")}"
@@ -2430,7 +2567,11 @@ function renderInterfaces() {
               data-exporter="${escapeHtml(r.exporter)}"
               data-ifindex="${r.ifindex}"
               style="color:var(--accent-3);cursor:pointer">view flows ▸</a></td>` },
-    ], rows, { defaultSort: "ingress_bytes", defaultDir: -1 });
+    ], rows, {
+        defaultSort: "ingress_bytes", defaultDir: -1,
+        rowAttrs: r => `class="clickable-row" data-iface-row="${
+            escapeHtml(r.exporter)}|${r.ifindex}"`,
+    });
     return `
         <div class="panel">
             <div class="panel-head">
@@ -2470,6 +2611,282 @@ function wireInterfaceTable() {
             editInterfaceLabel(exp, parseInt(idx, 10), el.dataset.current);
         });
     });
+    // Whole-row click opens the per-interface detail modal. The pencil and
+    // "view flows" anchor stopPropagation above so they don't trigger this.
+    document.querySelectorAll('tr[data-iface-row]').forEach(tr => {
+        tr.addEventListener("click", (ev) => {
+            // Ignore clicks that originated on a child anchor/icon — those
+            // already have their own handler.
+            if (ev.target.closest("a, .edit-ico")) return;
+            const [exp, idx] = tr.dataset.ifaceRow.split("|");
+            openInterfaceModal(exp, parseInt(idx, 10));
+        });
+    });
+}
+
+// ===== Per-interface detail modal =====
+// Opens a wide modal showing all SNMP stats and a live ingress/egress chart
+// (sFlow counter samples preferred; flow-derived fallback for NetFlow-only
+// exporters). Range buttons mirror the Overview chart. The "Mark as possible
+// issue" button toggles a server-side flag persisted in interface_issues.
+let ifaceModalUplot = null;
+
+function openInterfaceModal(exporter, ifindex) {
+    const iface = state.interfaces.find(
+        x => x.exporter === exporter && x.ifindex === ifindex);
+    if (!iface) return;
+
+    state.paused = true;
+    let currentRange = state.timeseriesSeconds || 300;
+    let currentIface = { ...iface };
+    let lastFetchToken = 0;
+
+    const ov = document.createElement("div");
+    ov.className = "modal-overlay";
+    ov.innerHTML = `
+        <div class="modal modal-detail" role="dialog" aria-modal="true"
+             aria-label="Interface ${escapeHtml(iface.name)}">
+            <div class="modal-head" data-role="head"></div>
+            <div class="modal-body">
+                <div class="iface-modal-stats" data-role="stats"></div>
+                <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+                    <span class="range-switch" role="group" aria-label="Time range"
+                          data-role="range">${RANGE_OPTIONS.map(r =>
+                        `<button data-seconds="${r.seconds}"${
+                            currentRange === r.seconds ? ' class="active"' : ""
+                        }>${r.label}</button>`).join("")}</span>
+                    <span data-role="flag-note" class="iface-modal-flag-note"></span>
+                </div>
+                <div class="iface-modal-chart" data-role="chart">
+                    <span class="source-badge" data-role="source"></span>
+                </div>
+            </div>
+            <div class="modal-foot">
+                <button data-act="flag-toggle"></button>
+                <button data-act="close" class="primary">Close</button>
+            </div>
+        </div>`;
+    document.body.appendChild(ov);
+
+    const headEl   = ov.querySelector('[data-role="head"]');
+    const statsEl  = ov.querySelector('[data-role="stats"]');
+    const chartEl  = ov.querySelector('[data-role="chart"]');
+    const sourceEl = ov.querySelector('[data-role="source"]');
+    const rangeEl  = ov.querySelector('[data-role="range"]');
+    const flagBtn  = ov.querySelector('[data-act="flag-toggle"]');
+    const flagNote = ov.querySelector('[data-role="flag-note"]');
+    const closeBtn = ov.querySelector('[data-act="close"]');
+
+    function renderHeader() {
+        const display = currentIface.label || currentIface.name;
+        const aliasBit = currentIface.alias
+            ? ` · ${escapeHtml(currentIface.alias)}` : "";
+        headEl.innerHTML = `
+            <span style="font-weight:500">${escapeHtml(display)}</span>${
+                currentIface.flagged
+                    ? `<span class="iface-flag-icon" title="${
+                          escapeHtml(currentIface.flag_note || "Marked as possible issue")
+                      }">⚠</span>` : ""
+            }
+            <span class="iface-modal-head-meta">
+                if${currentIface.ifindex} · ${escapeHtml(currentIface.exporter)}${aliasBit}
+            </span>`;
+    }
+
+    function statusLabel(v) {
+        // RFC 2863 ifAdminStatus / ifOperStatus enums
+        return ({
+            1: "up", 2: "down", 3: "testing", 4: "unknown",
+            5: "dormant", 6: "notPresent", 7: "lowerLayerDown",
+        })[v] || "—";
+    }
+
+    function statCell(label, val, kind) {
+        return `<div class="stat ${kind || ""}">
+            <div class="k">${escapeHtml(label)}</div>
+            <div class="v">${val}</div>
+        </div>`;
+    }
+
+    function renderStats() {
+        const i = currentIface;
+        const adminKind = i.admin_status === 1 ? "up"
+                       : i.admin_status === 2 ? "down" : "";
+        const operKind  = i.oper_status  === 1 ? "up"
+                       : i.oper_status  === 2 ? "down" : "warn";
+        const errorsTotal   = (i.in_errors  || 0) + (i.out_errors  || 0);
+        const discardsTotal = (i.in_discards|| 0) + (i.out_discards|| 0);
+        statsEl.innerHTML = [
+            statCell("Admin", statusLabel(i.admin_status), adminKind),
+            statCell("Oper",  statusLabel(i.oper_status),  operKind),
+            statCell("Speed", i.speed_bps ? bitsHuman(i.speed_bps / 8) : "—"),
+            statCell("MTU",   i.mtu || "—"),
+            statCell("MAC",   i.mac ? escapeHtml(i.mac) : "—"),
+            statCell("Ingress",
+                `${bytesHuman(i.ingress_bytes)}<br>
+                 <span class="dim" style="font-size:10px">${numHuman(i.ingress_packets)} pkts</span>`),
+            statCell("Egress",
+                `${bytesHuman(i.egress_bytes)}<br>
+                 <span class="dim" style="font-size:10px">${numHuman(i.egress_packets)} pkts</span>`),
+            statCell("Errors (in / out)",
+                `${numHuman(i.in_errors || 0)} / ${numHuman(i.out_errors || 0)}`,
+                errorsTotal > 0 ? "warn" : ""),
+            statCell("Discards (in / out)",
+                `${numHuman(i.in_discards || 0)} / ${numHuman(i.out_discards || 0)}`,
+                discardsTotal > 0 ? "warn" : ""),
+            statCell("Last seen", timeAgo(i.last_seen)),
+        ].join("");
+    }
+
+    function renderFlagControls() {
+        if (currentIface.flagged) {
+            flagBtn.textContent = "Clear flag";
+            flagBtn.className   = "danger";
+            flagNote.textContent = currentIface.flag_note
+                ? `Flagged: ${currentIface.flag_note}` : "Flagged.";
+        } else {
+            flagBtn.textContent = "Mark as possible issue";
+            flagBtn.className   = "";
+            flagNote.textContent = "";
+        }
+    }
+
+    function destroyChart() {
+        if (ifaceModalUplot) {
+            try { ifaceModalUplot.destroy(); } catch (e) { /* ignore */ }
+            ifaceModalUplot = null;
+        }
+    }
+
+    async function loadChart() {
+        const token = ++lastFetchToken;
+        let resp;
+        try {
+            resp = await api(
+                `/api/interfaces/${encodeURIComponent(exporter)}/${ifindex}` +
+                `/timeseries?seconds=${currentRange}`);
+        } catch (e) {
+            sourceEl.textContent = "ERROR";
+            sourceEl.className   = "source-badge";
+            return;
+        }
+        if (token !== lastFetchToken) return;     // stale response
+
+        sourceEl.textContent = resp.source === "counters"
+            ? "SOURCE · COUNTERS" : "SOURCE · FLOWS";
+        sourceEl.className = "source-badge " + (resp.source || "");
+
+        const n = resp.ingress.length;
+        const xs = new Array(n);
+        for (let i = 0; i < n; i++) xs[i] = resp.start_ts + i * resp.bucket_size;
+
+        const css      = getComputedStyle(document.documentElement);
+        const cssVar   = (name) => css.getPropertyValue(name).trim();
+        const strokeIn  = cssVar("--chart-ingress-stroke") || cssVar("--accent");
+        const strokeOut = cssVar("--chart-egress-stroke")  || cssVar("--accent-2");
+        const fillIn    = cssVar("--chart-ingress-fill");
+        const fillOut   = cssVar("--chart-egress-fill");
+        const gridColor = cssVar("--line");
+        const tickColor = cssVar("--text-faint");
+
+        destroyChart();
+        const opts = {
+            width:  chartEl.clientWidth  || 800,
+            height: chartEl.clientHeight || 240,
+            padding: [16, 12, 0, 12],
+            scales: {
+                x: { time: true },
+                y: { range: (_u, _d, dataMax) => [0, Math.max(1, dataMax)] },
+            },
+            series: [
+                {},
+                { label: "ingress", stroke: strokeIn,  fill: fillIn,  width: 1.5,
+                  value: (_u, v) => v == null ? "—" : bytesHuman(v) + "/s" },
+                { label: "egress",  stroke: strokeOut, fill: fillOut, width: 1.5,
+                  value: (_u, v) => v == null ? "—" : bytesHuman(v) + "/s" },
+            ],
+            axes: [
+                { stroke: tickColor, grid: { stroke: gridColor, width: 1 },
+                  ticks: { stroke: gridColor, width: 1 } },
+                { stroke: tickColor, grid: { stroke: gridColor, width: 1 },
+                  ticks: { stroke: gridColor, width: 1 },
+                  values: (_u, vals) => vals.map(v => bytesHuman(v) + "/s"),
+                  size: 64 },
+            ],
+            cursor: {
+                drag: { x: false, y: false, setScale: false },
+                points: { size: 6 },
+            },
+            legend: { live: true },
+        };
+        ifaceModalUplot = new uPlot(opts, [xs, resp.ingress, resp.egress], chartEl);
+    }
+
+    rangeEl.addEventListener("click", (ev) => {
+        const btn = ev.target.closest("button[data-seconds]");
+        if (!btn) return;
+        currentRange = parseInt(btn.dataset.seconds, 10);
+        rangeEl.querySelectorAll("button").forEach(b =>
+            b.classList.toggle("active", b === btn));
+        loadChart();
+    });
+
+    flagBtn.addEventListener("click", async () => {
+        try {
+            const flagPath = `/api/interfaces/${encodeURIComponent(exporter)}/${ifindex}/flag`;
+            if (currentIface.flagged) {
+                await apiSend(flagPath, "DELETE");
+                currentIface.flagged   = false;
+                currentIface.flag_note = "";
+            } else {
+                const note = await appPrompt(
+                    "Mark as possible issue",
+                    "Add an optional note (leave blank to flag without one):", "");
+                // appPrompt clears state.paused on close; our modal is still
+                // open, so re-pause to keep auto-refresh suppressed.
+                state.paused = true;
+                if (note === null) return;        // cancelled
+                const j = await apiSend(flagPath, "POST", { note: note || "" });
+                currentIface.flagged   = true;
+                currentIface.flag_note = (j && j.flag_note) || note || "";
+            }
+            // Mirror the change into state.interfaces so the underlying
+            // table picks up the ⚠ on the next soft refresh.
+            const live = state.interfaces.find(
+                x => x.exporter === exporter && x.ifindex === ifindex);
+            if (live) {
+                live.flagged   = currentIface.flagged;
+                live.flag_note = currentIface.flag_note;
+            }
+            renderHeader();
+            renderFlagControls();
+            // Re-render the underlying interfaces table so the ⚠ appears
+            // immediately rather than waiting for the next refresh.
+            if (state.activeTab === "interfaces") {
+                softReplaceTable("interfaces", renderInterfaces());
+                wireInterfaceTable();
+            }
+        } catch (e) {
+            await appAlert("Flag failed", "Could not update flag: " + e.message);
+            state.paused = true;
+        }
+    });
+
+    function close() {
+        destroyChart();
+        ov.remove();
+        document.removeEventListener("keydown", onKey, true);
+        state.paused = false;
+    }
+    closeBtn.addEventListener("click", close);
+    ov.addEventListener("click", (ev) => { if (ev.target === ov) close(); });
+    const onKey = (ev) => { if (ev.key === "Escape") close(); };
+    document.addEventListener("keydown", onKey, true);
+
+    renderHeader();
+    renderStats();
+    renderFlagControls();
+    loadChart();
 }
 
 // ----- Live flows tab -----
@@ -2485,6 +2902,20 @@ function renderFlows() {
     if (state.ifindexFilter != null) {
         chips.push(`<span class="filter-chip">IFINDEX: ${escapeHtml(state.ifindexFilter)}
             <span class="x" data-clear="ifindex">×</span></span>`);
+    }
+    if (state.talkerFilter) {
+        const t = state.talkerFilter;
+        chips.push(`<span class="filter-chip">TALKER: ${escapeHtml(t.a)} ↔ ${escapeHtml(t.b)}
+            <span class="x" data-clear="talker">×</span></span>`);
+    }
+    if (state.portFilter != null) {
+        chips.push(`<span class="filter-chip">PORT: ${escapeHtml(state.portFilter)}
+            <span class="x" data-clear="port">×</span></span>`);
+    }
+    if (state.protocolFilter != null) {
+        const p = state.protocolFilter;
+        chips.push(`<span class="filter-chip">PROTO: ${escapeHtml(p.name || p.num)}
+            <span class="x" data-clear="protocol">×</span></span>`);
     }
 
     if (!state.flows.length) {
@@ -2571,7 +3002,10 @@ function wireFlowsControls() {
                     x.classList.remove("active");
                 });
             }
-            if (w === "ifindex") state.ifindexFilter = null;
+            if (w === "ifindex")  state.ifindexFilter   = null;
+            if (w === "talker")   state.talkerFilter    = null;
+            if (w === "port")     state.portFilter      = null;
+            if (w === "protocol") state.protocolFilter  = null;
             // Re-render the flows tab so the chip disappears immediately.
             // Don't clear state.flows — it'd flash the table empty before
             // the broader fetch lands.
@@ -3292,8 +3726,48 @@ document.addEventListener("focusout", (ev) => {
     state.paused = false;
 });
 
+// Drill-down click delegation: clicking a row in the Top Talkers / Top Ports /
+// Protocols tables jumps to the Live Flows tab with the matching server-side
+// filter applied. Wired ONCE at boot on document.body so soft-tick tbody
+// rebuilds (which discard tr-level listeners) don't lose the behavior.
+function wireDrillDownDelegation() {
+    document.body.addEventListener("click", (ev) => {
+        const row = ev.target.closest("tr.drill-row");
+        if (!row) return;
+        const drill = row.dataset.drill;
+        if (drill === "talker") {
+            state.talkerFilter = {
+                a: row.dataset.talkerA,
+                b: row.dataset.talkerB,
+            };
+        } else if (drill === "port") {
+            const n = parseInt(row.dataset.port, 10);
+            state.portFilter = isNaN(n) ? null : n;
+        } else if (drill === "protocol") {
+            const num = parseInt(row.dataset.protoNum, 10);
+            state.protocolFilter = isNaN(num) ? null : {
+                num,
+                name: row.dataset.protoName || String(num),
+            };
+        } else {
+            return;
+        }
+        // Switch tab + immediate render per render-sync feedback. Clear the
+        // stale flow list so the table doesn't briefly show old rows under a
+        // new filter chip.
+        state.activeTab = "flows";
+        document.querySelectorAll(".tab").forEach(t => {
+            t.classList.toggle("active", t.dataset.tab === "flows");
+        });
+        state.flows = [];
+        renderTab();
+        refreshAll();
+    });
+}
+
 // ===== Boot =====
 bootstrapFolders();
+wireDrillDownDelegation();
 refreshAll();
 setInterval(autoRefresh, REFRESH_INTERVAL_MS);
 // Independent 1s heartbeat keeps time-derived UI current — "X seconds ago"
