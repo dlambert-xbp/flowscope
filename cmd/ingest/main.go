@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/dlambert-xbp/flowscope/internal/netflow"
+	"github.com/dlambert-xbp/flowscope/internal/obs"
 	"github.com/dlambert-xbp/flowscope/internal/record"
 	"github.com/dlambert-xbp/flowscope/internal/sflow"
 	"github.com/dlambert-xbp/flowscope/internal/store"
@@ -45,6 +46,7 @@ func run() error {
 
 	netflowAddr := envOr("FLOWSCOPE_NETFLOW_ADDR", ":2055")
 	sflowAddr := envOr("FLOWSCOPE_SFLOW_ADDR", ":6343")
+	metricsAddr := envOr("FLOWSCOPE_METRICS_ADDR", ":9100")
 	chDSN := envOr("FLOWSCOPE_CLICKHOUSE_DSN", "")
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -97,7 +99,7 @@ func run() error {
 	templateCache := netflow.NewTemplateCache()
 
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(3)
 	go func() {
 		defer wg.Done()
 		if err := runNetFlowListener(ctx, netflowAddr, flowEmitter, templateCache); err != nil {
@@ -110,10 +112,18 @@ func run() error {
 			slog.Error("sflow listener exited", "err", err)
 		}
 	}()
+	go func() {
+		defer wg.Done()
+		if err := obs.ServeMetrics(ctx, metricsAddr); err != nil {
+			slog.Error("metrics server exited", "err", err)
+		}
+	}()
+	go ringSizeReporter(ctx, ring)
 
 	slog.Info("flowscope ingest started",
 		"netflow", netflowAddr,
 		"sflow", sflowAddr,
+		"metrics", metricsAddr,
 		"ring_capacity", ringCapacity,
 		"clickhouse", chDSN != "",
 	)
@@ -162,24 +172,35 @@ func runNetFlowListener(ctx context.Context, addr string, emitter *record.Emitte
 		if n < 4 {
 			continue
 		}
+		obs.UDPPacketsReceived.WithLabelValues("netflow").Inc()
 		exporter := src.Addr().Unmap()
 		version := binary.BigEndian.Uint16(buf[0:2])
 		scratch = scratch[:0]
+		var protocol string
 		switch version {
 		case 5:
+			protocol = "netflow.v5"
 			scratch, err = netflow.ParseV5(buf[:n], exporter, scratch)
-		case 9, 10:
+		case 9:
+			protocol = "netflow.v9"
+			scratch, err = netflow.ParseV9OrIPFIX(cache, buf[:n], exporter, scratch)
+		case 10:
+			protocol = "ipfix"
 			scratch, err = netflow.ParseV9OrIPFIX(cache, buf[:n], exporter, scratch)
 		default:
+			obs.ParseErrorsTotal.WithLabelValues("netflow", "unknown_version").Inc()
 			slog.Debug("unhandled netflow version", "version", version, "src", src)
 			continue
 		}
 		if err != nil {
+			obs.ParseErrorsTotal.WithLabelValues(protocol, parseErrReason(err)).Inc()
 			slog.Debug("netflow parse error", "version", version, "err", err, "src", src)
 			continue
 		}
+		obs.ParseRecordsTotal.WithLabelValues(protocol, "flow").Add(float64(len(scratch)))
 		for _, f := range scratch {
 			if err := emitter.Emit(ctx, f); err != nil {
+				obs.EmitErrorsTotal.WithLabelValues("flow").Inc()
 				slog.Warn("emit failed", "err", err)
 			}
 		}
@@ -211,24 +232,75 @@ func runSFlowListener(ctx context.Context, addr string, flowEmitter *record.Emit
 		if n < 28 {
 			continue
 		}
+		obs.UDPPacketsReceived.WithLabelValues("sflow").Inc()
 		fallback := src.Addr().Unmap()
 		flowScratch = flowScratch[:0]
 		counterScratch = counterScratch[:0]
 		flowScratch, counterScratch, err = sflow.Parse(buf[:n], fallback, flowScratch, counterScratch)
 		if err != nil {
+			obs.ParseErrorsTotal.WithLabelValues("sflow.v5", parseErrReason(err)).Inc()
 			slog.Debug("sflow parse error", "err", err, "src", src)
 			continue
 		}
+		if len(flowScratch) > 0 {
+			obs.ParseRecordsTotal.WithLabelValues("sflow.v5", "flow").Add(float64(len(flowScratch)))
+		}
+		if len(counterScratch) > 0 {
+			obs.ParseRecordsTotal.WithLabelValues("sflow.v5", "counter").Add(float64(len(counterScratch)))
+		}
 		for _, f := range flowScratch {
 			if err := flowEmitter.Emit(ctx, f); err != nil {
+				obs.EmitErrorsTotal.WithLabelValues("flow").Inc()
 				slog.Warn("flow emit failed", "err", err)
 			}
 		}
 		for _, c := range counterScratch {
 			if err := counterEmitter.Emit(ctx, c); err != nil {
+				obs.EmitErrorsTotal.WithLabelValues("counter").Inc()
 				slog.Warn("counter emit failed", "err", err)
 			}
 		}
+	}
+}
+
+// ringSizeReporter periodically samples the hot ring size and updates
+// the obs.RingSize gauge. Ring.Push is on the hot path and shouldn't
+// pay for a metrics call per record; sampling at 1 Hz is plenty for
+// the dashboard.
+func ringSizeReporter(ctx context.Context, ring *record.Ring) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			obs.RingSize.Set(float64(ring.Len()))
+		}
+	}
+}
+
+// parseErrReason classifies parse errors into stable Prometheus label
+// values. Unknown errors fall back to "other" so the cardinality stays
+// bounded.
+func parseErrReason(err error) string {
+	switch {
+	case errors.Is(err, netflow.ErrShortPacket), errors.Is(err, sflow.ErrShortPacket):
+		return "short_packet"
+	case errors.Is(err, netflow.ErrBadVersion), errors.Is(err, sflow.ErrBadVersion):
+		return "bad_version"
+	case errors.Is(err, netflow.ErrBadCount):
+		return "bad_count"
+	case errors.Is(err, netflow.ErrTruncated), errors.Is(err, sflow.ErrTruncated):
+		return "truncated"
+	case errors.Is(err, netflow.ErrV9BadHeader):
+		return "bad_header"
+	case errors.Is(err, netflow.ErrV9BadFlowsetLen):
+		return "bad_flowset_len"
+	case errors.Is(err, sflow.ErrAddressKind):
+		return "bad_agent_addr"
+	default:
+		return "other"
 	}
 }
 

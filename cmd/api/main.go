@@ -23,6 +23,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
+	"github.com/dlambert-xbp/flowscope/internal/obs"
 	"github.com/dlambert-xbp/flowscope/internal/store"
 )
 
@@ -62,6 +63,7 @@ func run() error {
 	r.Get("/healthz", h.health)
 	r.Get("/api/summary", h.summary)
 	r.Get("/api/flows/recent", h.recentFlows)
+	r.Method("GET", "/metrics", obs.Handler())
 
 	// Live HTML dashboard at /. Served from embedded assets so the
 	// binary is self-contained.

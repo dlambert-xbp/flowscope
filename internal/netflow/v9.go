@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dlambert-xbp/flowscope/internal/obs"
 	"github.com/dlambert-xbp/flowscope/internal/record"
 )
 
@@ -137,13 +138,20 @@ func (c *TemplateCache) get(k templateKey) ([]TemplateField, bool) {
 	c.mu.RLock()
 	t, ok := c.templates[k]
 	c.mu.RUnlock()
+	if ok {
+		obs.TemplateCacheHits.Inc()
+	} else {
+		obs.TemplateCacheMisses.Inc()
+	}
 	return t, ok
 }
 
 func (c *TemplateCache) put(k templateKey, fields []TemplateField) {
 	c.mu.Lock()
 	c.templates[k] = fields
+	size := len(c.templates)
 	c.mu.Unlock()
+	obs.TemplateCacheSize.Set(float64(size))
 }
 
 // ParseV9OrIPFIX decodes a v9 or IPFIX datagram, dispatching on the

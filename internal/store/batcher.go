@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
+	"github.com/dlambert-xbp/flowscope/internal/obs"
 	"github.com/dlambert-xbp/flowscope/internal/record"
 )
 
@@ -127,7 +128,16 @@ func (b *FlowBatcher) flush(ctx context.Context) error {
 	b.buf = make([]record.Flow, 0, b.maxSize)
 	b.mu.Unlock()
 
-	return b.write(ctx, batch)
+	start := time.Now()
+	err := b.write(ctx, batch)
+	obs.BatchFlushDuration.WithLabelValues("flows").Observe(time.Since(start).Seconds())
+	if err != nil {
+		obs.BatchFlushesTotal.WithLabelValues("flows", "error").Inc()
+		return err
+	}
+	obs.BatchFlushesTotal.WithLabelValues("flows", "ok").Inc()
+	obs.BatchRowsTotal.WithLabelValues("flows").Add(float64(len(batch)))
+	return nil
 }
 
 func (b *FlowBatcher) write(ctx context.Context, batch []record.Flow) error {

@@ -1,0 +1,124 @@
+// Package obs centralises FlowScope observability — Prometheus
+// metrics, structured logging helpers, and the small HTTP server that
+// exposes /metrics on services that don't already run an HTTP stack
+// (today: cmd/ingest).
+//
+// Every counter visible on the Overview dashboard's "Receiver health"
+// tile must originate here. Adding a new failure mode means adding the
+// counter in the same PR — see VISION.md §11 #6.
+package obs
+
+import (
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+)
+
+// Listener / receiver metrics.
+var (
+	// UDPPacketsReceived counts datagrams accepted from the kernel
+	// per listener. Drops at the kernel buffer level are not yet
+	// counted — that requires reading /proc/net/snmp UdpInErrors
+	// or SO_RXQ_OVFL, both Linux-only. TODO.
+	UDPPacketsReceived = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "flowscope_udp_packets_received_total",
+			Help: "Total UDP datagrams received per listener.",
+		},
+		[]string{"listener"},
+	)
+
+	// ParseRecordsTotal counts records emitted by parsers, by
+	// protocol (netflow.v5 / netflow.v9 / ipfix / sflow.v5) and
+	// kind (flow / counter).
+	ParseRecordsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "flowscope_parse_records_total",
+			Help: "Total records produced by parsers, by protocol and kind.",
+		},
+		[]string{"protocol", "kind"},
+	)
+
+	// ParseErrorsTotal counts parse failures. Reasons are short
+	// stable identifiers (short_packet, bad_version, truncated,
+	// template_miss, ...).
+	ParseErrorsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "flowscope_parse_errors_total",
+			Help: "Total parse errors by protocol and reason.",
+		},
+		[]string{"protocol", "reason"},
+	)
+)
+
+// NetFlow v9 / IPFIX template cache metrics.
+var (
+	TemplateCacheHits = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "flowscope_template_cache_hits_total",
+			Help: "Total NetFlow v9 / IPFIX template lookup hits (data flowsets decoded).",
+		},
+	)
+
+	TemplateCacheMisses = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "flowscope_template_cache_misses_total",
+			Help: "Total NetFlow v9 / IPFIX template lookup misses (data flowsets dropped).",
+		},
+	)
+
+	TemplateCacheSize = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "flowscope_template_cache_size",
+			Help: "Number of templates currently cached.",
+		},
+	)
+)
+
+// Storage / batcher metrics.
+var (
+	BatchFlushesTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "flowscope_batch_flushes_total",
+			Help: "Total batch flushes by table and result (ok / error).",
+		},
+		[]string{"table", "result"},
+	)
+
+	BatchRowsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "flowscope_batch_rows_total",
+			Help: "Total rows successfully written to ClickHouse, by table.",
+		},
+		[]string{"table"},
+	)
+
+	BatchFlushDuration = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "flowscope_batch_flush_duration_seconds",
+			Help:    "Latency of batch flush to ClickHouse, by table.",
+			Buckets: prometheus.ExponentialBucketsRange(0.001, 5, 12),
+		},
+		[]string{"table"},
+	)
+)
+
+// Hot ring metrics.
+var (
+	RingSize = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "flowscope_ring_size",
+			Help: "Current number of records in the in-process flow ring.",
+		},
+	)
+)
+
+// Emit fan-out metrics.
+var (
+	EmitErrorsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "flowscope_emit_errors_total",
+			Help: "Errors returned by sinks during Emit fan-out, by emitter type.",
+		},
+		[]string{"emitter"},
+	)
+)

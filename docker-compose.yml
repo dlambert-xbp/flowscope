@@ -48,8 +48,8 @@ services:
         condition: service_healthy
     ports:
       - "2055:2055/udp"   # NetFlow v5/v9/IPFIX
-      - "6343:6343/udp"   # sFlow v5  (parser to follow)
-      - "9100:9100/tcp"   # Prometheus /metrics (when wired)
+      - "6343:6343/udp"   # sFlow v5
+      - "9100:9100/tcp"   # Prometheus /metrics
     environment:
       FLOWSCOPE_NETFLOW_ADDR: ":2055"
       FLOWSCOPE_CLICKHOUSE_DSN: "clickhouse://flowscope:flowscope@clickhouse:9000/flowscope"

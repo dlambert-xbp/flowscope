@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
+	"github.com/dlambert-xbp/flowscope/internal/obs"
 	"github.com/dlambert-xbp/flowscope/internal/record"
 )
 
@@ -117,7 +118,17 @@ func (b *CounterBatcher) flush(ctx context.Context) error {
 	batch := b.buf
 	b.buf = make([]record.CounterSample, 0, b.maxSize)
 	b.mu.Unlock()
-	return b.write(ctx, batch)
+
+	start := time.Now()
+	err := b.write(ctx, batch)
+	obs.BatchFlushDuration.WithLabelValues("iface_counter_samples").Observe(time.Since(start).Seconds())
+	if err != nil {
+		obs.BatchFlushesTotal.WithLabelValues("iface_counter_samples", "error").Inc()
+		return err
+	}
+	obs.BatchFlushesTotal.WithLabelValues("iface_counter_samples", "ok").Inc()
+	obs.BatchRowsTotal.WithLabelValues("iface_counter_samples").Add(float64(len(batch)))
+	return nil
 }
 
 func (b *CounterBatcher) write(ctx context.Context, batch []record.CounterSample) error {
