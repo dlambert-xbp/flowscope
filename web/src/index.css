@@ -1,0 +1,36 @@
+@import "tailwindcss";
+
+/* FlowScope design tokens — trading-terminal palette from the
+   approved mock at mock/dashboard-final.html. Single accent
+   (signal-orange), semantic-only state colors, monospace data,
+   IBM Plex throughout. */
+@theme {
+  --color-ink: #0c0d0e;
+  --color-surf: #131416;
+  --color-raise: #181a1d;
+  --color-hover: #1c2026;
+  --color-line: #23262b;
+
+  --color-text: #e8e6e0;
+  --color-dim: #9a958c;
+  --color-faint: #6b6862;
+
+  --color-accent: #ff5b1f;
+  --color-accent-2: #d2451a;
+
+  --color-crit: #e04646;
+  --color-warn: #d4a017;
+  --color-ok: #5a9c5f;
+
+  --font-sans: 'IBM Plex Sans', system-ui, -apple-system, sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, monospace;
+}
+
+html, body, #root { height: 100%; }
+body {
+  font-family: var(--font-sans);
+  font-feature-settings: 'cv11', 'ss01';
+  letter-spacing: -0.005em;
+}
+
+.tabular { font-variant-numeric: tabular-nums; }

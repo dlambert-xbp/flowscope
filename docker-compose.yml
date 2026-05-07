@@ -68,13 +68,27 @@ services:
       clickhouse:
         condition: service_healthy
     ports:
-      - "8080:8080/tcp"   # HTTP — JSON API + live HTML at /
+      - "8080:8080/tcp"   # HTTP — JSON API + placeholder live HTML at /
     environment:
       FLOWSCOPE_HTTP_ADDR: ":8080"
       FLOWSCOPE_CLICKHOUSE_DSN: "clickhouse://flowscope:flowscope@clickhouse:9000/flowscope"
       FLOWSCOPE_LOG_LEVEL: "info"
     mem_limit: 512m
     cpus: 0.5
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    image: flowscope-web:latest
+    container_name: flowscope-web
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "80:80/tcp"   # React SPA via nginx; /api/* proxied to api:8080
+    mem_limit: 256m
+    cpus: 0.25
 
 volumes:
   clickhouse-data:
