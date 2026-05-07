@@ -312,6 +312,13 @@ function withFilters(url: string, filters: URLSearchParams): string {
 export const fmt = {
   num: (n: number | null | undefined) =>
     n == null ? '—' : new Intl.NumberFormat('en-US').format(n),
+  compact: (n: number | null | undefined) => {
+    if (n == null) return '—'
+    if (n < 1000) return String(n)
+    if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k`
+    if (n < 1_000_000_000) return `${(n / 1_000_000).toFixed(n < 10_000_000 ? 1 : 0)}M`
+    return `${(n / 1_000_000_000).toFixed(1)}B`
+  },
   bytes: (n: number | null | undefined) => {
     if (n == null) return '—'
     const u = ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB']
