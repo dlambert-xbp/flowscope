@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react'
+import { Fragment, useState, type ReactNode } from 'react'
 import { fmt, labelExporter, labelInterface } from '../api'
 import type { InterfaceRow } from '../api'
 import { InterfaceChart } from './InterfaceChart'
@@ -73,37 +73,45 @@ export function Interfaces({
               const eLbl = labelExporter(r)
               const iLbl = labelInterface(r)
               return (
-                <tr key={`${r.exporter}_${r.ifindex}`} className="hover:bg-surface">
-                  <td>
-                    <TwoLine primary={eLbl.primary} secondary={eLbl.secondary || undefined} />
-                  </td>
-                  <td>
-                    <TwoLine primary={iLbl.primary} secondary={iLbl.secondary || undefined} />
-                  </td>
-                  <td className="r n">{fmt.bps(r.in_bps_latest)}</td>
-                  <td className="r n">{fmt.bps(r.out_bps_latest)}</td>
-                  <td className="r n text-accent">{fmt.bps(r.in_bps_peak)}</td>
-                  <td className="r n text-ok">{fmt.bps(r.out_bps_peak)}</td>
-                  <td className="r n text-faint">{fmt.time(r.last_seen).slice(11, 19)}</td>
-                  <td className="r">
-                    <button
-                      className={`text-[11px] font-mono ${isActive ? 'text-text' : 'text-accent hover:underline'}`}
-                      onClick={() =>
-                        setActive(
-                          isActive ? null : { exporter: r.exporter, ifindex: r.ifindex },
-                        )
-                      }
-                    >
-                      {isActive ? '× close' : 'chart →'}
-                    </button>
-                  </td>
-                </tr>
+                <Fragment key={`${r.exporter}_${r.ifindex}`}>
+                  <tr className="hover:bg-surface">
+                    <td>
+                      <TwoLine primary={eLbl.primary} secondary={eLbl.secondary || undefined} />
+                    </td>
+                    <td>
+                      <TwoLine primary={iLbl.primary} secondary={iLbl.secondary || undefined} />
+                    </td>
+                    <td className="r n">{fmt.bps(r.in_bps_latest)}</td>
+                    <td className="r n">{fmt.bps(r.out_bps_latest)}</td>
+                    <td className="r n text-accent">{fmt.bps(r.in_bps_peak)}</td>
+                    <td className="r n text-ok">{fmt.bps(r.out_bps_peak)}</td>
+                    <td className="r n text-faint">{fmt.time(r.last_seen).slice(11, 19)}</td>
+                    <td className="r">
+                      <button
+                        className={`text-[11px] font-mono ${isActive ? 'text-text' : 'text-accent hover:underline'}`}
+                        onClick={() =>
+                          setActive(
+                            isActive ? null : { exporter: r.exporter, ifindex: r.ifindex },
+                          )
+                        }
+                      >
+                        {isActive ? '× close' : 'chart →'}
+                      </button>
+                    </td>
+                  </tr>
+                  {isActive && (
+                    <tr>
+                      <td colSpan={8} style={{ padding: 0, borderBottom: 'none' }}>
+                        <InterfaceChart exporter={r.exporter} ifindex={r.ifindex} />
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
               )
             })}
           </tbody>
         </table>
       )}
-      {active && <InterfaceChart exporter={active.exporter} ifindex={active.ifindex} />}
     </section>
   )
 }

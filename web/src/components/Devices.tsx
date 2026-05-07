@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { useState, type ReactNode } from 'react'
+import { Fragment, useState, type ReactNode } from 'react'
 import { api, fmt, labelExporter, labelInterface } from '../api'
 import type { Device, DeviceInventory, InterfaceRow, RecentFlow } from '../api'
 import { InterfaceChart } from './InterfaceChart'
@@ -549,31 +549,37 @@ function InterfacesTab({ exporter }: { exporter: string }) {
               const lbl = labelInterface(i)
               const isActive = activeIfindex === i.ifindex
               return (
-                <tr key={i.ifindex} className="hover:bg-surface">
-                  <td>
-                    <TwoLine primary={lbl.primary} secondary={lbl.secondary || undefined} />
-                  </td>
-                  <td className="r n">{fmt.bps(i.in_bps_latest)}</td>
-                  <td className="r n">{fmt.bps(i.out_bps_latest)}</td>
-                  <td className="r n text-accent">{fmt.bps(i.in_bps_peak)}</td>
-                  <td className="r n text-ok">{fmt.bps(i.out_bps_peak)}</td>
-                  <td className="r n text-faint">{fmt.time(i.last_seen).slice(11, 19)}</td>
-                  <td className="r">
-                    <button
-                      className={`text-[11px] font-mono ${isActive ? 'text-text' : 'text-accent hover:underline'}`}
-                      onClick={() => setActiveIfindex(isActive ? null : i.ifindex)}
-                    >
-                      {isActive ? '× close' : 'chart →'}
-                    </button>
-                  </td>
-                </tr>
+                <Fragment key={i.ifindex}>
+                  <tr className="hover:bg-surface">
+                    <td>
+                      <TwoLine primary={lbl.primary} secondary={lbl.secondary || undefined} />
+                    </td>
+                    <td className="r n">{fmt.bps(i.in_bps_latest)}</td>
+                    <td className="r n">{fmt.bps(i.out_bps_latest)}</td>
+                    <td className="r n text-accent">{fmt.bps(i.in_bps_peak)}</td>
+                    <td className="r n text-ok">{fmt.bps(i.out_bps_peak)}</td>
+                    <td className="r n text-faint">{fmt.time(i.last_seen).slice(11, 19)}</td>
+                    <td className="r">
+                      <button
+                        className={`text-[11px] font-mono ${isActive ? 'text-text' : 'text-accent hover:underline'}`}
+                        onClick={() => setActiveIfindex(isActive ? null : i.ifindex)}
+                      >
+                        {isActive ? '× close' : 'chart →'}
+                      </button>
+                    </td>
+                  </tr>
+                  {isActive && (
+                    <tr>
+                      <td colSpan={7} style={{ padding: 0, borderBottom: 'none' }}>
+                        <InterfaceChart exporter={exporter} ifindex={i.ifindex} />
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
               )
             })}
           </tbody>
         </table>
-      )}
-      {activeIfindex !== null && (
-        <InterfaceChart exporter={exporter} ifindex={activeIfindex} />
       )}
     </div>
   )
