@@ -10,12 +10,13 @@ services:
       - "6343:6343/udp"     # sFlow v5
     volumes:
       - flowscope-data:/data
-    # Optional: lock down resource usage
-    deploy:
-      resources:
-        limits:
-          memory: 4G
-          cpus: "2.0"
+    # Cap the container slightly below the host VM (4 vCPU / 16 GiB) so
+    # the host keeps headroom for sshd / journald / docker itself.
+    # mem_limit / cpus are honored by plain `docker compose up` on every
+    # engine; `deploy.resources.limits` is Swarm-only, so we use the
+    # non-Swarm form for reliability.
+    mem_limit: 14g
+    cpus: 3.5
 
 volumes:
   flowscope-data:
