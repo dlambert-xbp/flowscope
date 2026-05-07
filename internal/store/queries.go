@@ -350,6 +350,97 @@ func isNoRows(err error) bool {
 	return err.Error() == "sql: no rows in result set"
 }
 
+// DeviceInventory is the latest SNMP-derived snapshot for one
+// exporter, joined with the per-interface SNMP attributes. Returned
+// by /api/devices/{exporter}/inventory and rendered on the Devices
+// tab Summary sub-tab.
+type DeviceInventory struct {
+	PolledAt       time.Time         `json:"polled_at"`
+	Exporter       string            `json:"exporter"`
+	SysDescr       string            `json:"sys_descr"`
+	SysObjectID    string            `json:"sys_object_id"`
+	SysUptimeMs    uint64            `json:"sys_uptime_ms"`
+	SysName        string            `json:"sys_name"`
+	SysLocation    string            `json:"sys_location"`
+	SysContact     string            `json:"sys_contact"`
+	IfaceCount     uint32            `json:"iface_count"`
+	PollDurationMs uint32            `json:"poll_duration_ms"`
+	PollStatus     string            `json:"poll_status"`
+	Interfaces     []SNMPInterface   `json:"interfaces"`
+}
+
+// SNMPInterface mirrors a row from device_snmp_interfaces.
+type SNMPInterface struct {
+	IfIndex     uint32 `json:"ifindex"`
+	IfDescr     string `json:"if_descr"`
+	IfAlias     string `json:"if_alias"`
+	IfType      uint32 `json:"if_type"`
+	IfSpeedBps  uint64 `json:"if_speed_bps"`
+	IfMtu       uint32 `json:"if_mtu"`
+	AdminStatus string `json:"admin_status"`
+	OperStatus  string `json:"oper_status"`
+	InErrors    uint64 `json:"in_errors"`
+	OutErrors   uint64 `json:"out_errors"`
+	InDiscards  uint64 `json:"in_discards"`
+	OutDiscards uint64 `json:"out_discards"`
+}
+
+// QueryDeviceInventory returns the freshest SNMP snapshot for an
+// exporter plus all interfaces from the same poll. Returns
+// ErrNotFound when SNMP has never walked this device.
+func QueryDeviceInventory(ctx context.Context, conn driver.Conn, exporter netip.Addr) (*DeviceInventory, error) {
+	expBytes := exporter.As16()
+
+	const q = `
+SELECT
+    polled_at, sys_descr, sys_object_id, sys_uptime_ms,
+    sys_name, sys_location, sys_contact, iface_count,
+    poll_duration_ms, poll_status
+FROM device_inventory
+WHERE exporter = ?
+ORDER BY polled_at DESC
+LIMIT 1`
+	row := conn.QueryRow(ctx, q, expBytes[:])
+	var inv DeviceInventory
+	if err := row.Scan(
+		&inv.PolledAt, &inv.SysDescr, &inv.SysObjectID, &inv.SysUptimeMs,
+		&inv.SysName, &inv.SysLocation, &inv.SysContact, &inv.IfaceCount,
+		&inv.PollDurationMs, &inv.PollStatus,
+	); err != nil {
+		if isNoRows(err) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("store: query inventory: %w", err)
+	}
+	inv.Exporter = exporter.Unmap().String()
+
+	const qi = `
+SELECT
+    ifindex, if_descr, if_alias, if_type, if_speed_bps, if_mtu,
+    if_admin_status, if_oper_status,
+    if_in_errors, if_out_errors, if_in_discards, if_out_discards
+FROM device_snmp_interfaces
+WHERE exporter = ? AND polled_at = ?
+ORDER BY ifindex`
+	rows, err := conn.Query(ctx, qi, expBytes[:], inv.PolledAt)
+	if err != nil {
+		return nil, fmt.Errorf("store: query inventory interfaces: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var i SNMPInterface
+		if err := rows.Scan(
+			&i.IfIndex, &i.IfDescr, &i.IfAlias, &i.IfType, &i.IfSpeedBps, &i.IfMtu,
+			&i.AdminStatus, &i.OperStatus,
+			&i.InErrors, &i.OutErrors, &i.InDiscards, &i.OutDiscards,
+		); err != nil {
+			return nil, fmt.Errorf("store: scan inventory interface: %w", err)
+		}
+		inv.Interfaces = append(inv.Interfaces, i)
+	}
+	return &inv, rows.Err()
+}
+
 // Alert is the current state of one alert as derived from the
 // append-only alert_events ledger via argMax aggregation. Fields
 // match the JSON the api returns to the React Alerts tab.

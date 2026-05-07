@@ -57,6 +57,33 @@ services:
     mem_limit: 1g
     cpus: 1.0
 
+  snmp:
+    build:
+      context: .
+      dockerfile: cmd/snmp/Dockerfile
+    image: flowscope-snmp:latest
+    container_name: flowscope-snmp
+    restart: unless-stopped
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    ports:
+      - "9102:9102/tcp"   # Prometheus /metrics
+    environment:
+      FLOWSCOPE_CLICKHOUSE_DSN: "clickhouse://flowscope:flowscope@clickhouse:9000/flowscope"
+      FLOWSCOPE_SNMP_INTERVAL: "15m"
+      FLOWSCOPE_SNMP_COMMUNITY: "public"
+      FLOWSCOPE_SNMP_WORKERS: "8"
+      # Set to "1" to use the deterministic mock client when there is
+      # no real network reachable from the container. In real deploys,
+      # leave unset and ensure the FlowScope subnet has UDP/161 reach
+      # to your devices.
+      FLOWSCOPE_SNMP_MOCK: "1"
+      FLOWSCOPE_METRICS_ADDR: ":9102"
+      FLOWSCOPE_LOG_LEVEL: "info"
+    mem_limit: 256m
+    cpus: 0.5
+
   alert:
     build:
       context: .

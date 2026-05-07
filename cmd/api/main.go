@@ -65,6 +65,7 @@ func run() error {
 	r.Get("/api/flows/recent", h.recentFlows)
 	r.Get("/api/devices", h.devices)
 	r.Get("/api/devices/{exporter}", h.device)
+	r.Get("/api/devices/{exporter}/inventory", h.deviceInventory)
 	r.Get("/api/interfaces", h.interfaces)
 	r.Get("/api/interfaces/{exporter}/{ifindex}/timeseries", h.interfaceTimeseries)
 	r.Get("/api/top/talkers", h.topTalkers)

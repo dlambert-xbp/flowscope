@@ -253,6 +253,31 @@ func (h *handlers) devices(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// deviceInventory returns the latest SNMP snapshot for one exporter.
+//
+//	GET /api/devices/{exporter}/inventory
+//
+// 404 when SNMP has never walked this device. The Devices tab
+// surfaces that state as "no SNMP data yet".
+func (h *handlers) deviceInventory(w http.ResponseWriter, r *http.Request) {
+	exporterStr := chi.URLParam(r, "exporter")
+	exporter, err := netip.ParseAddr(exporterStr)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid exporter address")
+		return
+	}
+	inv, err := store.QueryDeviceInventory(r.Context(), h.conn, exporter)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "no SNMP inventory yet for this exporter")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, inv)
+}
+
 // device returns the summary for a single exporter.
 //
 //	GET /api/devices/{exporter}?window=300s

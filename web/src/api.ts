@@ -62,6 +62,36 @@ export type Device = {
   iface_count: number
 }
 
+export type SNMPInterface = {
+  ifindex: number
+  if_descr: string
+  if_alias: string
+  if_type: number
+  if_speed_bps: number
+  if_mtu: number
+  admin_status: string
+  oper_status: string
+  in_errors: number
+  out_errors: number
+  in_discards: number
+  out_discards: number
+}
+
+export type DeviceInventory = {
+  polled_at: string
+  exporter: string
+  sys_descr: string
+  sys_object_id: string
+  sys_uptime_ms: number
+  sys_name: string
+  sys_location: string
+  sys_contact: string
+  iface_count: number
+  poll_duration_ms: number
+  poll_status: string
+  interfaces: SNMPInterface[]
+}
+
 export type Alert = {
   id: string
   rule_id: string
@@ -159,6 +189,10 @@ export const api = {
   device: (exporter: string, windowSec = 300) =>
     getJSON<Device>(
       `/api/devices/${encodeURIComponent(exporter)}?window=${windowSec}s`,
+    ),
+  deviceInventory: (exporter: string) =>
+    getJSON<DeviceInventory>(
+      `/api/devices/${encodeURIComponent(exporter)}/inventory`,
     ),
   alerts: (state?: 'open' | 'acknowledged' | 'closed') =>
     getJSON<{ count: number; alerts: Alert[]; state: string }>(

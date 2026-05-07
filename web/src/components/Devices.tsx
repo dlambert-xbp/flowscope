@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { useState, type ReactNode } from 'react'
 import { api, fmt } from '../api'
-import type { Device, InterfaceRow, RecentFlow } from '../api'
+import type { Device, DeviceInventory, InterfaceRow, RecentFlow } from '../api'
 
 // Devices tab — directory of exporters seen in flows on the left,
 // feature view of the selected exporter on the right with three
@@ -147,12 +147,25 @@ function FeatureHeader({ exporter }: { exporter: string }) {
     queryFn: () => api.device(exporter, 300),
     refetchInterval: 5000,
   })
+  const inv = useQuery({
+    queryKey: ['device-inventory', exporter],
+    // 404 is expected before the snmp service has walked this exporter.
+    // catch and resolve to undefined so the UI shows the "no SNMP yet"
+    // banner instead of a hard error.
+    queryFn: () =>
+      api
+        .deviceInventory(exporter)
+        .catch(() => undefined as DeviceInventory | undefined),
+    refetchInterval: 30_000,
+  })
   const d = q.data
+  const i = inv.data
   const since = d ? secondsSince(d.last_seen) : Infinity
   const status =
     since < 60 ? 'online' : since < 300 ? 'silent' : 'offline'
   const tone =
     status === 'online' ? 'text-ok' : status === 'silent' ? 'text-warn' : 'text-crit'
+  const headline = i?.sys_name || exporter
   return (
     <header className="px-6 pt-6 pb-4 border-b border-line bg-surface">
       <div className="flex items-center gap-3 text-[10.5px] uppercase tracking-[0.1em] font-semibold text-dim mb-1">
@@ -163,42 +176,64 @@ function FeatureHeader({ exporter }: { exporter: string }) {
         <span className="font-mono text-[10.5px] text-faint normal-case tracking-[0.02em]">
           first seen {d ? fmt.time(d.first_seen).slice(11, 19) + 'Z' : '—'}
         </span>
+        {i && (
+          <span className="font-mono text-[10.5px] text-faint normal-case tracking-[0.02em]">
+            snmp {fmt.time(i.polled_at).slice(11, 19)}Z
+          </span>
+        )}
       </div>
       <h1 className="font-mono text-[26px] font-semibold tracking-tight text-text leading-[1.1]">
-        {exporter}
+        {headline}
+        {i?.sys_name && (
+          <span className="font-mono text-[14px] font-normal text-faint ml-3">
+            {exporter}
+          </span>
+        )}
       </h1>
       <p className="text-[13.5px] text-dim mt-1.5 max-w-[78ch] leading-[1.5]">
-        Exporter inferred from observed flow records. SNMP-driven inventory
-        (model, OS version, location, contact) wires in when the SNMP
-        service ships;{' '}
-        {d?.iface_count ? (
+        {i ? (
           <>
-            <span className="text-text font-medium">
-              {fmt.num(d.iface_count)} interface{d.iface_count === 1 ? '' : 's'}
-            </span>{' '}
-            currently emit counter samples.
+            <span className="text-text">{shortDescr(i.sys_descr)}</span>
+            {i.sys_location && (
+              <>
+                {' · '}
+                <span>{i.sys_location}</span>
+              </>
+            )}
+            {' · uptime '}
+            <span className="text-text">{formatUptime(i.sys_uptime_ms)}</span>
+            {d?.iface_count ? (
+              <>
+                {' · '}
+                <span className="text-text font-medium">
+                  {fmt.num(d.iface_count)} interface{d.iface_count === 1 ? '' : 's'}
+                </span>{' '}
+                emitting counter samples
+              </>
+            ) : null}
+            .
           </>
         ) : (
-          'no counter samples seen yet — counter-sample-derived bandwidth requires an sFlow / gNMI capable exporter.'
+          <>
+            Exporter inferred from observed flow records. SNMP has not yet walked
+            this device — the snmp service polls every 15 min once an exporter
+            shows up in flows.
+          </>
         )}
       </p>
-      <SpecRow d={d} />
+      <SpecRow d={d} i={i} />
     </header>
   )
 }
 
-function SpecRow({ d }: { d?: Device }) {
+function SpecRow({ d, i }: { d?: Device; i?: DeviceInventory }) {
   const cells: { k: string; v: string; mono?: boolean }[] = [
     { k: 'address', v: d?.exporter ?? '—', mono: true },
-    { k: 'flows · 5m', v: d ? fmt.num(d.flows) : '—', mono: true },
+    { k: 'model', v: i ? vendorOID(i.sys_object_id) : '—' },
+    { k: 'snmp ifaces', v: i ? fmt.num(i.iface_count) : '—', mono: true },
+    { k: 'flow ifaces', v: d ? fmt.num(d.iface_count) : '—', mono: true },
     { k: 'volume · 5m', v: d ? fmt.bytes(d.bytes) : '—' },
     { k: 'avg rate', v: d ? fmt.bps((d.bytes * 8) / 300) : '—' },
-    { k: 'interfaces', v: d ? fmt.num(d.iface_count) : '—', mono: true },
-    {
-      k: 'first seen',
-      v: d ? fmt.time(d.first_seen).slice(11, 19) + 'Z' : '—',
-      mono: true,
-    },
   ]
   return (
     <div className="grid grid-cols-3 md:grid-cols-6 mt-4 border-t border-l border-line">
@@ -259,12 +294,61 @@ function Tab({
 function SummaryTab({ exporter }: { exporter: string }) {
   return (
     <div className="px-6 py-5 space-y-5">
+      <Section title="Inventory" sub="snmp · v2c" right="SOURCE · SNMP">
+        <InventoryPanel exporter={exporter} />
+      </Section>
       <Section title="Recent activity" sub="last 60s of flows">
         <RecentFlowsMini exporter={exporter} limit={6} />
       </Section>
       <Section title="Top interfaces" sub="counter samples · 5 min" right="SOURCE · COUNTERS">
         <InterfacesMini exporter={exporter} />
       </Section>
+    </div>
+  )
+}
+
+function InventoryPanel({ exporter }: { exporter: string }) {
+  const q = useQuery({
+    queryKey: ['device-inventory', exporter],
+    queryFn: () =>
+      api
+        .deviceInventory(exporter)
+        .catch(() => undefined as DeviceInventory | undefined),
+    refetchInterval: 30_000,
+  })
+  if (q.isLoading) return <p className="text-dim font-mono text-[12px]">loading…</p>
+  const i = q.data
+  if (!i) {
+    return (
+      <p className="text-dim font-mono text-[12px]">
+        no SNMP data yet · the snmp service polls every 15 min after the
+        exporter first appears in flows · check{' '}
+        <code className="bg-raise px-1 text-text">FLOWSCOPE_SNMP_COMMUNITY</code> on the snmp service if a real network is reachable
+      </p>
+    )
+  }
+  const cells: { k: string; v: string; mono?: boolean }[] = [
+    { k: 'hostname', v: i.sys_name || '—' },
+    { k: 'description', v: shortDescr(i.sys_descr) },
+    { k: 'object id', v: i.sys_object_id || '—', mono: true },
+    { k: 'uptime', v: formatUptime(i.sys_uptime_ms) },
+    { k: 'location', v: i.sys_location || '—' },
+    { k: 'contact', v: i.sys_contact || '—' },
+    { k: 'last poll', v: fmt.time(i.polled_at).slice(11, 19) + 'Z', mono: true },
+    { k: 'poll status', v: i.poll_status, mono: true },
+  ]
+  return (
+    <div className="grid grid-cols-2 md:grid-cols-4 border-l border-t border-line">
+      {cells.map((c, idx) => (
+        <div key={idx} className="px-3 py-2.5 border-r border-b border-line">
+          <div className="text-[10px] uppercase tracking-[0.1em] text-faint font-semibold mb-0.5">
+            {c.k}
+          </div>
+          <div className={`text-[13px] text-text leading-[1.3] ${c.mono ? 'font-mono' : ''}`}>
+            {c.v}
+          </div>
+        </div>
+      ))}
     </div>
   )
 }
@@ -487,4 +571,41 @@ function secondsSince(iso: string): number {
   const t = new Date(iso).getTime()
   if (Number.isNaN(t)) return Infinity
   return Math.max(0, (Date.now() - t) / 1000)
+}
+
+// shortDescr trims sysDescr to its first line and a sane length so
+// the dek and spec row don't blow out. Real network gear returns
+// 200+ char strings full of carriage returns.
+function shortDescr(s: string): string {
+  if (!s) return '—'
+  const firstLine = s.split(/[\r\n]/)[0].trim()
+  if (firstLine.length > 80) return firstLine.slice(0, 77) + '…'
+  return firstLine
+}
+
+// formatUptime turns ms-since-boot into "137d 4h 22m" form.
+function formatUptime(ms: number): string {
+  if (!ms) return '—'
+  const sec = Math.floor(ms / 1000)
+  const d = Math.floor(sec / 86400)
+  const h = Math.floor((sec % 86400) / 3600)
+  const m = Math.floor((sec % 3600) / 60)
+  if (d > 0) return `${d}d ${h}h ${m}m`
+  if (h > 0) return `${h}h ${m}m`
+  return `${m}m`
+}
+
+// vendorOID maps the vendor-prefix portion of sysObjectID to a human
+// label. Falls back to the raw OID. The full IETF / IANA enterprise
+// registry is huge; a tiny lookup covers the common cases.
+function vendorOID(oid: string): string {
+  if (!oid) return '—'
+  if (oid.startsWith('1.3.6.1.4.1.9.')) return 'Cisco · ' + oid
+  if (oid.startsWith('1.3.6.1.4.1.2636.')) return 'Juniper · ' + oid
+  if (oid.startsWith('1.3.6.1.4.1.30065.')) return 'Arista · ' + oid
+  if (oid.startsWith('1.3.6.1.4.1.4526.')) return 'Netgear · ' + oid
+  if (oid.startsWith('1.3.6.1.4.1.890.')) return 'Zyxel · ' + oid
+  if (oid.startsWith('1.3.6.1.4.1.6027.')) return 'Force10/Dell · ' + oid
+  if (oid.startsWith('1.3.6.1.4.1.674.')) return 'Dell · ' + oid
+  return oid
 }
