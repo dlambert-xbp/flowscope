@@ -71,3 +71,24 @@ INSERT INTO foo VALUES (1);
 		t.Errorf("stmts[1] = %q", stmts[1])
 	}
 }
+
+// Regression: a semicolon inside a -- comment must not fragment the
+// next real statement. Earlier the function split on ; first, then
+// stripped comments, which let "never edit; CREATE TABLE..." leak
+// through with the comment prefix lost on the second half.
+func TestSplitStatements_SemicolonInsideComment(t *testing.T) {
+	body := `
+-- forward-only; never edit a migration after release.
+CREATE TABLE flows (id UInt32) ENGINE = Memory;
+`
+	stmts := splitStatements(body)
+	if len(stmts) != 1 {
+		t.Fatalf("got %d statements, want 1: %#v", len(stmts), stmts)
+	}
+	if !strings.Contains(stmts[0], "CREATE TABLE flows") {
+		t.Errorf("stmts[0] = %q", stmts[0])
+	}
+	if strings.Contains(stmts[0], "never edit") {
+		t.Errorf("comment leaked into statement: %q", stmts[0])
+	}
+}

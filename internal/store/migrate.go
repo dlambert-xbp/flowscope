@@ -103,22 +103,22 @@ func loadApplied(ctx context.Context, conn driver.Conn) (map[string]bool, error)
 }
 
 // splitStatements breaks a SQL file into individual statements on `;`.
-// It strips empty trailing fragments and ignores `--` line comments.
-// Migrations must not embed semicolons inside string literals.
+// `--` line comments are stripped first so semicolons inside comments
+// do not fragment what follows. Migrations must not embed semicolons
+// inside string literals.
 func splitStatements(body string) []string {
-	var out []string
-	for _, raw := range strings.Split(body, ";") {
-		// strip line comments
-		var b strings.Builder
-		for _, line := range strings.Split(raw, "\n") {
-			t := strings.TrimSpace(line)
-			if t == "" || strings.HasPrefix(t, "--") {
-				continue
-			}
-			b.WriteString(line)
-			b.WriteString("\n")
+	var stripped strings.Builder
+	for _, line := range strings.Split(body, "\n") {
+		t := strings.TrimSpace(line)
+		if t == "" || strings.HasPrefix(t, "--") {
+			continue
 		}
-		stmt := strings.TrimSpace(b.String())
+		stripped.WriteString(line)
+		stripped.WriteString("\n")
+	}
+	var out []string
+	for _, raw := range strings.Split(stripped.String(), ";") {
+		stmt := strings.TrimSpace(raw)
 		if stmt != "" {
 			out = append(out, stmt)
 		}
