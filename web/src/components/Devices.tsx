@@ -2,6 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { useState, type ReactNode } from 'react'
 import { api, fmt, labelExporter, labelInterface } from '../api'
 import type { Device, DeviceInventory, InterfaceRow, RecentFlow } from '../api'
+import { InterfaceChart } from './InterfaceChart'
 
 // TwoLine renders a primary value with a smaller, faint secondary
 // underneath. Used everywhere the SNMP enrichment exposes a
@@ -497,6 +498,7 @@ function InterfacesMini({ exporter }: { exporter: string }) {
 /* ----------------------------- Interfaces tab ----------------------------- */
 
 function InterfacesTab({ exporter }: { exporter: string }) {
+  const [activeIfindex, setActiveIfindex] = useState<number | null>(null)
   const q = useQuery({
     queryKey: ['device-ifaces-full', exporter],
     queryFn: () => api.interfaces(300, exporter),
@@ -523,12 +525,13 @@ function InterfacesTab({ exporter }: { exporter: string }) {
       ) : (
         <table className="w-full table-fixed">
           <colgroup>
-            <col style={{ width: '40%' }} />
+            <col style={{ width: '34%' }} />
             <col />
             <col />
             <col />
             <col />
             <col style={{ width: '90px' }} />
+            <col style={{ width: '80px' }} />
           </colgroup>
           <thead>
             <tr>
@@ -538,11 +541,13 @@ function InterfacesTab({ exporter }: { exporter: string }) {
               <th className="r">in peak</th>
               <th className="r">out peak</th>
               <th className="r">last seen</th>
+              <th />
             </tr>
           </thead>
           <tbody>
             {ifaces.map((i: InterfaceRow) => {
               const lbl = labelInterface(i)
+              const isActive = activeIfindex === i.ifindex
               return (
                 <tr key={i.ifindex} className="hover:bg-surface">
                   <td>
@@ -553,11 +558,22 @@ function InterfacesTab({ exporter }: { exporter: string }) {
                   <td className="r n text-accent">{fmt.bps(i.in_bps_peak)}</td>
                   <td className="r n text-ok">{fmt.bps(i.out_bps_peak)}</td>
                   <td className="r n text-faint">{fmt.time(i.last_seen).slice(11, 19)}</td>
+                  <td className="r">
+                    <button
+                      className={`text-[11px] font-mono ${isActive ? 'text-text' : 'text-accent hover:underline'}`}
+                      onClick={() => setActiveIfindex(isActive ? null : i.ifindex)}
+                    >
+                      {isActive ? '× close' : 'chart →'}
+                    </button>
+                  </td>
                 </tr>
               )
             })}
           </tbody>
         </table>
+      )}
+      {activeIfindex !== null && (
+        <InterfaceChart exporter={exporter} ifindex={activeIfindex} />
       )}
     </div>
   )
