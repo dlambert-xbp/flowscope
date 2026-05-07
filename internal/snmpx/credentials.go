@@ -3,6 +3,7 @@ package snmpx
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/netip"
 	"time"
 
@@ -82,7 +83,7 @@ func (s *chCredStore) Get(ctx context.Context, exporter string) (*Credential, er
 	if err != nil {
 		return nil, fmt.Errorf("snmpx.creds: parse %q: %w", exporter, err)
 	}
-	expBytes := addr.As16()
+	expIP := toIPv6(addr)
 	const q = `
 SELECT
     version, port, interval_sec,
@@ -91,7 +92,7 @@ SELECT
     updated_at, updated_by
 FROM snmp_credentials FINAL
 WHERE exporter = ?`
-	row := s.conn.QueryRow(ctx, q, expBytes[:])
+	row := s.conn.QueryRow(ctx, q, expIP)
 	var (
 		c                                                                              Credential
 		communityCT, authCT, privCT                                                    string
@@ -166,7 +167,7 @@ func (s *chCredStore) Set(ctx context.Context, c Credential, actor string) error
 	if err != nil {
 		return fmt.Errorf("snmpx.creds: parse exporter: %w", err)
 	}
-	expBytes := addr.As16()
+	expIP := toIPv6(addr)
 
 	switch c.Version {
 	case "v2c":
@@ -207,7 +208,7 @@ INSERT INTO snmp_credentials
     updated_at, updated_by)
  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	return s.conn.Exec(ctx, ins,
-		expBytes[:], c.Version, c.Port, c.IntervalSec,
+		expIP, c.Version, c.Port, c.IntervalSec,
 		communityCT, c.V3Username, c.V3AuthProto, authCT,
 		c.V3PrivProto, privCT, c.V3Context,
 		time.Now().UTC(), actorOr(actor),
@@ -222,9 +223,19 @@ func (s *chCredStore) Delete(ctx context.Context, exporter string) error {
 	if err != nil {
 		return fmt.Errorf("snmpx.creds: parse %q: %w", exporter, err)
 	}
-	expBytes := addr.As16()
+	expIP := toIPv6(addr)
 	const q = `ALTER TABLE snmp_credentials DELETE WHERE exporter = ?`
-	return s.conn.Exec(ctx, q, expBytes[:])
+	return s.conn.Exec(ctx, q, expIP)
+}
+
+// toIPv6 returns the 16-byte big-endian net.IP form for the IPv6
+// ClickHouse column. The clickhouse-go v2 driver special-cases
+// net.IP for IPv6; passing a raw []byte serializes as
+// Array(UInt64) and ClickHouse rejects with "Illegal type". Mirrors
+// the helper in internal/store/batcher.go.
+func toIPv6(addr netip.Addr) net.IP {
+	a := addr.As16()
+	return a[:]
 }
 
 // ErrCredNotFound is returned by Get when no binding exists.
