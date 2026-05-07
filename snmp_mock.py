@@ -40,14 +40,14 @@ class MockSNMPClient:
         return int.from_bytes(h[:4], "big")
 
     def walk_iftable(self, host, ifindexes):
-        """Return {ifindex: {"name", "alias", "speed_bps"}} for the given host.
+        """Return {ifindex: {...}} for the given host. The mock synthesizes
+        plausible values for the ifindexes FlowScope has already observed.
 
-        A real implementation would walk the IF-MIB OIDs:
-          ifDescr     1.3.6.1.2.1.2.2.1.2
-          ifAlias     1.3.6.1.2.1.31.1.1.1.18
-          ifHighSpeed 1.3.6.1.2.1.31.1.1.1.15  (Mb/s)
-        and merge by ifindex. The mock just synthesizes plausible values
-        for the ifindexes FlowScope has already observed."""
+        Returned dict shape mirrors the real client's:
+            name, alias, speed_bps,
+            admin_status, oper_status,
+            in_errors, out_errors, in_discards, out_discards,
+            mtu, mac"""
         out = {}
         for ifindex in ifindexes:
             h = self._hash(host, ifindex)
@@ -62,9 +62,26 @@ class MockSNMPClient:
                 alias = f"downlink-{ifindex}"
             elif tag == 2:
                 alias = f"customer-{(h >> 12) % 200:03d}"
+            mac_bytes = [(h >> (i * 4)) & 0xFF for i in range(6)]
+            mac_bytes[0] |= 0x02
+            mac_bytes[0] &= 0xFE
+            mac = ":".join(f"{b:02x}" for b in mac_bytes)
+            # Most ports are up; a small fraction admin-down or oper-down
+            # so the modal has something to show besides green.
+            tag2 = (h >> 28) & 0xF
+            admin = 2 if tag2 == 0 else 1
+            oper  = 2 if (admin == 2 or tag2 == 1) else 1
             out[ifindex] = {
-                "name":      f"{prefix}{slot}",
-                "alias":     alias,
-                "speed_bps": speed,
+                "name":         f"{prefix}{slot}",
+                "alias":        alias,
+                "speed_bps":    speed,
+                "admin_status": admin,
+                "oper_status":  oper,
+                "in_errors":    h % 7,
+                "out_errors":   (h >> 3) % 5,
+                "in_discards":  (h >> 5) % 11,
+                "out_discards": (h >> 7) % 9,
+                "mtu":          1500 if (h >> 9) & 1 else 9000,
+                "mac":          mac,
             }
         return out

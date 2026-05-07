@@ -21,10 +21,13 @@ import struct
 import threading
 import time
 from collections import defaultdict, deque
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from ipaddress import ip_address
 
+from apscheduler.schedulers.background import BackgroundScheduler
 from flask import Flask, jsonify, request, send_from_directory, make_response
+from waitress import serve as waitress_serve
 
 import snmp_crypto
 import snmp_mock
@@ -60,6 +63,8 @@ recent_flows = deque(maxlen=RING_SIZE)
 
 # Per-device-and-interface rolling counters.
 # Key = (exporter_ip, ifindex). Value = dict with counters.
+# Extended SNMP fields (admin/oper/errors/discards/mtu/mac) are populated by
+# _run_poll on a successful walk and persisted in interface_meta.
 interface_stats = defaultdict(lambda: {
     "ingress_bytes":   0,
     "ingress_packets": 0,
@@ -69,7 +74,20 @@ interface_stats = defaultdict(lambda: {
     "name":            None,    # filled if SNMP/sFlow tells us
     "alias":           None,    # filled by SNMP poller (ifAlias)
     "speed_bps":       None,
+    "admin_status":    None,    # 1=up, 2=down, 3=testing
+    "oper_status":     None,    # 1=up, 2=down, 3=testing, 4=unknown, 5=dormant, 6=notPresent, 7=lowerLayerDown
+    "in_errors":       None,
+    "out_errors":      None,
+    "in_discards":     None,
+    "out_discards":    None,
+    "mtu":             None,
+    "mac":             None,
 })
+
+# (exporter, ifindex) -> {"flagged_ts": float, "note": str}.
+# Populated from interface_issues table at startup; mutated by the flag/unflag
+# endpoints. All access under state_lock.
+interface_issues = {}
 
 # Devices we've heard from
 devices = {}  # exporter_ip -> {first_seen, last_seen, flow_count, type, hostname}
@@ -98,7 +116,7 @@ snmp_bindings_mem = {}   # (scope, scope_id) -> {profile, poll_interval_s, enabl
 snmp_poll_status  = {}   # exporter -> {last_poll_ts, last_ok_ts, last_error,
                          #              iface_count, consecutive_failures}
 
-DEFAULT_POLL_INTERVAL_S = 60
+DEFAULT_POLL_INTERVAL_S = 15
 SNMP_DEFAULT_PORT       = 161
 
 # NetFlow v9 / IPFIX templates, keyed by (exporter, source_id, template_id)
@@ -244,12 +262,66 @@ def db_init():
     # moment the process is up.
     conn.execute("""
         CREATE TABLE IF NOT EXISTS interface_meta (
+            exporter      TEXT NOT NULL,
+            ifindex       INTEGER NOT NULL,
+            name          TEXT,
+            alias         TEXT,
+            speed_bps     INTEGER,
+            admin_status  INTEGER,
+            oper_status   INTEGER,
+            in_errors     INTEGER,
+            out_errors    INTEGER,
+            in_discards   INTEGER,
+            out_discards  INTEGER,
+            mtu           INTEGER,
+            mac           TEXT,
+            updated_ts    REAL NOT NULL,
+            PRIMARY KEY (exporter, ifindex)
+        )
+    """)
+    # Idempotent column migration for older DBs created before the extended
+    # SNMP fields existed. SQLite has no IF NOT EXISTS for ALTER TABLE, so
+    # we inspect PRAGMA table_info and add what's missing.
+    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(interface_meta)")}
+    _NEW_META_COLS = [
+        ("admin_status", "INTEGER"),
+        ("oper_status",  "INTEGER"),
+        ("in_errors",    "INTEGER"),
+        ("out_errors",   "INTEGER"),
+        ("in_discards",  "INTEGER"),
+        ("out_discards", "INTEGER"),
+        ("mtu",          "INTEGER"),
+        ("mac",          "TEXT"),
+    ]
+    for col, typ in _NEW_META_COLS:
+        if col not in existing_cols:
+            conn.execute(f"ALTER TABLE interface_meta ADD COLUMN {col} {typ}")
+    # Per-interface counter samples (sFlow if_counters arrivals). Used to
+    # compute authoritative ingress/egress rates on the per-interface graph
+    # by diffing successive samples. Pruned alongside flows to ~6h.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS iface_counter_samples (
             exporter   TEXT NOT NULL,
             ifindex    INTEGER NOT NULL,
-            name       TEXT,
-            alias      TEXT,
-            speed_bps  INTEGER,
-            updated_ts REAL NOT NULL,
+            ts         REAL NOT NULL,
+            in_octets  INTEGER,
+            out_octets INTEGER,
+            in_pkts    INTEGER,
+            out_pkts   INTEGER
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_iface_counter_samples
+        ON iface_counter_samples(exporter, ifindex, ts)
+    """)
+    # User-flagged interfaces ("Mark as possible issue"). One row per flagged
+    # interface; clearing the flag deletes the row.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS interface_issues (
+            exporter   TEXT NOT NULL,
+            ifindex    INTEGER NOT NULL,
+            flagged_ts REAL NOT NULL,
+            note       TEXT,
             PRIMARY KEY (exporter, ifindex)
         )
     """)
@@ -317,15 +389,33 @@ def db_init():
             "last_error":   row[3], "iface_count": row[4],
             "consecutive_failures": row[5],
         }
-    # Restore SNMP-discovered interface names/alias/speed from previous runs.
+    # Restore SNMP-discovered interface metadata from previous runs.
     # These pre-create interface_stats entries with zeroed counters; the next
     # flow record (or sFlow counter sample) overwrites the counters as usual.
-    for row in conn.execute(
-            "SELECT exporter, ifindex, name, alias, speed_bps FROM interface_meta"):
+    for row in conn.execute("""
+        SELECT exporter, ifindex, name, alias, speed_bps,
+               admin_status, oper_status, in_errors, out_errors,
+               in_discards, out_discards, mtu, mac
+        FROM interface_meta
+    """):
         s = interface_stats[(row[0], row[1])]
-        s["name"]      = row[2]
-        s["alias"]     = row[3]
-        s["speed_bps"] = row[4]
+        s["name"]         = row[2]
+        s["alias"]        = row[3]
+        s["speed_bps"]    = row[4]
+        s["admin_status"] = row[5]
+        s["oper_status"]  = row[6]
+        s["in_errors"]    = row[7]
+        s["out_errors"]   = row[8]
+        s["in_discards"]  = row[9]
+        s["out_discards"] = row[10]
+        s["mtu"]          = row[11]
+        s["mac"]          = row[12]
+    for row in conn.execute(
+            "SELECT exporter, ifindex, flagged_ts, note FROM interface_issues"):
+        interface_issues[(row[0], row[1])] = {
+            "flagged_ts": row[2],
+            "note":       row[3] or "",
+        }
     conn.commit()
     return conn
 
@@ -356,17 +446,18 @@ def db_insert_flow(rec):
         print(f"[db] insert error: {e}")
 
 
-def db_prune_loop():
-    """Keep ~6 hours of flow history in SQLite."""
-    while True:
-        try:
-            cutoff = time.time() - 6 * 3600
-            with db_lock:
-                db_conn.execute("DELETE FROM flows WHERE ts < ?", (cutoff,))
-                db_conn.commit()
-        except Exception as e:
-            print(f"[db] prune error: {e}")
-        time.sleep(300)
+def db_prune_tick():
+    """Prune flows + counter samples older than ~6h.
+    Runs every 5 minutes via APScheduler."""
+    try:
+        cutoff = time.time() - 6 * 3600
+        with db_lock:
+            db_conn.execute("DELETE FROM flows WHERE ts < ?", (cutoff,))
+            db_conn.execute(
+                "DELETE FROM iface_counter_samples WHERE ts < ?", (cutoff,))
+            db_conn.commit()
+    except Exception as e:
+        print(f"[db] prune error: {e}")
 
 
 def rdns_loop():
@@ -499,6 +590,16 @@ def _run_poll(exporter, profile, ifindexes):
                 # learned from sFlow if_counters.
                 if not s.get("speed_bps") and info.get("speed_bps"):
                     s["speed_bps"] = info["speed_bps"]
+                # Extended fields. SNMP is authoritative for admin/oper
+                # status, MTU, MAC; for errors/discards the *latest* sample
+                # wins (sFlow if_counters and SNMP both report the same
+                # IF-MIB counters, so they should track each other).
+                for fld in ("admin_status", "oper_status", "mtu", "mac",
+                            "in_errors", "out_errors",
+                            "in_discards", "out_discards"):
+                    v = info.get(fld)
+                    if v is not None:
+                        s[fld] = v
         st = snmp_poll_status.setdefault(exporter, {
             "last_poll_ts": None, "last_ok_ts": None, "last_error": None,
             "iface_count": 0, "consecutive_failures": 0,
@@ -540,79 +641,116 @@ def _run_poll(exporter, profile, ifindexes):
             for ifindex, info in walk.items():
                 db_conn.execute("""
                     INSERT INTO interface_meta
-                        (exporter, ifindex, name, alias, speed_bps, updated_ts)
-                    VALUES (?,?,?,?,?,?)
+                        (exporter, ifindex, name, alias, speed_bps,
+                         admin_status, oper_status, in_errors, out_errors,
+                         in_discards, out_discards, mtu, mac, updated_ts)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     ON CONFLICT(exporter, ifindex) DO UPDATE SET
                         name=excluded.name,
                         alias=excluded.alias,
                         speed_bps=COALESCE(excluded.speed_bps, interface_meta.speed_bps),
+                        admin_status=COALESCE(excluded.admin_status, interface_meta.admin_status),
+                        oper_status=COALESCE(excluded.oper_status,  interface_meta.oper_status),
+                        in_errors=COALESCE(excluded.in_errors,      interface_meta.in_errors),
+                        out_errors=COALESCE(excluded.out_errors,    interface_meta.out_errors),
+                        in_discards=COALESCE(excluded.in_discards,  interface_meta.in_discards),
+                        out_discards=COALESCE(excluded.out_discards,interface_meta.out_discards),
+                        mtu=COALESCE(excluded.mtu, interface_meta.mtu),
+                        mac=COALESCE(excluded.mac, interface_meta.mac),
                         updated_ts=excluded.updated_ts
                 """, (exporter, ifindex,
                       info.get("name"), info.get("alias"),
-                      info.get("speed_bps"), now))
+                      info.get("speed_bps"),
+                      info.get("admin_status"), info.get("oper_status"),
+                      info.get("in_errors"), info.get("out_errors"),
+                      info.get("in_discards"), info.get("out_discards"),
+                      info.get("mtu"), info.get("mac"), now))
             db_conn.commit()
     except Exception as e:
         print(f"[snmp] status persist error: {e}")
     return err_msg
 
 
-def snmp_scheduler_loop():
-    """Tick once per second; poll each device whose interval has elapsed.
+# ThreadPoolExecutor for SNMP polls. Sized for "a few hundred devices, each
+# polled every 15s" — 8 workers covers 8 concurrent slow walks (~5s each)
+# without contention on state_lock or db_lock. Module-level so APScheduler
+# tick handlers reuse it instead of constructing a new pool per tick.
+SNMP_POLL_WORKERS = int(os.environ.get("FLOWSCOPE_SNMP_WORKERS", 8))
+snmp_pool = ThreadPoolExecutor(
+    max_workers=SNMP_POLL_WORKERS, thread_name_prefix="snmp-poll")
 
-    Sequential within a tick — fine for the scale FlowScope targets (a few
-    hundred devices, each polled every minute). If we ever need parallelism
-    here, add a small ThreadPoolExecutor; nothing else needs to change."""
-    while True:
-        tick_started = time.time()
-        try:
-            with state_lock:
-                exporters = list(devices.keys())
-                # Snapshot of ifindex sets so we don't iterate interface_stats
-                # outside the lock.
-                per_host_ifs = {}
-                for (exp, ifindex) in interface_stats.keys():
-                    per_host_ifs.setdefault(exp, []).append(ifindex)
 
-            for exporter in exporters:
-                try:
-                    eff = resolve_snmp(exporter)
-                    if not eff.get("profile"):
-                        continue
-                    # enabled semantics: 0 = explicit off, 1 = explicit on,
-                    # None = inherit. With a profile bound we default to on,
-                    # so only skip when something in the chain set 0.
-                    if eff.get("enabled") == 0:
-                        continue
-                    interval = eff.get("poll_interval_s") or DEFAULT_POLL_INTERVAL_S
+def snmp_scheduler_tick():
+    """One scheduler tick — eligible polls run concurrently in `snmp_pool`.
 
-                    with state_lock:
-                        st   = snmp_poll_status.get(exporter)
-                        prof = snmp_profiles_mem.get(eff["profile"])
-                    if prof is None:
-                        continue
-                    # One-shot auto-poll: once we've had a single successful
-                    # walk, never auto-poll this device again. The user
-                    # explicitly opts in to a re-poll via "Poll Now" on the
-                    # SNMP tab (/api/snmp/poll/<exporter>). Failed polls still
-                    # retry on the configured interval so a transient outage
-                    # doesn't permanently strand a device.
-                    if st and st.get("last_ok_ts"):
-                        continue
-                    last = st["last_poll_ts"] if st and st.get("last_poll_ts") else 0
-                    if tick_started - last < interval:
-                        continue
+    Eligibility per device:
+      * never polled successfully OR last poll failed → run every tick
+        (bounded in practice by the SNMP timeout, since each device is
+        capped by its own future)
+      * last poll succeeded → run when `now - last_poll_ts >= interval`
+    """
+    tick_started = time.time()
+    try:
+        with state_lock:
+            exporters = list(devices.keys())
+            per_host_ifs = {}
+            for (exp, ifindex) in interface_stats.keys():
+                per_host_ifs.setdefault(exp, []).append(ifindex)
 
-                    ifs = per_host_ifs.get(exporter, [])
-                    if not ifs:
-                        continue
-                    _run_poll(exporter, prof, ifs)
-                except Exception as e:
-                    print(f"[snmp] poll error for {exporter}: {e}")
-        except Exception as e:
-            print(f"[snmp] scheduler error: {e}")
-        # Honest 1-Hz tick (avoid drift if a poll batch took >1s).
-        elapsed = time.time() - tick_started
-        time.sleep(max(0, 1.0 - elapsed))
+        for exporter in exporters:
+            try:
+                eff = resolve_snmp(exporter)
+                if not eff.get("profile"):
+                    continue
+                # enabled semantics: 0 = explicit off, 1 = explicit on,
+                # None = inherit. With a profile bound we default to on,
+                # so only skip when something in the chain set 0.
+                if eff.get("enabled") == 0:
+                    continue
+                interval = eff.get("poll_interval_s") or DEFAULT_POLL_INTERVAL_S
+
+                with state_lock:
+                    st   = snmp_poll_status.get(exporter)
+                    prof = snmp_profiles_mem.get(eff["profile"])
+                if prof is None:
+                    continue
+                # Skip if a poll is already in flight for this device — the
+                # ThreadPoolExecutor stores the in-flight future on the status
+                # entry. Without this guard, a slow walk could be re-queued
+                # every tick.
+                if st and st.get("_in_flight"):
+                    continue
+                last    = st["last_poll_ts"] if st and st.get("last_poll_ts") else 0
+                had_err = bool(st and st.get("last_error"))
+                if not had_err and tick_started - last < interval:
+                    continue
+
+                ifs = per_host_ifs.get(exporter, [])
+                if not ifs:
+                    continue
+
+                with state_lock:
+                    snmp_poll_status.setdefault(exporter, {
+                        "last_poll_ts": None, "last_ok_ts": None,
+                        "last_error":   None, "iface_count": 0,
+                        "consecutive_failures": 0,
+                    })["_in_flight"] = True
+                snmp_pool.submit(_run_poll_async, exporter, prof, ifs)
+            except Exception as e:
+                print(f"[snmp] poll dispatch error for {exporter}: {e}")
+    except Exception as e:
+        print(f"[snmp] scheduler error: {e}")
+
+
+def _run_poll_async(exporter, profile, ifindexes):
+    """ThreadPool worker: run one poll and clear the in-flight flag."""
+    try:
+        _run_poll(exporter, profile, ifindexes)
+    finally:
+        with state_lock:
+            st = snmp_poll_status.get(exporter)
+            if st is not None:
+                st["_in_flight"] = False
 
 
 # ---------------------------------------------------------------------------
@@ -1055,15 +1193,22 @@ def parse_sflow_counters_sample(body, exporter, expanded=False):
         #   ifOutErrors u32, ifPromiscuousMode u32
         if (rec_tag & 0xFFF) == 1 and len(rec_body) >= 88:
             try:
-                ifindex   = int.from_bytes(rec_body[0:4],   "big")
-                ifspeed   = int.from_bytes(rec_body[8:16],  "big")
-                in_oct    = int.from_bytes(rec_body[24:32], "big")
-                in_ucast  = int.from_bytes(rec_body[32:36], "big")
-                out_oct   = int.from_bytes(rec_body[56:64], "big")
-                out_ucast = int.from_bytes(rec_body[64:68], "big")
+                ifindex      = int.from_bytes(rec_body[0:4],   "big")
+                ifspeed      = int.from_bytes(rec_body[8:16],  "big")
+                _ifdir       = int.from_bytes(rec_body[16:20], "big")
+                ifstatus     = int.from_bytes(rec_body[20:24], "big")
+                in_oct       = int.from_bytes(rec_body[24:32], "big")
+                in_ucast     = int.from_bytes(rec_body[32:36], "big")
+                in_discards  = int.from_bytes(rec_body[44:48], "big")
+                in_errors    = int.from_bytes(rec_body[48:52], "big")
+                out_oct      = int.from_bytes(rec_body[56:64], "big")
+                out_ucast    = int.from_bytes(rec_body[64:68], "big")
+                out_discards = int.from_bytes(rec_body[76:80], "big")
+                out_errors   = int.from_bytes(rec_body[80:84], "big")
             except Exception:
                 continue
 
+            now = time.time()
             with state_lock:
                 k = (exporter, ifindex)
                 s = interface_stats[k]
@@ -1074,7 +1219,31 @@ def parse_sflow_counters_sample(body, exporter, expanded=False):
                 s["egress_bytes"]    = out_oct
                 s["egress_packets"]  = out_ucast
                 s["speed_bps"]       = ifspeed if ifspeed else s["speed_bps"]
-                s["last_seen"]       = time.time()
+                s["last_seen"]       = now
+                # sFlow if_counters packs ifAdminStatus (low bit) and
+                # ifOperStatus (next bit) into a single u32; split them out so
+                # the modal can show both even when SNMP isn't available.
+                s["admin_status"]    = 1 if (ifstatus & 0x1) else 2
+                s["oper_status"]     = 1 if (ifstatus & 0x2) else 2
+                s["in_errors"]       = in_errors
+                s["out_errors"]      = out_errors
+                s["in_discards"]     = in_discards
+                s["out_discards"]    = out_discards
+
+            # Persist the counter sample for the per-interface timeseries
+            # endpoint. Outside state_lock; db_lock is fine here.
+            try:
+                with db_lock:
+                    db_conn.execute("""
+                        INSERT INTO iface_counter_samples
+                            (exporter, ifindex, ts, in_octets, out_octets,
+                             in_pkts, out_pkts)
+                        VALUES (?,?,?,?,?,?,?)
+                    """, (exporter, ifindex, now, in_oct, out_oct,
+                          in_ucast, out_ucast))
+                    db_conn.commit()
+            except Exception as e:
+                print(f"[sflow] counter-sample persist error: {e}")
 
 
 # ===========================================================================
@@ -1212,6 +1381,7 @@ def api_interfaces():
         for (exp, ifidx), s in interface_stats.items():
             if exporter_filter and exp != exporter_filter:
                 continue
+            issue = interface_issues.get((exp, ifidx))
             rows.append({
                 "exporter":        exp,
                 "ifindex":         ifidx,
@@ -1224,9 +1394,174 @@ def api_interfaces():
                 "egress_bytes":    s["egress_bytes"],
                 "egress_packets":  s["egress_packets"],
                 "last_seen":       s["last_seen"],
+                "admin_status":    s.get("admin_status"),
+                "oper_status":     s.get("oper_status"),
+                "in_errors":       s.get("in_errors"),
+                "out_errors":      s.get("out_errors"),
+                "in_discards":     s.get("in_discards"),
+                "out_discards":    s.get("out_discards"),
+                "mtu":             s.get("mtu"),
+                "mac":             s.get("mac"),
+                "flagged":         issue is not None,
+                "flag_note":       (issue or {}).get("note") or "",
+                "flag_ts":         (issue or {}).get("flagged_ts"),
             })
     rows.sort(key=lambda r: (r["exporter"], r["ifindex"]))
     return jsonify(rows)
+
+
+@app.route("/api/interfaces/<exporter>/<int:ifindex>/timeseries")
+def api_interface_timeseries(exporter, ifindex):
+    """Per-interface ingress/egress rate timeseries.
+
+    Primary source: sFlow counter samples (authoritative — these are absolute
+    interface counters reported by the device). When available we diff
+    successive samples for a bytes/sec rate and forward-fill into buckets.
+    Fallback: flow-derived rate (sub-sampled from observed flow records),
+    used when no counter samples are present (NetFlow-only exporters or a
+    device that doesn't send sFlow if_counters).
+
+    Response shape mirrors /api/timeseries with an extra "source" field so
+    the dashboard can show whether it's looking at counters or flows."""
+    seconds = int(request.args.get("seconds", 300))
+    seconds = max(60, min(seconds, 6 * 3600))
+    now = int(time.time())
+    cutoff = now - seconds
+    TARGET_BUCKETS = 600
+    bucket_size = max(1, seconds // TARGET_BUCKETS)
+    n_buckets   = (seconds + bucket_size - 1) // bucket_size
+
+    # Pull samples with a 10-minute lookback so bucket 0 has a prior sample
+    # to diff against; otherwise the first bucket would always be 0.
+    lookback = 600
+    with db_lock:
+        rows = db_conn.execute("""
+            SELECT ts, in_octets, out_octets
+            FROM iface_counter_samples
+            WHERE exporter = ? AND ifindex = ? AND ts >= ?
+            ORDER BY ts
+        """, (exporter, ifindex, cutoff - lookback)).fetchall()
+
+    if len(rows) >= 2:
+        # Compute rate samples between consecutive pairs.
+        rates = []
+        for i in range(1, len(rows)):
+            t1, in1, out1 = rows[i-1]
+            t2, in2, out2 = rows[i]
+            dt = t2 - t1
+            if dt <= 0:
+                continue
+            # Counter-wrap defense: 64-bit ifHC counters effectively never
+            # wrap; if we ever see a negative delta (counter reset, device
+            # reboot), drop the sample rather than show a huge spike.
+            d_in  = (in2  or 0) - (in1  or 0)
+            d_out = (out2 or 0) - (out1 or 0)
+            if d_in < 0 or d_out < 0:
+                continue
+            rates.append((t2, d_in / dt, d_out / dt))
+
+        if rates:
+            ingress = [0.0] * n_buckets
+            egress  = [0.0] * n_buckets
+            ri = 0
+            last_in = last_out = 0.0
+            for b in range(n_buckets):
+                bucket_end = cutoff + (b + 1) * bucket_size
+                while ri < len(rates) and rates[ri][0] <= bucket_end:
+                    last_in, last_out = rates[ri][1], rates[ri][2]
+                    ri += 1
+                ingress[b] = last_in
+                egress[b]  = last_out
+            return jsonify({
+                "start_ts":    cutoff,
+                "seconds":     seconds,
+                "bucket_size": bucket_size,
+                "ingress":     ingress,
+                "egress":      egress,
+                "source":      "counters",
+            })
+
+    # Fallback: flow-derived. Reuse the bucketing logic from /api/timeseries
+    # with an ifindex filter.
+    sum_in  = [0] * n_buckets
+    sum_out = [0] * n_buckets
+
+    def add(ts, b, in_if, out_if):
+        bucket = (int(ts) - cutoff) // bucket_size
+        if bucket < 0 or bucket >= n_buckets:
+            return
+        b = b or 0
+        if in_if  == ifindex: sum_in[bucket]  += b
+        if out_if == ifindex: sum_out[bucket] += b
+
+    if seconds <= 300:
+        with state_lock:
+            flows = list(recent_flows)
+        for f in flows:
+            ts = f.get("ts", 0)
+            if ts < cutoff or ts > now or f.get("exporter") != exporter:
+                continue
+            add(ts, f.get("bytes"), f.get("input_if"), f.get("output_if"))
+    else:
+        with db_lock:
+            rows2 = db_conn.execute("""
+                SELECT ts, bytes, input_if, output_if
+                FROM flows WHERE ts >= ? AND exporter = ?
+            """, (cutoff, exporter)).fetchall()
+        for ts, bts, in_if, out_if in rows2:
+            if ts > now:
+                continue
+            add(ts, bts, in_if, out_if)
+
+    return jsonify({
+        "start_ts":    cutoff,
+        "seconds":     seconds,
+        "bucket_size": bucket_size,
+        "ingress":     [s / bucket_size for s in sum_in],
+        "egress":      [s / bucket_size for s in sum_out],
+        "source":      "flows",
+    })
+
+
+@app.route("/api/interfaces/<exporter>/<int:ifindex>/flag", methods=["POST", "DELETE"])
+def api_interface_flag(exporter, ifindex):
+    """Flag or clear an interface as a possible issue.
+
+    POST   { "note": "..." }   set/update the flag (note is optional)
+    DELETE                     clear the flag
+    """
+    key = (exporter, ifindex)
+    if request.method == "DELETE":
+        try:
+            with db_lock:
+                db_conn.execute(
+                    "DELETE FROM interface_issues WHERE exporter = ? AND ifindex = ?",
+                    (exporter, ifindex))
+                db_conn.commit()
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)}), 500
+        with state_lock:
+            interface_issues.pop(key, None)
+        return jsonify({"ok": True, "flagged": False})
+
+    payload = request.get_json(silent=True) or {}
+    note = (payload.get("note") or "").strip()
+    now  = time.time()
+    try:
+        with db_lock:
+            db_conn.execute("""
+                INSERT INTO interface_issues (exporter, ifindex, flagged_ts, note)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(exporter, ifindex) DO UPDATE SET
+                    flagged_ts = excluded.flagged_ts,
+                    note       = excluded.note
+            """, (exporter, ifindex, now, note))
+            db_conn.commit()
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    with state_lock:
+        interface_issues[key] = {"flagged_ts": now, "note": note}
+    return jsonify({"ok": True, "flagged": True, "flag_ts": now, "flag_note": note})
 
 
 @app.route("/api/exporters/<exporter>/label", methods=["PUT", "POST", "DELETE"])
@@ -1477,12 +1812,32 @@ def api_device_folder(exporter):
 
 @app.route("/api/flows/recent")
 def api_recent_flows():
-    """Return the most recent flows. Optional ?limit=200&exporter=...&ifindex=..."""
+    """Return the most recent flows. Optional filters:
+    - exporter, ifindex (existing)
+    - talker_a + talker_b: bidirectional pair (matches either direction)
+    - port: matches src_port OR dst_port
+    - protocol: matches protocol number
+    """
     limit = min(int(request.args.get("limit", 200)), RING_SIZE)
     exporter_filter = request.args.get("exporter")
     ifindex_filter  = request.args.get("ifindex")
     if ifindex_filter is not None:
         ifindex_filter = int(ifindex_filter)
+    talker_a = request.args.get("talker_a") or None
+    talker_b = request.args.get("talker_b") or None
+    port_filter = request.args.get("port")
+    if port_filter is not None and port_filter != "":
+        try: port_filter = int(port_filter)
+        except ValueError: port_filter = None
+    else:
+        port_filter = None
+    protocol_filter = request.args.get("protocol")
+    if protocol_filter is not None and protocol_filter != "":
+        try: protocol_filter = int(protocol_filter)
+        except ValueError: protocol_filter = None
+    else:
+        protocol_filter = None
+
     with state_lock:
         flows = list(recent_flows)
     with endpoint_dns_lock:
@@ -1494,6 +1849,16 @@ def api_recent_flows():
             continue
         if ifindex_filter is not None and ifindex_filter not in (
                 f.get("input_if"), f.get("output_if")):
+            continue
+        if talker_a and talker_b:
+            src, dst = f.get("src_ip"), f.get("dst_ip")
+            if not ((src == talker_a and dst == talker_b) or
+                    (src == talker_b and dst == talker_a)):
+                continue
+        if port_filter is not None and port_filter not in (
+                f.get("src_port"), f.get("dst_port")):
+            continue
+        if protocol_filter is not None and f.get("protocol") != protocol_filter:
             continue
         out.append({
             **f,
@@ -1560,16 +1925,19 @@ def api_top_ports():
 @app.route("/api/protocols")
 def api_protocols():
     exporter_filter = request.args.get("exporter")
+    # Aggregate by protocol number so the frontend can drill into Live Flows
+    # with an unambiguous numeric filter; keep the human-readable name too.
     agg = defaultdict(lambda: {"bytes": 0, "flows": 0})
     with state_lock:
         flows = list(recent_flows)
     for f in flows:
         if exporter_filter and f.get("exporter") != exporter_filter:
             continue
-        name = proto_name(f.get("protocol", 0))
-        agg[name]["bytes"] += f.get("bytes", 0) or 0
-        agg[name]["flows"] += 1
-    rows = [{"protocol": k, **v} for k, v in agg.items()]
+        num = f.get("protocol", 0) or 0
+        agg[num]["bytes"] += f.get("bytes", 0) or 0
+        agg[num]["flows"] += 1
+    rows = [{"protocol": proto_name(k), "proto_num": k, **v}
+            for k, v in agg.items()]
     rows.sort(key=lambda r: r["bytes"], reverse=True)
     return jsonify(rows)
 
@@ -2213,18 +2581,27 @@ def main():
 
     db_hydrate_recent()
 
-    threading.Thread(target=netflow_listener, daemon=True).start()
-    threading.Thread(target=sflow_listener,   daemon=True).start()
-    threading.Thread(target=db_prune_loop,    daemon=True).start()
-    threading.Thread(target=rdns_loop,        daemon=True).start()
+    threading.Thread(target=netflow_listener,   daemon=True).start()
+    threading.Thread(target=sflow_listener,     daemon=True).start()
+    threading.Thread(target=rdns_loop,          daemon=True).start()
     threading.Thread(target=endpoint_rdns_loop, daemon=True).start()
-    threading.Thread(target=snmp_scheduler_loop, daemon=True, name="snmp-sched").start()
+
+    # APScheduler manages the SNMP poll dispatcher (1Hz) and the SQLite prune
+    # job (every 5 minutes). Each tick is short — the SNMP tick only enqueues
+    # work onto snmp_pool, the prune tick is one DELETE.
+    scheduler = BackgroundScheduler(daemon=True, timezone="UTC")
+    scheduler.add_job(snmp_scheduler_tick, "interval", seconds=1,
+                      id="snmp-sched", max_instances=1, coalesce=True)
+    scheduler.add_job(db_prune_tick, "interval", minutes=5,
+                      id="db-prune", max_instances=1, coalesce=True)
+    scheduler.start()
 
     mode = "mock" if SNMP_USE_MOCK else "real"
     crypto_state = "configured" if snmp_crypto.is_configured() else "no key set"
-    print(f"[snmp]   scheduler running ({mode}; FLOWSCOPE_SNMP_KEY: {crypto_state})")
-    print(f"[web]    http://0.0.0.0:{WEB_PORT}")
-    app.run(host=WEB_HOST, port=WEB_PORT, threaded=True, use_reloader=False)
+    print(f"[snmp]   scheduler running ({mode}; FLOWSCOPE_SNMP_KEY: {crypto_state}; "
+          f"workers={SNMP_POLL_WORKERS})")
+    print(f"[web]    http://{WEB_HOST}:{WEB_PORT} (waitress)")
+    waitress_serve(app, host=WEB_HOST, port=WEB_PORT, threads=8)
 
 
 if __name__ == "__main__":

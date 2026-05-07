@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-# Install dependencies (Python 3.9+, only Flask)
+# Install dependencies (Python 3.9+: Flask, waitress, APScheduler, pysnmp, cryptography)
 pip install -r requirements.txt
 
 # Run the collector + dashboard (binds 2055/udp, 6343/udp, 8080/tcp)
@@ -23,7 +23,7 @@ docker compose up --build
 
 There are no tests, no linter config, and no build step — `app.py` and `web/index.html` are run as-is.
 
-Environment variable overrides (also honored inside the Docker image): `FLOWSCOPE_NETFLOW_PORT`, `FLOWSCOPE_SFLOW_PORT`, `FLOWSCOPE_WEB_PORT`, `FLOWSCOPE_WEB_HOST`, `FLOWSCOPE_DB_PATH`, `FLOWSCOPE_AUTH_TOKEN`.
+Environment variable overrides (also honored inside the Docker image): `FLOWSCOPE_NETFLOW_PORT`, `FLOWSCOPE_SFLOW_PORT`, `FLOWSCOPE_WEB_PORT`, `FLOWSCOPE_WEB_HOST`, `FLOWSCOPE_DB_PATH`, `FLOWSCOPE_AUTH_TOKEN`, `FLOWSCOPE_SNMP_WORKERS` (default 8).
 
 `FLOWSCOPE_AUTH_TOKEN` (optional): when set, every `/api/*` request must include `X-Auth-Token: <value>`. Unset = no auth (current behavior). The static dashboard shell is not gated; the browser prompts for the token on first 401 and caches it in `sessionStorage`. Token comparison is constant-time. Does not provide TLS — terminate TLS at a reverse proxy.
 
@@ -37,14 +37,17 @@ FlowScope is **two single-file programs** (`app.py` backend, `web/index.html` fr
 
 ### Concurrency model in `app.py`
 
-`main()` starts three daemon threads and then runs Flask on the main thread:
+`main()` starts UDP-listener threads, RDNS workers, an APScheduler `BackgroundScheduler`, and then hands control to **waitress** as the WSGI server:
 
-1. `netflow_listener` — UDP recv loop on `NETFLOW_PORT`. Dispatches by version word: 5 → `parse_netflow_v5`, 9/10 → `parse_netflow_v9` (NetFlow v9 and IPFIX share enough wire format that they use the same parser).
-2. `sflow_listener` — UDP recv loop on `SFLOW_PORT` → `parse_sflow_v5`.
-3. `db_prune_loop` — every 5 minutes, deletes flows older than 6 hours from SQLite.
-4. Flask `app.run(threaded=True)` — request handlers read shared state.
+1. `netflow_listener` — daemon thread, UDP recv loop on `NETFLOW_PORT`. Dispatches by version word: 5 → `parse_netflow_v5`, 9/10 → `parse_netflow_v9` (NetFlow v9 and IPFIX share enough wire format that they use the same parser).
+2. `sflow_listener` — daemon thread, UDP recv loop on `SFLOW_PORT` → `parse_sflow_v5`.
+3. `rdns_loop` / `endpoint_rdns_loop` — best-effort PTR resolution for exporter and endpoint IPs.
+4. APScheduler jobs:
+   - `snmp_scheduler_tick` — runs every 1s, walks `devices`, dispatches eligible polls to `snmp_pool` (a `ThreadPoolExecutor`, default 8 workers, override via `FLOWSCOPE_SNMP_WORKERS`). Per-device interval comes from the binding (default 15s); failures bypass the interval so a flapping device retries on the next tick. The scheduler skips devices with an in-flight future to avoid stacking.
+   - `db_prune_tick` — every 5 minutes, deletes rows in `flows` and `iface_counter_samples` older than 6h.
+5. **waitress.serve** — production WSGI server (replaced `app.run()`). Request handlers read shared state under the locks.
 
-All shared mutable state (`recent_flows`, `interface_stats`, `devices`, `stats`) is guarded by **`state_lock`**. The SQLite connection is shared and guarded by **`db_lock`** (WAL mode). Any new state read or written from multiple threads must take the appropriate lock.
+All shared mutable state (`recent_flows`, `interface_stats`, `devices`, `stats`, `interface_issues`) is guarded by **`state_lock`**. The SQLite connection is shared and guarded by **`db_lock`** (WAL mode). Any new state read or written from multiple threads must take the appropriate lock.
 
 ### Data flow: parser → `record_flow` → three stores
 
@@ -56,6 +59,8 @@ Every parser ultimately calls `record_flow(rec)`, which is the single fan-out po
 - SQLite `flows` table — append-only, pruned to ~6h.
 
 **Important asymmetry for sFlow counter samples.** `parse_sflow_counters_sample` writes directly into `interface_stats` and **replaces** (not adds to) `ingress_bytes`/`ingress_packets`/`egress_bytes`/`egress_packets` with the absolute counters reported by the device. These hardware counter values are authoritative; the additive flow-derived numbers are estimates. When changing how interface totals are computed, preserve this "counter samples win" behavior — the README documents it as a feature.
+
+The same parser also persists each sample to the **`iface_counter_samples`** SQLite table (`exporter`, `ifindex`, `ts`, `in_octets`, `out_octets`, `in_pkts`, `out_pkts`). The per-interface timeseries endpoint (`/api/interfaces/<exp>/<idx>/timeseries`) diffs successive samples to compute authoritative bytes/sec rates. When no counter samples exist (NetFlow-only exporters), it falls back to flow-derived bucketing and returns `{"source": "flows"}` instead of `{"source": "counters"}`.
 
 ### NetFlow v9 / IPFIX templates
 
@@ -80,11 +85,18 @@ The agent address from the sFlow datagram header overrides the UDP source IP as 
 
 Endpoints listed in the README (`/api/summary`, `/api/devices`, `/api/interfaces`, `/api/flows/recent`, `/api/top/talkers`, `/api/top/ports`, `/api/protocols`, `/api/timeseries`). Most accept `?exporter=<ip>` for filtering; flows + timeseries also accept `?ifindex=<n>`. If you add an endpoint, follow the same pattern: read state under `state_lock`, copy out, release the lock, then aggregate.
 
+Per-interface drill-down endpoints (used by the Interfaces tab modal):
+- `GET  /api/interfaces/<exporter>/<ifindex>/timeseries?seconds=N` — bucketed ingress/egress rate. Source: counter-sample diffs when available, flow-derived fallback otherwise. Response includes `"source": "counters" | "flows"`.
+- `POST /api/interfaces/<exporter>/<ifindex>/flag` — body `{"note": "..."}`, upserts a row in `interface_issues`.
+- `DELETE /api/interfaces/<exporter>/<ifindex>/flag` — clears the flag.
+The base `/api/interfaces` response carries the extended SNMP fields (`admin_status`, `oper_status`, `in_errors`, `out_errors`, `in_discards`, `out_discards`, `mtu`, `mac`) plus `flagged` / `flag_note` for each row.
+
 ## Constraints worth knowing
 
 - **No auth on the web/API.** The README states this explicitly — don't add features that assume the dashboard is private; keep it suitable for a management network behind a reverse proxy.
-- **Single-file philosophy.** Don't split `app.py` into a package or pull in heavy deps. The only runtime dependency is Flask. SNMP polling for human interface names is intentionally out of scope (README "Limitations" section).
+- **Two-file philosophy.** `app.py` (backend) and `web/index.html` (frontend) stay as-is. Don't split into a package or add a build step. Runtime deps are Flask, waitress, APScheduler, pysnmp, cryptography — keep this set small. SNMP modules (`snmp_client.py`, `snmp_mock.py`, `snmp_crypto.py`) are the established exception; add new top-level modules only when they have a similarly clean isolated concern.
 - **In-memory ring is 5000 flows.** Anything that needs more history must query SQLite, not `recent_flows`.
+- **Adding new top-level `.py` modules requires updating the Dockerfile.** Each module needs an explicit `COPY <module>.py ./` line; missing one crashes the container with `ModuleNotFoundError`.
 
 ## Working agreement
 
