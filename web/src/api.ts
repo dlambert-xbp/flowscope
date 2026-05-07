@@ -114,20 +114,28 @@ export const api = {
     getJSON<InterfaceTimeseries>(
       `/api/interfaces/${exporter}/${ifindex}/timeseries?seconds=${seconds}`,
     ),
-  topTalkers: (windowSec = 300, limit = 20) =>
+  topTalkers: (filters: URLSearchParams, windowSec = 300, limit = 20) =>
     getJSON<TopResponse<TopTalker>>(
-      `/api/top/talkers?window=${windowSec}s&limit=${limit}`,
+      withFilters(`/api/top/talkers?window=${windowSec}s&limit=${limit}`, filters),
     ),
-  topServices: (windowSec = 300, limit = 20) =>
+  topServices: (filters: URLSearchParams, windowSec = 300, limit = 20) =>
     getJSON<TopResponse<TopService>>(
-      `/api/top/services?window=${windowSec}s&limit=${limit}`,
+      withFilters(`/api/top/services?window=${windowSec}s&limit=${limit}`, filters),
     ),
-  topProtocols: (windowSec = 300) =>
-    getJSON<TopResponse<TopProtocol>>(`/api/top/protocols?window=${windowSec}s`),
-  topConversations: (windowSec = 300, limit = 20) =>
+  topProtocols: (filters: URLSearchParams, windowSec = 300) =>
+    getJSON<TopResponse<TopProtocol>>(
+      withFilters(`/api/top/protocols?window=${windowSec}s`, filters),
+    ),
+  topConversations: (filters: URLSearchParams, windowSec = 300, limit = 20) =>
     getJSON<TopResponse<TopConversation>>(
-      `/api/top/conversations?window=${windowSec}s&limit=${limit}`,
+      withFilters(`/api/top/conversations?window=${windowSec}s&limit=${limit}`, filters),
     ),
+}
+
+function withFilters(url: string, filters: URLSearchParams): string {
+  const tail = filters.toString()
+  if (!tail) return url
+  return `${url}&${tail}`
 }
 
 // Formatting helpers used across components.

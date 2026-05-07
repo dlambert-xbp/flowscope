@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/netip"
+	"strings"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
@@ -210,6 +211,67 @@ ORDER BY ts`
 	return out, rows.Err()
 }
 
+// FlowFilter narrows top-N queries by exporter, 5-tuple, or protocol.
+// Empty / zero fields mean "no filter on this dimension". Parameters
+// are bound through the driver — never interpolated into SQL — so
+// untrusted user input cannot escape into the WHERE clause.
+type FlowFilter struct {
+	Exporter string // IP string ("10.2.0.11" or "2001:db8::1"); validated as netip.Addr
+	SrcAddr  string
+	DstAddr  string
+	SrcPort  uint16 // 0 = unset
+	DstPort  uint16
+	Proto    uint16 // 16-bit so 0 can mean "unset"; valid values fit in 8 bits
+}
+
+// buildWhere returns SQL fragments and bound args for the WHERE clause
+// produced by a FlowFilter. The first fragment is always the trailing
+// window predicate; the rest are filter terms appended only for fields
+// the operator actually set.
+func buildWhere(window time.Duration, f FlowFilter) (string, []any, error) {
+	if window <= 0 {
+		window = 5 * time.Minute
+	}
+	where := []string{"observed >= now() - INTERVAL ? SECOND"}
+	args := []any{uint64(window.Seconds())}
+
+	addAddr := func(name, raw string) error {
+		if raw == "" {
+			return nil
+		}
+		addr, err := netip.ParseAddr(raw)
+		if err != nil {
+			return fmt.Errorf("filter.%s: %w", name, err)
+		}
+		bytes := addr.As16()
+		where = append(where, name+" = ?")
+		args = append(args, bytes[:])
+		return nil
+	}
+	if err := addAddr("exporter", f.Exporter); err != nil {
+		return "", nil, err
+	}
+	if err := addAddr("src_addr", f.SrcAddr); err != nil {
+		return "", nil, err
+	}
+	if err := addAddr("dst_addr", f.DstAddr); err != nil {
+		return "", nil, err
+	}
+	if f.SrcPort != 0 {
+		where = append(where, "src_port = ?")
+		args = append(args, f.SrcPort)
+	}
+	if f.DstPort != 0 {
+		where = append(where, "dst_port = ?")
+		args = append(args, f.DstPort)
+	}
+	if f.Proto != 0 {
+		where = append(where, "proto = ?")
+		args = append(args, uint8(f.Proto))
+	}
+	return strings.Join(where, " AND "), args, nil
+}
+
 // TopTalker is a (src, dst) pair aggregated over a window. Returned by
 // /api/top/talkers.
 type TopTalker struct {
@@ -252,25 +314,27 @@ type TopConversation struct {
 }
 
 // QueryTopTalkers returns the N largest src→dst byte aggregates over
-// the trailing window.
-func QueryTopTalkers(ctx context.Context, conn driver.Conn, window time.Duration, limit int) ([]TopTalker, error) {
-	if window <= 0 {
-		window = 5 * time.Minute
-	}
+// the trailing window, narrowed by the supplied FlowFilter.
+func QueryTopTalkers(ctx context.Context, conn driver.Conn, window time.Duration, limit int, f FlowFilter) ([]TopTalker, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 20
 	}
-	const q = `
+	whereSQL, args, err := buildWhere(window, f)
+	if err != nil {
+		return nil, err
+	}
+	q := `
 SELECT src_addr, dst_addr,
        sum(bytes)   AS bytes,
        sum(packets) AS packets,
        count()      AS flows
 FROM flows
-WHERE observed >= now() - INTERVAL ? SECOND
+WHERE ` + whereSQL + `
 GROUP BY src_addr, dst_addr
 ORDER BY bytes DESC
 LIMIT ?`
-	rows, err := conn.Query(ctx, q, uint64(window.Seconds()), uint64(limit))
+	args = append(args, uint64(limit))
+	rows, err := conn.Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("store: query top talkers: %w", err)
 	}
@@ -293,24 +357,26 @@ LIMIT ?`
 }
 
 // QueryTopServices returns the N largest (dst_port, proto) byte
-// aggregates over the trailing window.
-func QueryTopServices(ctx context.Context, conn driver.Conn, window time.Duration, limit int) ([]TopService, error) {
-	if window <= 0 {
-		window = 5 * time.Minute
-	}
+// aggregates over the trailing window, narrowed by the FlowFilter.
+func QueryTopServices(ctx context.Context, conn driver.Conn, window time.Duration, limit int, f FlowFilter) ([]TopService, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 20
 	}
-	const q = `
+	whereSQL, args, err := buildWhere(window, f)
+	if err != nil {
+		return nil, err
+	}
+	q := `
 SELECT dst_port, proto,
        sum(bytes) AS bytes,
        count()    AS flows
 FROM flows
-WHERE observed >= now() - INTERVAL ? SECOND
+WHERE ` + whereSQL + `
 GROUP BY dst_port, proto
 ORDER BY bytes DESC
 LIMIT ?`
-	rows, err := conn.Query(ctx, q, uint64(window.Seconds()), uint64(limit))
+	args = append(args, uint64(limit))
+	rows, err := conn.Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("store: query top services: %w", err)
 	}
@@ -327,21 +393,22 @@ LIMIT ?`
 }
 
 // QueryTopProtocols returns one row per IP protocol number, ordered by
-// total bytes desc.
-func QueryTopProtocols(ctx context.Context, conn driver.Conn, window time.Duration) ([]TopProtocol, error) {
-	if window <= 0 {
-		window = 5 * time.Minute
+// total bytes desc, narrowed by the FlowFilter.
+func QueryTopProtocols(ctx context.Context, conn driver.Conn, window time.Duration, f FlowFilter) ([]TopProtocol, error) {
+	whereSQL, args, err := buildWhere(window, f)
+	if err != nil {
+		return nil, err
 	}
-	const q = `
+	q := `
 SELECT proto,
        sum(bytes)   AS bytes,
        sum(packets) AS packets,
        count()      AS flows
 FROM flows
-WHERE observed >= now() - INTERVAL ? SECOND
+WHERE ` + whereSQL + `
 GROUP BY proto
 ORDER BY bytes DESC`
-	rows, err := conn.Query(ctx, q, uint64(window.Seconds()))
+	rows, err := conn.Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("store: query top protocols: %w", err)
 	}
@@ -358,26 +425,28 @@ ORDER BY bytes DESC`
 }
 
 // QueryTopConversations returns the N largest 5-tuple aggregates over
-// the trailing window.
-func QueryTopConversations(ctx context.Context, conn driver.Conn, window time.Duration, limit int) ([]TopConversation, error) {
-	if window <= 0 {
-		window = 5 * time.Minute
-	}
+// the trailing window, narrowed by the FlowFilter.
+func QueryTopConversations(ctx context.Context, conn driver.Conn, window time.Duration, limit int, f FlowFilter) ([]TopConversation, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 20
 	}
-	const q = `
+	whereSQL, args, err := buildWhere(window, f)
+	if err != nil {
+		return nil, err
+	}
+	q := `
 SELECT src_addr, dst_addr, src_port, dst_port, proto,
        sum(bytes)   AS bytes,
        sum(packets) AS packets,
        count()      AS flows,
        max(observed) AS last_seen
 FROM flows
-WHERE observed >= now() - INTERVAL ? SECOND
+WHERE ` + whereSQL + `
 GROUP BY src_addr, dst_addr, src_port, dst_port, proto
 ORDER BY bytes DESC
 LIMIT ?`
-	rows, err := conn.Query(ctx, q, uint64(window.Seconds()), uint64(limit))
+	args = append(args, uint64(limit))
+	rows, err := conn.Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("store: query top conversations: %w", err)
 	}

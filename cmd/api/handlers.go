@@ -63,21 +63,48 @@ func (h *handlers) recentFlows(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// parseFilter pulls the supported filter query parameters off a
+// request and returns a store.FlowFilter. Unknown params are ignored;
+// invalid IPs and ports are also ignored (silently dropped) so a
+// half-typed URL doesn't break the dashboard. The store.buildWhere
+// helper validates IPs again at query time and reports parse errors.
+func parseFilter(r *http.Request) store.FlowFilter {
+	q := r.URL.Query()
+	return store.FlowFilter{
+		Exporter: q.Get("exporter"),
+		SrcAddr:  q.Get("src_addr"),
+		DstAddr:  q.Get("dst_addr"),
+		SrcPort:  parseUint16(q.Get("src_port")),
+		DstPort:  parseUint16(q.Get("dst_port")),
+		Proto:    parseUint16(q.Get("proto")),
+	}
+}
+
+func parseUint16(s string) uint16 {
+	if s == "" {
+		return 0
+	}
+	n, err := strconv.ParseUint(s, 10, 16)
+	if err != nil {
+		return 0
+	}
+	return uint16(n)
+}
+
 // topTalkers / topServices / topProtocols / topConversations all
-// share a window= query parameter. Limit is shared too where
-// applicable. Source label = "flows" since they aggregate the flows
-// table; counter-sample-derived rates live behind /api/interfaces/...
+// share window=, limit= (where applicable), and the filter query
+// parameters parsed by parseFilter. Source label = "flows".
 func (h *handlers) topTalkers(w http.ResponseWriter, r *http.Request) {
 	window := parseWindow(r.URL.Query().Get("window"), 5*time.Minute)
 	limit := parseInt(r.URL.Query().Get("limit"), 20)
-	rows, err := store.QueryTopTalkers(r.Context(), h.conn, window, limit)
+	rows, err := store.QueryTopTalkers(r.Context(), h.conn, window, limit, parseFilter(r))
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"count": len(rows),
-		"rows":  rows,
+		"count":  len(rows),
+		"rows":   rows,
 		"source": "flows",
 		"window": window.String(),
 	})
@@ -86,14 +113,14 @@ func (h *handlers) topTalkers(w http.ResponseWriter, r *http.Request) {
 func (h *handlers) topServices(w http.ResponseWriter, r *http.Request) {
 	window := parseWindow(r.URL.Query().Get("window"), 5*time.Minute)
 	limit := parseInt(r.URL.Query().Get("limit"), 20)
-	rows, err := store.QueryTopServices(r.Context(), h.conn, window, limit)
+	rows, err := store.QueryTopServices(r.Context(), h.conn, window, limit, parseFilter(r))
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"count": len(rows),
-		"rows":  rows,
+		"count":  len(rows),
+		"rows":   rows,
 		"source": "flows",
 		"window": window.String(),
 	})
@@ -101,14 +128,14 @@ func (h *handlers) topServices(w http.ResponseWriter, r *http.Request) {
 
 func (h *handlers) topProtocols(w http.ResponseWriter, r *http.Request) {
 	window := parseWindow(r.URL.Query().Get("window"), 5*time.Minute)
-	rows, err := store.QueryTopProtocols(r.Context(), h.conn, window)
+	rows, err := store.QueryTopProtocols(r.Context(), h.conn, window, parseFilter(r))
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"count": len(rows),
-		"rows":  rows,
+		"count":  len(rows),
+		"rows":   rows,
 		"source": "flows",
 		"window": window.String(),
 	})
@@ -117,14 +144,14 @@ func (h *handlers) topProtocols(w http.ResponseWriter, r *http.Request) {
 func (h *handlers) topConversations(w http.ResponseWriter, r *http.Request) {
 	window := parseWindow(r.URL.Query().Get("window"), 5*time.Minute)
 	limit := parseInt(r.URL.Query().Get("limit"), 20)
-	rows, err := store.QueryTopConversations(r.Context(), h.conn, window, limit)
+	rows, err := store.QueryTopConversations(r.Context(), h.conn, window, limit, parseFilter(r))
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"count": len(rows),
-		"rows":  rows,
+		"count":  len(rows),
+		"rows":   rows,
 		"source": "flows",
 		"window": window.String(),
 	})

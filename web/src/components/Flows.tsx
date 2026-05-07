@@ -7,56 +7,108 @@ import type {
   TopProtocol,
   TopConversation,
 } from '../api'
+import { useFilters, toQuery, type Filter, type FilterKey } from '../filters'
 
-// Flows tab — top-N panels over the trailing 5 minutes. Filter chips
-// are stubbed (the chip strip renders but doesn't yet compose into
-// queries) — composable filters are a follow-up slice.
+// Flows tab — top-N panels narrowed by a composable filter set. Click
+// any value (talker src, talker dst, service port, protocol, full
+// 5-tuple) to add or replace a filter chip; chips re-narrow every
+// panel's query and persist in the URL.
 export function Flows() {
+  const f = useFilters()
+  const qs = toQuery(f.filters)
   return (
     <div>
-      <Filters />
+      <FilterBar filters={f.filters} onRemove={f.remove} onClear={f.clear} />
       <div className="grid grid-cols-1 lg:grid-cols-2 border-b border-line">
         <Panel title="Top talkers" sub="src → dst · by bytes" right="SOURCE · FLOWS">
-          <TalkersList />
+          <TalkersList qs={qs} onAdd={f.add} />
         </Panel>
         <Panel title="Top services" sub="dst port · by bytes" right="SOURCE · FLOWS">
-          <ServicesList />
+          <ServicesList qs={qs} onAdd={f.add} />
         </Panel>
         <Panel title="Top protocols" sub="share of total" right="SOURCE · FLOWS">
-          <ProtocolsList />
+          <ProtocolsList qs={qs} onAdd={f.add} />
         </Panel>
         <Panel title="Top conversations" sub="5-tuple · by bytes" right="SOURCE · FLOWS">
-          <ConversationsList />
+          <ConversationsList qs={qs} onAdd={f.add} />
         </Panel>
       </div>
     </div>
   )
 }
 
-/* ----------------------------- Chrome ----------------------------- */
+/* ----------------------------- Filter bar ----------------------------- */
 
-function Filters() {
+function FilterBar({
+  filters,
+  onRemove,
+  onClear,
+}: {
+  filters: Filter[]
+  onRemove: (key: FilterKey, value?: string) => void
+  onClear: () => void
+}) {
+  const has = filters.length > 0
   return (
-    <div className="flex items-center gap-3 px-4 py-3 border-b border-line bg-surface">
-      <span className="text-[10.5px] uppercase tracking-[0.1em] text-faint font-semibold">
+    <div className="flex items-center gap-2 px-4 py-3 border-b border-line bg-surface flex-wrap">
+      <span className="text-[10.5px] uppercase tracking-[0.1em] text-faint font-semibold mr-1">
         Filters
       </span>
-      <Chip>window · 5 min</Chip>
-      <Chip>—</Chip>
-      <span className="font-mono text-[11px] text-faint italic">
-        composable filter chips arrive in a follow-up slice
-      </span>
+      <Chip neutral>window · 5 min</Chip>
+      {filters.map((f) => (
+        <Chip key={`${f.key}_${f.value}`} onRemove={() => onRemove(f.key, f.value)}>
+          <span className="text-faint">{f.key} ·</span> {f.label ?? f.value}
+        </Chip>
+      ))}
+      {has ? (
+        <button
+          className="ml-auto font-mono text-[11px] text-dim hover:text-text px-2 py-1 border border-line"
+          onClick={onClear}
+        >
+          clear all
+        </button>
+      ) : (
+        <span className="ml-auto font-mono text-[11px] text-faint italic">
+          click any row to add a filter
+        </span>
+      )}
     </div>
   )
 }
 
-function Chip({ children }: { children: ReactNode }) {
+function Chip({
+  children,
+  neutral,
+  onRemove,
+}: {
+  children: ReactNode
+  neutral?: boolean
+  onRemove?: () => void
+}) {
+  if (neutral) {
+    return (
+      <span className="font-mono text-[11px] px-2 py-1 border border-line text-dim">
+        {children}
+      </span>
+    )
+  }
   return (
-    <span className="font-mono text-[11px] px-2 py-1 border border-line text-dim hover:text-text">
-      {children}
+    <span className="font-mono text-[11px] inline-flex items-center gap-1.5 pl-2 pr-1 py-1 border border-accent/40 bg-accent-wash text-text">
+      <span>{children}</span>
+      {onRemove && (
+        <button
+          onClick={onRemove}
+          className="text-faint hover:text-crit text-[12px] leading-none px-1"
+          aria-label="remove filter"
+        >
+          ×
+        </button>
+      )}
     </span>
   )
 }
+
+/* ----------------------------- Panel chrome ----------------------------- */
 
 function Panel({
   title,
@@ -83,31 +135,12 @@ function Panel({
   )
 }
 
-/* ----------------------------- Bar list ----------------------------- */
+/* ----------------------------- Per-panel lists ----------------------------- */
 
-function Bar({
-  pct,
-  className = 'bg-accent',
-}: {
-  pct: number
-  className?: string
-}) {
-  return (
-    <div className="h-px bg-line w-full overflow-hidden">
-      <div
-        className={`h-full ${className}`}
-        style={{ width: `${Math.min(100, Math.max(0, pct))}%` }}
-      />
-    </div>
-  )
-}
-
-/* ----------------------------- Top talkers ----------------------------- */
-
-function TalkersList() {
+function TalkersList({ qs, onAdd }: { qs: URLSearchParams; onAdd: (f: Filter) => void }) {
   const q = useQuery({
-    queryKey: ['top-talkers'],
-    queryFn: () => api.topTalkers(300, 12),
+    queryKey: ['top-talkers', qs.toString()],
+    queryFn: () => api.topTalkers(qs, 300, 12),
   })
   return (
     <ListShell loading={q.isLoading} empty={!q.data?.rows.length} error={q.error as Error | undefined}>
@@ -117,7 +150,13 @@ function TalkersList() {
         keyOf={(r) => `${r.src_addr}>${r.dst_addr}`}
         renderLeft={(r: TopTalker) => (
           <span className="font-mono text-[12px]">
-            {r.src_addr} <span className="text-faint">→</span> {r.dst_addr}
+            <FilterTrigger value={r.src_addr} onAdd={onAdd} k="src_addr">
+              {r.src_addr}
+            </FilterTrigger>{' '}
+            <span className="text-faint">→</span>{' '}
+            <FilterTrigger value={r.dst_addr} onAdd={onAdd} k="dst_addr">
+              {r.dst_addr}
+            </FilterTrigger>
           </span>
         )}
         renderRight={(r: TopTalker) => fmt.bytes(r.bytes)}
@@ -127,12 +166,10 @@ function TalkersList() {
   )
 }
 
-/* ----------------------------- Top services ----------------------------- */
-
-function ServicesList() {
+function ServicesList({ qs, onAdd }: { qs: URLSearchParams; onAdd: (f: Filter) => void }) {
   const q = useQuery({
-    queryKey: ['top-services'],
-    queryFn: () => api.topServices(300, 12),
+    queryKey: ['top-services', qs.toString()],
+    queryFn: () => api.topServices(qs, 300, 12),
   })
   return (
     <ListShell loading={q.isLoading} empty={!q.data?.rows.length} error={q.error as Error | undefined}>
@@ -142,9 +179,24 @@ function ServicesList() {
         keyOf={(r) => `${r.dst_port}_${r.proto}`}
         renderLeft={(r: TopService) => (
           <span className="font-mono text-[12px]">
-            <span className="text-text">{serviceFor(r.dst_port) ?? `port ${r.dst_port}`}</span>{' '}
+            <FilterTrigger
+              k="dst_port"
+              value={String(r.dst_port)}
+              onAdd={onAdd}
+              label={`${serviceFor(r.dst_port) ?? `port ${r.dst_port}`}`}
+            >
+              <span className="text-text">{serviceFor(r.dst_port) ?? `port ${r.dst_port}`}</span>
+            </FilterTrigger>{' '}
             <span className="text-faint">·</span>{' '}
-            <span className="text-faint">{fmt.proto(r.proto)} {r.dst_port}</span>
+            <FilterTrigger
+              k="proto"
+              value={String(r.proto)}
+              onAdd={onAdd}
+              label={fmt.proto(r.proto)}
+            >
+              <span className="text-faint">{fmt.proto(r.proto)}</span>
+            </FilterTrigger>{' '}
+            <span className="text-faint">{r.dst_port}</span>
           </span>
         )}
         renderRight={(r: TopService) => fmt.bytes(r.bytes)}
@@ -154,12 +206,10 @@ function ServicesList() {
   )
 }
 
-/* ----------------------------- Top protocols ----------------------------- */
-
-function ProtocolsList() {
+function ProtocolsList({ qs, onAdd }: { qs: URLSearchParams; onAdd: (f: Filter) => void }) {
   const q = useQuery({
-    queryKey: ['top-protocols'],
-    queryFn: () => api.topProtocols(300),
+    queryKey: ['top-protocols', qs.toString()],
+    queryFn: () => api.topProtocols(qs, 300),
   })
   const total = q.data?.rows.reduce((a, r) => a + r.bytes, 0) ?? 0
   return (
@@ -170,7 +220,9 @@ function ProtocolsList() {
         keyOf={(r) => String(r.proto)}
         renderLeft={(r: TopProtocol) => (
           <span className="font-mono text-[12px]">
-            <span className="text-text">{fmt.proto(r.proto)}</span>{' '}
+            <FilterTrigger k="proto" value={String(r.proto)} onAdd={onAdd} label={fmt.proto(r.proto)}>
+              <span className="text-text">{fmt.proto(r.proto)}</span>
+            </FilterTrigger>{' '}
             <span className="text-faint">· {r.proto}</span>
           </span>
         )}
@@ -183,12 +235,16 @@ function ProtocolsList() {
   )
 }
 
-/* ----------------------------- Top conversations ----------------------------- */
-
-function ConversationsList() {
+function ConversationsList({
+  qs,
+  onAdd,
+}: {
+  qs: URLSearchParams
+  onAdd: (f: Filter) => void
+}) {
   const q = useQuery({
-    queryKey: ['top-conversations'],
-    queryFn: () => api.topConversations(300, 12),
+    queryKey: ['top-conversations', qs.toString()],
+    queryFn: () => api.topConversations(qs, 300, 12),
   })
   return (
     <ListShell loading={q.isLoading} empty={!q.data?.rows.length} error={q.error as Error | undefined}>
@@ -198,9 +254,18 @@ function ConversationsList() {
         keyOf={(r) => `${r.src_addr}_${r.src_port}_${r.dst_addr}_${r.dst_port}_${r.proto}`}
         renderLeft={(r: TopConversation) => (
           <span className="font-mono text-[12px] text-text">
-            {r.src_addr}:{r.src_port}{' '}
-            <span className="text-faint">→</span> {r.dst_addr}:{r.dst_port}{' '}
-            <span className="text-faint">· {fmt.proto(r.proto)}</span>
+            <FilterTrigger k="src_addr" value={r.src_addr} onAdd={onAdd}>
+              {r.src_addr}
+            </FilterTrigger>
+            :{r.src_port}{' '}
+            <span className="text-faint">→</span>{' '}
+            <FilterTrigger k="dst_addr" value={r.dst_addr} onAdd={onAdd}>
+              {r.dst_addr}
+            </FilterTrigger>
+            :{r.dst_port}{' '}
+            <FilterTrigger k="proto" value={String(r.proto)} onAdd={onAdd} label={fmt.proto(r.proto)}>
+              <span className="text-faint">· {fmt.proto(r.proto)}</span>
+            </FilterTrigger>
           </span>
         )}
         renderRight={(r: TopConversation) => fmt.bytes(r.bytes)}
@@ -210,7 +275,32 @@ function ConversationsList() {
   )
 }
 
-/* ----------------------------- Generic shell + rows ----------------------------- */
+/* ----------------------------- Filter trigger ----------------------------- */
+
+function FilterTrigger({
+  k,
+  value,
+  label,
+  onAdd,
+  children,
+}: {
+  k: FilterKey
+  value: string
+  label?: string
+  onAdd: (f: Filter) => void
+  children: ReactNode
+}) {
+  return (
+    <button
+      onClick={() => onAdd({ key: k, value, label })}
+      className="hover:text-accent hover:underline decoration-dotted underline-offset-2"
+    >
+      {children}
+    </button>
+  )
+}
+
+/* ----------------------------- Generic list ----------------------------- */
 
 function ListShell({
   loading,
@@ -269,8 +359,8 @@ function Rows<T>({
               <div className="min-w-0 truncate">{renderLeft(r)}</div>
               <div className="font-mono text-[12px] tabular text-text shrink-0">{renderRight(r)}</div>
             </div>
-            <div className="mt-1.5">
-              <Bar pct={pct} />
+            <div className="mt-1.5 h-px bg-line w-full overflow-hidden">
+              <div className="h-full bg-accent" style={{ width: `${Math.min(100, Math.max(0, pct))}%` }} />
             </div>
           </li>
         )
