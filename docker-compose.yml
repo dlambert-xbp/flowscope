@@ -24,10 +24,11 @@ services:
       - clickhouse-logs:/var/log/clickhouse-server
       - ./deploy/clickhouse/users.d:/etc/clickhouse-server/users.d:ro
     environment:
+      # CLICKHOUSE_DB creates the database via SQL at first boot.
+      # User/password come from the mounted users.d/flowscope.xml —
+      # do NOT set CLICKHOUSE_USER here or the entrypoint will try to
+      # write users.d/default-user.xml, which our :ro mount forbids.
       CLICKHOUSE_DB: flowscope
-      CLICKHOUSE_USER: flowscope
-      CLICKHOUSE_PASSWORD: flowscope
-      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8123/ping || exit 1"]
       interval: 5s
