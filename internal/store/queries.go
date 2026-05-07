@@ -117,8 +117,7 @@ func QueryInterfaces(ctx context.Context, conn driver.Conn, window time.Duration
 			return nil, fmt.Errorf("store: invalid exporter address: %w", err)
 		}
 		exporterPredicate = " AND exporter = ?"
-		bytes := addr.As16()
-		args = append(args, bytes[:])
+		args = append(args, toIPv6(addr))
 	}
 	q := `
 WITH diffed AS (
@@ -200,8 +199,7 @@ SELECT
 FROM diffed
 WHERE dt_ms > 0
 ORDER BY ts`
-	expBytes := exporter.As16()
-	rows, err := conn.Query(ctx, q, expBytes[:], ifindex, uint64(window.Seconds()))
+	rows, err := conn.Query(ctx, q, toIPv6(exporter), ifindex, uint64(window.Seconds()))
 	if err != nil {
 		return nil, fmt.Errorf("store: query interface timeseries: %w", err)
 	}
@@ -311,8 +309,8 @@ SELECT
 FROM flows
 WHERE observed >= now() - INTERVAL ? SECOND AND exporter = ?
 GROUP BY exporter`
-	expBytes := exporter.As16()
-	row := conn.QueryRow(ctx, q, uint64(window.Seconds()), expBytes[:])
+	expIP := toIPv6(exporter)
+	row := conn.QueryRow(ctx, q, uint64(window.Seconds()), expIP)
 	var d Device
 	if err := row.Scan(&d.Flows, &d.Bytes, &d.Packets, &d.FirstSeen, &d.LastSeen); err != nil {
 		// clickhouse-go returns sql.ErrNoRows wrapped on empty groups
@@ -328,7 +326,7 @@ GROUP BY exporter`
 SELECT uniq(ifindex)
 FROM iface_counter_samples
 WHERE ts >= now() - INTERVAL ? SECOND AND exporter = ?`
-	if err := conn.QueryRow(ctx, qi, uint64(window.Seconds()), expBytes[:]).Scan(&d.IfaceCount); err != nil {
+	if err := conn.QueryRow(ctx, qi, uint64(window.Seconds()), expIP).Scan(&d.IfaceCount); err != nil {
 		// Non-fatal; counter samples may not exist for NetFlow-only
 		// exporters.
 		d.IfaceCount = 0
@@ -389,7 +387,7 @@ type SNMPInterface struct {
 // exporter plus all interfaces from the same poll. Returns
 // ErrNotFound when SNMP has never walked this device.
 func QueryDeviceInventory(ctx context.Context, conn driver.Conn, exporter netip.Addr) (*DeviceInventory, error) {
-	expBytes := exporter.As16()
+	expIP := toIPv6(exporter)
 
 	const q = `
 SELECT
@@ -400,7 +398,7 @@ FROM device_inventory
 WHERE exporter = ?
 ORDER BY polled_at DESC
 LIMIT 1`
-	row := conn.QueryRow(ctx, q, expBytes[:])
+	row := conn.QueryRow(ctx, q, expIP)
 	var inv DeviceInventory
 	if err := row.Scan(
 		&inv.PolledAt, &inv.SysDescr, &inv.SysObjectID, &inv.SysUptimeMs,
@@ -422,7 +420,7 @@ SELECT
 FROM device_snmp_interfaces
 WHERE exporter = ? AND polled_at = ?
 ORDER BY ifindex`
-	rows, err := conn.Query(ctx, qi, expBytes[:], inv.PolledAt)
+	rows, err := conn.Query(ctx, qi, expIP, inv.PolledAt)
 	if err != nil {
 		return nil, fmt.Errorf("store: query inventory interfaces: %w", err)
 	}
@@ -651,9 +649,8 @@ func buildWhere(window time.Duration, f FlowFilter) (string, []any, error) {
 		if err != nil {
 			return fmt.Errorf("filter.%s: %w", name, err)
 		}
-		bytes := addr.As16()
 		where = append(where, name+" = ?")
-		args = append(args, bytes[:])
+		args = append(args, toIPv6(addr))
 		return nil
 	}
 	if err := addAddr("exporter", f.Exporter); err != nil {
@@ -894,8 +891,7 @@ func QueryRecentFlows(ctx context.Context, conn driver.Conn, limit int, exporter
 			return nil, fmt.Errorf("store: invalid exporter address: %w", err)
 		}
 		exporterPredicate = " WHERE exporter = ?"
-		bytes := addr.As16()
-		args = append(args, bytes[:])
+		args = append(args, toIPv6(addr))
 	}
 	q := `
 SELECT
