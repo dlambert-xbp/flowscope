@@ -6,9 +6,9 @@
 // hot ring + the ClickHouse `flows` batcher; CounterSample records to
 // the ClickHouse `iface_counter_samples` batcher.
 //
-// Today: NetFlow v5 and sFlow v5 are wired. NetFlow v9 / IPFIX land
-// in a follow-up slice. See VISION.md and CLAUDE.md for the full
-// architecture.
+// Today: NetFlow v5, NetFlow v9, IPFIX (v10), and sFlow v5 are wired.
+// gNMI subscriptions are Phase 3. See VISION.md and CLAUDE.md for the
+// full architecture.
 package main
 
 import (
@@ -94,12 +94,13 @@ func run() error {
 
 	flowEmitter := record.NewEmitter(ring, flowSinks...)
 	counterEmitter := record.NewCounterEmitter(counterSinks...)
+	templateCache := netflow.NewTemplateCache()
 
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		if err := runNetFlowListener(ctx, netflowAddr, flowEmitter); err != nil {
+		if err := runNetFlowListener(ctx, netflowAddr, flowEmitter, templateCache); err != nil {
 			slog.Error("netflow listener exited", "err", err)
 		}
 	}()
@@ -137,9 +138,10 @@ func run() error {
 	return nil
 }
 
-// runNetFlowListener serves the NetFlow / IPFIX UDP port. Today only
-// v5 is wired; v9 and IPFIX dispatch lands when those parsers ship.
-func runNetFlowListener(ctx context.Context, addr string, emitter *record.Emitter) error {
+// runNetFlowListener serves the NetFlow / IPFIX UDP port. Dispatches
+// by version word: 5 → fixed v5 parser, 9 / 10 → template-driven
+// v9 / IPFIX parser sharing the supplied TemplateCache.
+func runNetFlowListener(ctx context.Context, addr string, emitter *record.Emitter, cache *netflow.TemplateCache) error {
 	conn, err := openUDP(ctx, addr)
 	if err != nil {
 		return err
@@ -162,21 +164,24 @@ func runNetFlowListener(ctx context.Context, addr string, emitter *record.Emitte
 		}
 		exporter := src.Addr().Unmap()
 		version := binary.BigEndian.Uint16(buf[0:2])
+		scratch = scratch[:0]
 		switch version {
 		case 5:
-			scratch = scratch[:0]
 			scratch, err = netflow.ParseV5(buf[:n], exporter, scratch)
-			if err != nil {
-				slog.Debug("netflow v5 parse error", "err", err, "src", src)
-				continue
-			}
-			for _, f := range scratch {
-				if err := emitter.Emit(ctx, f); err != nil {
-					slog.Warn("emit failed", "err", err)
-				}
-			}
+		case 9, 10:
+			scratch, err = netflow.ParseV9OrIPFIX(cache, buf[:n], exporter, scratch)
 		default:
 			slog.Debug("unhandled netflow version", "version", version, "src", src)
+			continue
+		}
+		if err != nil {
+			slog.Debug("netflow parse error", "version", version, "err", err, "src", src)
+			continue
+		}
+		for _, f := range scratch {
+			if err := emitter.Emit(ctx, f); err != nil {
+				slog.Warn("emit failed", "err", err)
+			}
 		}
 	}
 }
