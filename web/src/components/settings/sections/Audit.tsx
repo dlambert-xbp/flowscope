@@ -34,7 +34,7 @@ export function Audit() {
   return (
     <div>
       <SectionHeader
-        eyebrow="Settings · Audit"
+        eyebrow="Audit"
         title="Settings change log"
         subtitle="Append-only ledger. Every settings mutation lands here with the before/after row, the actor, and the request id. TTL'd at 365 days."
       />
@@ -85,6 +85,7 @@ export function Audit() {
             <table className="w-full">
               <thead>
                 <tr className="border-b border-line bg-raise">
+                  <Th />
                   <Th>when</Th>
                   <Th>action</Th>
                   <Th>resource</Th>
@@ -111,7 +112,7 @@ export function Audit() {
   )
 }
 
-function Th({ children }: { children: React.ReactNode }) {
+function Th({ children }: { children?: React.ReactNode }) {
   return (
     <th className="text-left text-[10.5px] uppercase tracking-[0.1em] text-faint font-mono font-semibold px-3 py-2">
       {children}
@@ -128,6 +129,9 @@ function Row({ e, expanded, onToggle }: { e: AuditEntry; expanded: boolean; onTo
         className="border-b border-line/60 hover:bg-surface cursor-pointer"
         onClick={onToggle}
       >
+        <td className="px-2 py-1.5 text-faint w-[16px] text-center font-mono text-[11px]">
+          {expanded ? '▾' : '▸'}
+        </td>
         <td className="px-3 py-1.5 text-[11.5px] font-mono text-faint">{ts}</td>
         <td className="px-3 py-1.5"><Tag tone={tone}>{e.action}</Tag></td>
         <td className="px-3 py-1.5 text-[12px] font-mono text-dim">{e.resource}</td>
@@ -137,19 +141,9 @@ function Row({ e, expanded, onToggle }: { e: AuditEntry; expanded: boolean; onTo
       </tr>
       {expanded && (
         <tr>
-          <td colSpan={6} className="bg-raise px-4 py-3 text-[11.5px] font-mono">
-            {e.before_json && (
-              <div className="mb-2">
-                <div className="text-faint mb-1">before</div>
-                <pre className="bg-ink border border-line px-2 py-1 overflow-x-auto whitespace-pre-wrap break-all">{prettyJSON(e.before_json)}</pre>
-              </div>
-            )}
-            {e.after_json && (
-              <div>
-                <div className="text-faint mb-1">after</div>
-                <pre className="bg-ink border border-line px-2 py-1 overflow-x-auto whitespace-pre-wrap break-all">{prettyJSON(e.after_json)}</pre>
-              </div>
-            )}
+          <td colSpan={7} className="bg-raise px-4 py-3 text-[11.5px] font-mono">
+            {e.before_json && <Diff label="before" body={e.before_json} />}
+            {e.after_json && <Diff label="after" body={e.after_json} />}
             {e.request_id && (
               <div className="mt-2 text-faint">request_id · {e.request_id}</div>
             )}
@@ -157,6 +151,26 @@ function Row({ e, expanded, onToggle }: { e: AuditEntry; expanded: boolean; onTo
         </tr>
       )}
     </>
+  )
+}
+
+function Diff({ label, body }: { label: string; body: string }) {
+  let parsed: unknown = null
+  try { parsed = JSON.parse(body) } catch { /* leave null */ }
+  const keyCount = parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+    ? Object.keys(parsed as object).length
+    : null
+  const bytes = body.length
+  return (
+    <div className="mb-2">
+      <div className="text-faint mb-1">
+        {label}
+        {keyCount !== null && <span className="ml-2">· {keyCount} keys · {bytes} bytes</span>}
+      </div>
+      <pre className="bg-ink border border-line px-2 py-1 overflow-auto whitespace-pre-wrap break-all max-h-[280px]">
+        {prettyJSON(body)}
+      </pre>
+    </div>
   )
 }
 

@@ -26,21 +26,20 @@ export type SectionId =
 type SectionDef = {
   id: SectionId
   label: string
-  hint: string
   group: 'core' | 'connectivity' | 'alerting' | 'admin'
   Component: () => ReactElement
 }
 
 const SECTIONS: SectionDef[] = [
-  { id: 'general',      label: 'General',      hint: 'Display, defaults, retention',  group: 'core',         Component: General },
-  { id: 'services',     label: 'Services',     hint: 'Port → service-name registry',  group: 'core',         Component: Services },
-  { id: 'exporters',    label: 'Exporters',    hint: 'Allowlist & device labels',     group: 'connectivity', Component: Exporters },
-  { id: 'snmp',         label: 'SNMP',         hint: 'Per-exporter v2c / v3 bindings', group: 'connectivity', Component: SNMP },
-  { id: 'alerts',       label: 'Alert rules',  hint: 'Tune the built-in detectors',   group: 'alerting',     Component: AlertsTuning },
-  { id: 'integrations', label: 'Integrations', hint: 'Outbound webhooks & channels',  group: 'alerting',     Component: Integrations },
-  { id: 'auth',         label: 'Auth & tokens',hint: 'API tokens; OIDC config',       group: 'admin',        Component: AuthTokens },
-  { id: 'audit',        label: 'Audit log',    hint: 'Who changed what, when',        group: 'admin',        Component: Audit },
-  { id: 'advanced',     label: 'Advanced',     hint: 'Tuning knobs · live / restart', group: 'admin',        Component: Advanced },
+  { id: 'general',      label: 'General',       group: 'core',         Component: General },
+  { id: 'services',     label: 'Services',      group: 'core',         Component: Services },
+  { id: 'exporters',    label: 'Exporters',     group: 'connectivity', Component: Exporters },
+  { id: 'snmp',         label: 'SNMP',          group: 'connectivity', Component: SNMP },
+  { id: 'alerts',       label: 'Alert rules',   group: 'alerting',     Component: AlertsTuning },
+  { id: 'integrations', label: 'Integrations',  group: 'alerting',     Component: Integrations },
+  { id: 'auth',         label: 'Auth & tokens', group: 'admin',        Component: AuthTokens },
+  { id: 'audit',        label: 'Audit log',     group: 'admin',        Component: Audit },
+  { id: 'advanced',     label: 'Advanced',      group: 'admin',        Component: Advanced },
 ]
 
 const VALID_IDS = new Set<SectionId>(SECTIONS.map((s) => s.id))
@@ -103,8 +102,8 @@ function Rail({
       aria-label="Settings sections"
       className="border-r border-line bg-surface overflow-auto"
     >
-      <div className="px-4 pt-5 pb-3">
-        <div className="text-[10.5px] uppercase tracking-[0.18em] font-mono font-semibold text-faint">
+      <div className="px-4 pt-5 pb-4 border-b border-line/60">
+        <div className="text-[10.5px] uppercase tracking-[0.1em] font-semibold text-faint">
           Settings
         </div>
         <div className="text-[16px] font-semibold text-text mt-0.5">
@@ -112,7 +111,7 @@ function Rail({
         </div>
       </div>
       {Object.entries(groups).map(([key, g]) => (
-        <div key={key} className="px-2 mb-3">
+        <div key={key} className="px-2 mt-3">
           <div className="px-2 pt-2 pb-1 text-[10px] uppercase tracking-[0.12em] text-faint font-mono">
             {g.label}
           </div>
@@ -122,7 +121,6 @@ function Rail({
               active={current === s.id}
               onClick={() => onSelect(s.id)}
               label={s.label}
-              hint={s.hint}
             />
           ))}
         </div>
@@ -135,30 +133,23 @@ function RailItem({
   active,
   onClick,
   label,
-  hint,
 }: {
   active: boolean
   onClick: () => void
   label: string
-  hint: string
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
       aria-current={active ? 'page' : undefined}
-      className={`w-full text-left px-2 py-2 border-l-2 transition-colors group ${
+      className={`w-full text-left px-3 py-1.5 border-l-2 transition-colors text-[13px] ${
         active
-          ? 'border-accent bg-accent-wash'
-          : 'border-transparent hover:bg-raise hover:border-line'
+          ? 'border-accent bg-accent-wash text-text'
+          : 'border-transparent text-dim hover:bg-raise hover:text-text'
       }`}
     >
-      <div className={`text-[13px] ${active ? 'text-text' : 'text-text/90 group-hover:text-text'}`}>
-        {label}
-      </div>
-      <div className={`text-[11px] mt-0.5 ${active ? 'text-dim' : 'text-faint group-hover:text-dim'}`}>
-        {hint}
-      </div>
+      {label}
     </button>
   )
 }
@@ -179,10 +170,10 @@ export function SectionHeader({
   return (
     <div className="px-6 pt-6 pb-4 border-b border-line bg-surface flex items-start gap-4">
       <div className="flex-1 min-w-0">
-        <div className="text-[10.5px] uppercase tracking-[0.18em] font-mono font-semibold text-faint mb-1">
+        <div className="text-[10.5px] uppercase tracking-[0.1em] font-semibold text-faint mb-1">
           {eyebrow}
         </div>
-        <h1 className="text-[20px] font-semibold tracking-tight text-text leading-[1.2]">
+        <h1 className="text-[22px] font-semibold tracking-tight text-text leading-[1.2]">
           {title}
         </h1>
         {subtitle && (

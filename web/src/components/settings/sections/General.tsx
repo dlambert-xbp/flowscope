@@ -68,7 +68,7 @@ export function General() {
   return (
     <div>
       <SectionHeader
-        eyebrow="Settings · General"
+        eyebrow="General"
         title="Display & defaults"
         subtitle="App-wide defaults that travel with new sessions and operator-visible chrome."
       />

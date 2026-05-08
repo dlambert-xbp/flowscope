@@ -20,7 +20,7 @@ export function AlertsTuning() {
   return (
     <div>
       <SectionHeader
-        eyebrow="Settings · Alert rules"
+        eyebrow="Alert rules"
         title="Tune the built-in detectors"
         subtitle={
           <>

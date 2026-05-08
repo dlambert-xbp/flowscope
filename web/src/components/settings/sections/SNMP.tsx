@@ -29,13 +29,13 @@ export function SNMP() {
   return (
     <div>
       <SectionHeader
-        eyebrow="Settings · SNMP"
+        eyebrow="SNMP"
         title="Per-exporter credentials"
         subtitle="v2c communities and v3 user/auth/priv passphrases. Stored in ClickHouse, AES-256-GCM-sealed under FLOWSCOPE_SNMP_KEY."
         actions={
           !isUnavailable && (
             <Btn tone="accent" size="md" onClick={() => setEditing('new')}>
-              + add binding
+              + binding
             </Btn>
           )
         }

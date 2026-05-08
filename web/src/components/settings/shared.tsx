@@ -28,6 +28,8 @@ export function Field({
 
 // Section is a card-like grouping under a SectionHeader. Sections
 // stack vertically; the eyebrow on the left identifies the topic.
+// Single horizontal rule under the title row — no outer section
+// border, otherwise sections read as double-walled boxes.
 export function Section({
   eyebrow,
   hint,
@@ -40,7 +42,7 @@ export function Section({
   children: ReactNode
 }) {
   return (
-    <section className="px-6 py-5 border-b border-line">
+    <section className="px-6 py-5">
       <div className="flex items-baseline gap-3 pb-3 border-b border-line mb-4">
         <span className="text-[11px] uppercase tracking-[0.1em] text-dim font-semibold">
           {eyebrow}
@@ -148,17 +150,20 @@ export function Tag({
   )
 }
 
-// Empty is the standard "nothing to show" treatment.
+// Empty is the standard "nothing to show" treatment. Plain dim
+// mono prose — matches the Devices/Overview empty states.
 export function Empty({ children }: { children: ReactNode }) {
   return (
-    <div className="border border-dashed border-line py-6 text-center text-[12px] font-mono text-dim">
+    <div className="py-6 text-center text-[12.5px] font-mono text-dim">
       {children}
     </div>
   )
 }
 
 // Banner is the high-visibility callout used for "auth disabled",
-// "Phase 2 not active", "secrets disabled" notes.
+// "Phase 2 not active", "secrets disabled" notes. Body copy reads
+// in text-dim so the wash + the toned <strong> lead carry the
+// emphasis instead of competing with the prose.
 export function Banner({
   tone = 'warn',
   children,
@@ -172,7 +177,40 @@ export function Banner({
     accent: 'border-accent/40 bg-accent-wash',
   } as const
   return (
-    <div className={`border ${map[tone]} px-4 py-3 mb-4 text-[12.5px] text-text leading-[1.5]`}>
+    <div className={`border ${map[tone]} px-4 py-3 mb-4 text-[12.5px] text-dim leading-[1.5]`}>
+      {children}
+    </div>
+  )
+}
+
+// EditForm is the inline create/edit panel used by every list-with-
+// CRUD section. Subtle bg-raise with an accent left rule, instead of
+// the full accent-wash treatment that would compete with Banner.
+export function EditForm({
+  title,
+  onCancel,
+  children,
+}: {
+  title: string
+  onCancel: () => void
+  children: ReactNode
+}) {
+  return (
+    <div
+      className="bg-raise border border-line border-l-2 px-4 py-4 mb-4"
+      style={{ borderLeftColor: 'var(--color-accent)' }}
+    >
+      <div className="flex items-baseline gap-3 mb-3">
+        <span className="text-[11px] uppercase tracking-[0.1em] text-accent font-semibold">
+          {title}
+        </span>
+        <button
+          onClick={onCancel}
+          className="ml-auto font-mono text-[11px] text-dim hover:text-text"
+        >
+          cancel
+        </button>
+      </div>
       {children}
     </div>
   )

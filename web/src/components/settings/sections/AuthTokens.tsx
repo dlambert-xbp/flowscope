@@ -13,7 +13,7 @@ export function AuthTokens() {
   return (
     <div>
       <SectionHeader
-        eyebrow="Settings · Auth & tokens"
+        eyebrow="Auth & tokens"
         title="API access & SSO"
         subtitle="Mint tokens for automation; configure OIDC for the eventual login flow."
       />
@@ -102,7 +102,7 @@ function Tokens() {
       hint="bcrypt-hashed in ClickHouse · plaintext shown once"
       actions={
         <Btn tone="accent" size="md" onClick={() => setCreating(true)}>
-          + new token
+          + token
         </Btn>
       }
     >
@@ -171,7 +171,7 @@ function TokenRow({ t }: { t: APIToken }) {
           {t.scope}
         </Tag>
       </td>
-      <td className="px-3 py-1.5 text-[12px] font-mono text-faint">fls_{t.prefix}…</td>
+      <td className="px-3 py-1.5 text-[12px] font-mono text-faint">fls_{t.prefix}</td>
       <td className="px-3 py-1.5 text-[11px] font-mono text-faint">
         {t.created_at?.slice(0, 19).replace('T', ' ')} {t.created_by ? `· ${t.created_by}` : ''}
       </td>
@@ -271,7 +271,7 @@ function MintedReveal({ t, onClose }: { t: APIToken; onClose: () => void }) {
     <div className="border border-warn/40 bg-warn-wash px-4 py-4 mb-4">
       <div className="flex items-baseline gap-3 mb-3">
         <span className="text-[11px] uppercase tracking-[0.1em] text-warn font-semibold">
-          ⚠ copy this now — it won't be shown again
+          copy this now — it won't be shown again
         </span>
         <button onClick={onClose} className="ml-auto font-mono text-[11px] text-dim hover:text-text">dismiss</button>
       </div>

@@ -1,26 +1,21 @@
 import { useQuery } from '@tanstack/react-query'
-import { useState } from 'react'
 import { api, type AdvancedField } from '../../../api'
 import { SectionHeader } from '../Shell'
-import { Banner, Empty, Section, StyleScope, Tag } from '../shared'
+import { Banner, Section, StyleScope } from '../shared'
 
 // Advanced is a metadata-only view of every operationally relevant
-// tunable. v1 is honest: nothing reloads at runtime today, so almost
-// every field is labeled [restart]. Adding a [live] field is a one-
-// line change in cmd/api/settings.go (advancedFields()) plus the
-// reload wiring in the owning service.
+// tunable. v1 is honest: nothing reloads at runtime today, so the
+// reload column would be uniform [restart] noise — replaced with
+// the banner up top. Adding a future [live] field reintroduces the
+// column conditionally.
 
 export function Advanced() {
   const data = useQuery({
     queryKey: ['advanced-fields'],
     queryFn: () => api.listAdvanced(),
   })
-  const [showRestart, setShowRestart] = useState(true)
-  const [showLive, setShowLive] = useState(true)
 
-  const fields = (data.data?.fields ?? []).filter((f) =>
-    (f.reload === 'live' && showLive) || (f.reload === 'restart' && showRestart),
-  )
+  const fields = data.data?.fields ?? []
 
   // Group by service for visual cohesion.
   const groups = new Map<string, AdvancedField[]>()
@@ -33,38 +28,23 @@ export function Advanced() {
   return (
     <div>
       <SectionHeader
-        eyebrow="Settings · Advanced"
+        eyebrow="Advanced"
         title="Tuning & runtime knobs"
-        subtitle="Every operationally relevant configuration the FlowScope services accept. Each field is tagged [live] (re-read on a refresh tick) or [restart] (read once at boot)."
+        subtitle="Every operationally relevant configuration the FlowScope services accept. Edit through env vars on the deployment; restart the service for changes to take effect."
       />
       <StyleScope />
 
-      <Section
-        eyebrow={`Fields · ${fields.length}`}
-        actions={
-          <>
-            <Toggle on={showLive} onClick={() => setShowLive(!showLive)} tone="ok">
-              live
-            </Toggle>
-            <Toggle on={showRestart} onClick={() => setShowRestart(!showRestart)} tone="warn">
-              restart
-            </Toggle>
-          </>
-        }
-      >
+      <div className="px-6 pt-4">
         <Banner tone="warn">
-          v1 is honest about reloads — nothing in the FlowScope services re-reads
-          configuration at runtime today. Every field below is{' '}
-          <strong>[restart]</strong>. Adding a <strong>[live]</strong> field
-          requires a real reload tick in the owning service, not just a label
-          change.
+          <strong className="text-warn">All fields are restart-required in v1.</strong>{' '}
+          Nothing in the FlowScope services re-reads configuration at runtime today.
+          Adding a live-reloadable field requires a real reload tick in the owning
+          service, not just a UI change.
         </Banner>
+      </div>
 
+      <Section eyebrow={`Fields · ${fields.length}`}>
         {data.isLoading && <div className="text-dim text-[12px] font-mono">loading…</div>}
-
-        {fields.length === 0 && !data.isLoading && (
-          <Empty>no fields match · re-enable the toggles above</Empty>
-        )}
 
         {Array.from(groups.entries()).map(([svc, items]) => (
           <div key={svc} className="mb-5">
@@ -78,7 +58,6 @@ export function Advanced() {
                     <Th>name</Th>
                     <Th>env var</Th>
                     <Th>default</Th>
-                    <Th>reload</Th>
                     <Th>description</Th>
                   </tr>
                 </thead>
@@ -92,12 +71,10 @@ export function Advanced() {
                       <td className="px-3 py-1.5 text-[12px] font-mono text-dim">
                         {f.default_text ?? '—'}
                       </td>
-                      <td className="px-3 py-1.5">
-                        <Tag tone={f.reload === 'live' ? 'ok' : 'warn'}>
-                          [{f.reload}]
-                        </Tag>
-                      </td>
-                      <td className="px-3 py-1.5 text-[12px] text-faint max-w-[60ch]">
+                      <td
+                        className="px-3 py-1.5 text-[12px] text-faint max-w-[60ch]"
+                        title={f.description}
+                      >
                         {f.description}
                       </td>
                     </tr>
@@ -112,35 +89,10 @@ export function Advanced() {
   )
 }
 
-function Th({ children }: { children: React.ReactNode }) {
+function Th({ children }: { children?: React.ReactNode }) {
   return (
     <th className="text-left text-[10.5px] uppercase tracking-[0.1em] text-faint font-mono font-semibold px-3 py-2">
       {children}
     </th>
-  )
-}
-
-function Toggle({
-  on,
-  onClick,
-  tone,
-  children,
-}: {
-  on: boolean
-  onClick: () => void
-  tone?: 'ok' | 'warn'
-  children: React.ReactNode
-}) {
-  const cls = on
-    ? tone === 'ok'
-      ? 's-tag s-tag--ok'
-      : tone === 'warn'
-        ? 's-tag s-tag--warn'
-        : 's-tag s-tag--accent'
-    : 's-tag opacity-50'
-  return (
-    <button type="button" onClick={onClick} className={cls}>
-      {children}
-    </button>
   )
 }

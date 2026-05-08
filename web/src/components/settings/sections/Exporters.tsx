@@ -23,7 +23,7 @@ export function Exporters() {
   return (
     <div>
       <SectionHeader
-        eyebrow="Settings · Exporters"
+        eyebrow="Exporters"
         title="Exporter allowlist"
         subtitle={
           acceptAll
@@ -32,7 +32,7 @@ export function Exporters() {
         }
         actions={
           <Btn tone="accent" size="md" onClick={() => setEditing('new')}>
-            + add exporter
+            + exporter
           </Btn>
         }
       />
@@ -107,7 +107,9 @@ function Row({ e, onEdit }: { e: ExporterAllowlistEntry; onEdit: () => void }) {
       <td className="px-3 py-1.5">
         {e.enabled ? <Tag tone="ok">enabled</Tag> : <Tag tone="warn">disabled</Tag>}
       </td>
-      <td className="px-3 py-1.5 text-[12px] text-faint truncate max-w-[40ch]">{e.notes || '—'}</td>
+      <td className="px-3 py-1.5 text-[12px] text-faint truncate max-w-[40ch]" title={e.notes || undefined}>
+        {e.notes || '—'}
+      </td>
       <td className="px-3 py-1.5 text-[11px] font-mono text-faint">
         {e.updated_at ? e.updated_at.slice(0, 19).replace('T', ' ') : '—'}
         {e.updated_by ? ` · ${e.updated_by}` : ''}

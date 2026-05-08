@@ -18,12 +18,12 @@ export function Integrations() {
   return (
     <div>
       <SectionHeader
-        eyebrow="Settings · Integrations"
+        eyebrow="Integrations"
         title="Outbound webhooks"
         subtitle="Where the alert engine posts state transitions. One row per channel; severity filter chooses which alerts reach it."
         actions={
           <Btn tone="accent" size="md" onClick={() => setEditing('new')}>
-            + new webhook
+            + webhook
           </Btn>
         }
       />

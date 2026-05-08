@@ -26,7 +26,7 @@ export function Services() {
   return (
     <div>
       <SectionHeader
-        eyebrow="Settings · Services"
+        eyebrow="Services"
         title="Service registry"
         subtitle={
           <>
@@ -268,7 +268,10 @@ function LibraryRow_({ r }: { r: LibraryRow }) {
           </span>
         )}
       </td>
-      <td className="px-3 py-1.5 text-[12px] text-faint truncate max-w-[40ch]">
+      <td
+        className="px-3 py-1.5 text-[12px] text-faint truncate max-w-[40ch]"
+        title={r.description ?? undefined}
+      >
         {r.description ?? '—'}
       </td>
     </tr>
@@ -290,7 +293,7 @@ function Custom() {
       hint="overlay on top of the built-in registry · narrowest match wins"
       actions={
         <Btn tone="accent" onClick={() => setEditing('new')}>
-          + new
+          + service
         </Btn>
       }
     >
