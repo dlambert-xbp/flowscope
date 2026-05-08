@@ -36,6 +36,39 @@
   --font-mono: 'IBM Plex Mono', ui-monospace, monospace;
 }
 
+/* Light theme — same trading-terminal grammar (hairline grid, single
+   accent, semantic state colors) inverted onto a warm paper ground.
+   Activated by [data-theme="light"] on <html>; the bootstrap script in
+   index.html sets the attribute synchronously to avoid a flash. */
+:root[data-theme="light"] {
+  --color-ink: #faf8f3;
+  --color-surface: #f1eee6;
+  --color-raise: #e8e4d9;
+  --color-hover: #ddd9cc;
+  --color-line: #cfcabb;
+  --color-line-soft: #e2ddcf;
+
+  --color-text: #161618;
+  --color-dim: #5a5953;
+  --color-faint: #8a8983;
+
+  --color-accent: #c8400d;
+  --color-accent-dim: #9a3209;
+  --color-accent-wash: rgba(200, 64, 13, 0.10);
+
+  --color-crit: #b53028;
+  --color-crit-wash: rgba(181, 48, 40, 0.10);
+
+  --color-warn: #8a6300;
+  --color-warn-wash: rgba(138, 99, 0, 0.12);
+
+  --color-ok: #3c6f41;
+  --color-ok-wash: rgba(60, 111, 65, 0.10);
+
+  --color-grid-line: #d8d3c2;
+  --color-selection: rgba(200, 64, 13, 0.22);
+}
+
 html, body, #root { height: 100%; }
 body {
   font-family: var(--font-sans);

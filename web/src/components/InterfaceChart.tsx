@@ -4,15 +4,29 @@ import uPlot from 'uplot'
 import 'uplot/dist/uPlot.min.css'
 import { api, fmt } from '../api'
 import type { InterfaceTimeseriesPoint } from '../api'
+import { useTheme } from '../theme'
 
-// Theme tokens mirrored from index.css so uPlot's canvas matches the rest
-// of the UI. Kept inline because uPlot reads plain strings, not CSS vars.
-const COLOR_LINE = '#23262b'
-const COLOR_LINE_SOFT = '#1a1c20'
-const COLOR_FAINT = '#5a5b5e'
-const COLOR_DIM = '#8b8a85'
-const COLOR_ACCENT = '#ff5b1f'
-const COLOR_OK = '#5a9c5f'
+// uPlot reads plain strings, not CSS vars, so we resolve the live design
+// tokens from the document at construction time and rebuild the plot when
+// the theme changes.
+type PlotColors = {
+  line: string
+  lineSoft: string
+  faint: string
+  accent: string
+  ok: string
+}
+function readPlotColors(): PlotColors {
+  const cs = getComputedStyle(document.documentElement)
+  const v = (name: string) => cs.getPropertyValue(name).trim()
+  return {
+    line: v('--color-line'),
+    lineSoft: v('--color-line-soft'),
+    faint: v('--color-faint'),
+    accent: v('--color-accent'),
+    ok: v('--color-ok'),
+  }
+}
 
 export function InterfaceChart({
   exporter,
@@ -58,6 +72,8 @@ function UPlotChart({
 }) {
   const wrapRef = useRef<HTMLDivElement | null>(null)
   const plotRef = useRef<uPlot | null>(null)
+  const themeRef = useRef<string>('')
+  const { resolved } = useTheme()
 
   useEffect(() => {
     const wrap = wrapRef.current
@@ -71,13 +87,21 @@ function UPlotChart({
     const width = wrap.clientWidth || 800
     const height = 200
 
+    // Tear down + rebuild on theme change so uPlot picks up the new
+    // design tokens (its color strings are baked at construction).
+    if (plotRef.current && themeRef.current !== resolved) {
+      plotRef.current.destroy()
+      plotRef.current = null
+    }
+    themeRef.current = resolved
+
     if (!plotRef.current) {
-      plotRef.current = new uPlot(buildOpts(width, height), data, wrap)
+      plotRef.current = new uPlot(buildOpts(width, height, readPlotColors()), data, wrap)
     } else {
       plotRef.current.setSize({ width, height })
       plotRef.current.setData(data)
     }
-  }, [points])
+  }, [points, resolved])
 
   useEffect(() => {
     const wrap = wrapRef.current
@@ -121,18 +145,18 @@ function Overlay({
   children: ReactNode
   tone?: 'error'
 }) {
-  const color = tone === 'error' ? '#e04646' : COLOR_DIM
   return (
     <div
-      className="absolute inset-0 flex items-center justify-center font-mono text-[11px] pointer-events-none"
-      style={{ color }}
+      className={`absolute inset-0 flex items-center justify-center font-mono text-[11px] pointer-events-none ${
+        tone === 'error' ? 'text-crit' : 'text-dim'
+      }`}
     >
       {children}
     </div>
   )
 }
 
-function buildOpts(width: number, height: number): uPlot.Options {
+function buildOpts(width: number, height: number, c: PlotColors): uPlot.Options {
   return {
     width,
     height,
@@ -150,16 +174,16 @@ function buildOpts(width: number, height: number): uPlot.Options {
     },
     axes: [
       {
-        stroke: COLOR_FAINT,
-        grid: { stroke: COLOR_LINE_SOFT, width: 1 },
-        ticks: { stroke: COLOR_LINE, width: 1, size: 4 },
+        stroke: c.faint,
+        grid: { stroke: c.lineSoft, width: 1 },
+        ticks: { stroke: c.line, width: 1, size: 4 },
         font: '10px ui-monospace, "IBM Plex Mono", monospace',
         size: 28,
       },
       {
-        stroke: COLOR_FAINT,
-        grid: { stroke: COLOR_LINE_SOFT, width: 1 },
-        ticks: { stroke: COLOR_LINE, width: 1, size: 4 },
+        stroke: c.faint,
+        grid: { stroke: c.lineSoft, width: 1 },
+        ticks: { stroke: c.line, width: 1, size: 4 },
         font: '10px ui-monospace, "IBM Plex Mono", monospace',
         size: 56,
         values: (_u, splits) => splits.map((v) => fmt.bps(v)),
@@ -171,14 +195,14 @@ function buildOpts(width: number, height: number): uPlot.Options {
       },
       {
         label: 'in',
-        stroke: COLOR_ACCENT,
+        stroke: c.accent,
         width: 1.5,
         points: { show: false },
         value: (_u, v) => (v == null ? '—' : fmt.bps(v)),
       },
       {
         label: 'out',
-        stroke: COLOR_OK,
+        stroke: c.ok,
         width: 1.5,
         points: { show: false },
         value: (_u, v) => (v == null ? '—' : fmt.bps(v)),
