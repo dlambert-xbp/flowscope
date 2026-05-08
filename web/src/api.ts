@@ -125,6 +125,14 @@ export type AlertSummary = {
   closed_last_24h: number
 }
 
+export type StreamRow = {
+  source: string
+  flows: number
+  bytes: number
+  packets: number
+  exporters: number
+}
+
 export type SNMPCredential = {
   exporter: string
   version: 'v2c' | 'v3'
@@ -416,6 +424,10 @@ function presetToSeconds(p: string): number {
 export const api = {
   summary: (range?: TimeRangeArg) =>
     getJSON<Summary>(`/api/summary?${timeQuery(range)}`),
+  healthStreams: (range?: TimeRangeArg) =>
+    getJSON<{ count: number; rows: StreamRow[]; window: string }>(
+      `/api/health/streams?${timeQuery(range)}`,
+    ),
   recentFlows: (limit = 20, exporter?: string) =>
     getJSON<{ count: number; flows: RecentFlow[] }>(
       exporter
