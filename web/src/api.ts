@@ -136,6 +136,20 @@ export type StreamRow = {
 export type FlowsListSort = 'observed' | 'bytes' | 'packets'
 export type FlowsListDir = 'asc' | 'desc'
 
+export type FlowTimeseriesPoint = {
+  ts: string
+  bytes: number
+  packets: number
+  flows: number
+}
+
+export type FlowsTimeseriesResponse = {
+  count: number
+  points: FlowTimeseriesPoint[]
+  bucket_seconds: number
+  window: string
+}
+
 export type FlowsListResponse = {
   count: number
   flows: RecentFlow[]
@@ -465,6 +479,19 @@ export const api = {
     getJSON<FlowsListResponse>(
       withFilters(
         `/api/flows/list?${timeQuery(range)}&limit=${limit}&offset=${offset}&sort=${sort}&dir=${dir}`,
+        filters,
+      ),
+    ),
+  flowsTimeseries: (
+    filters: URLSearchParams,
+    range?: TimeRangeArg,
+    bucketSeconds?: number,
+  ) =>
+    getJSON<FlowsTimeseriesResponse>(
+      withFilters(
+        `/api/flows/timeseries?${timeQuery(range)}${
+          bucketSeconds ? `&bucket=${bucketSeconds}` : ''
+        }`,
         filters,
       ),
     ),

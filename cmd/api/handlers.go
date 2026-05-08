@@ -74,6 +74,65 @@ func (h *handlers) healthStreams(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// flowsTimeseries returns bucketed bytes/packets/flows over the
+// time range, narrowed by the filter. Powers the drill-in chart on
+// the Flows-tab drawer.
+//
+//	GET /api/flows/timeseries?window=300s&bucket=5
+//	     &exporter=...&src_addr=...&dst_addr=...&src_port=...&dst_port=...&proto=...
+//
+// bucket is in seconds; defaults to autoBucket(window) when 0 or
+// missing. All filter keys mirror /api/top/*, so the drawer can
+// reuse the same FilterTrigger wiring.
+func (h *handlers) flowsTimeseries(w http.ResponseWriter, r *http.Request) {
+	tr := parseTimeRange(r, 5*time.Minute)
+	bucket := parseInt(r.URL.Query().Get("bucket"), 0)
+	if bucket <= 0 {
+		bucket = autoBucket(tr)
+	}
+	rows, err := store.QueryFlowsTimeseries(r.Context(), h.conn, tr, bucket, parseFilter(r))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"count":          len(rows),
+		"points":         rows,
+		"bucket_seconds": bucket,
+		"window":         tr.WindowDuration().String(),
+	})
+}
+
+// autoBucket targets ~120 points across the window so the chart is
+// dense but readable. Values are clamped to a small set of human-
+// friendly multiples (1/5/15/30s, 1/5/15m, 1h) so axes don't show
+// awkward intervals.
+func autoBucket(tr store.TimeRange) int {
+	span := int(tr.Seconds())
+	if span < 120 {
+		span = 120
+	}
+	target := span / 120
+	switch {
+	case target <= 1:
+		return 1
+	case target <= 5:
+		return 5
+	case target <= 15:
+		return 15
+	case target <= 30:
+		return 30
+	case target <= 60:
+		return 60
+	case target <= 300:
+		return 300
+	case target <= 900:
+		return 900
+	default:
+		return 3600
+	}
+}
+
 // flowsList returns a paginated, filterable, sortable list of flow
 // records. Powers the Investigate panel on the Flows tab.
 //

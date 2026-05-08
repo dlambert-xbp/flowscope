@@ -1267,6 +1267,67 @@ LIMIT ? OFFSET ?`
 	return out, nil
 }
 
+// FlowTimeseriesPoint is one bucket on the per-filter flow chart
+// rendered in the drill-in drawer. Bytes and packets are the
+// summed totals for the bucket window.
+type FlowTimeseriesPoint struct {
+	Ts      time.Time `json:"ts"`
+	Bytes   uint64    `json:"bytes"`
+	Packets uint64    `json:"packets"`
+	Flows   uint64    `json:"flows"`
+}
+
+// QueryFlowsTimeseries returns bucketed bytes/packets/flow-count
+// per bucketSeconds over the time range, narrowed by the filter.
+// Buckets are aligned via toStartOfInterval so the same window over
+// a stable input always returns the same bucket boundaries.
+//
+// bucketSeconds is clamped to [1, 3600] — narrower than 1s rounds
+// down to bursts that aren't statistically interesting; wider than
+// an hour produces too few points to read as a chart.
+func QueryFlowsTimeseries(
+	ctx context.Context,
+	conn driver.Conn,
+	tr TimeRange,
+	bucketSeconds int,
+	f FlowFilter,
+) ([]FlowTimeseriesPoint, error) {
+	if bucketSeconds < 1 {
+		bucketSeconds = 1
+	}
+	if bucketSeconds > 3600 {
+		bucketSeconds = 3600
+	}
+	whereSQL, args, err := buildWhere(tr, f)
+	if err != nil {
+		return nil, err
+	}
+	q := `
+SELECT toStartOfInterval(observed, INTERVAL ? SECOND) AS ts,
+       sum(bytes)   AS bytes,
+       sum(packets) AS packets,
+       count()      AS flows
+FROM flows
+WHERE ` + whereSQL + `
+GROUP BY ts
+ORDER BY ts ASC`
+	args = append([]any{uint64(bucketSeconds)}, args...)
+	rows, err := conn.Query(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("store: query flows timeseries: %w", err)
+	}
+	defer rows.Close()
+	out := make([]FlowTimeseriesPoint, 0, 64)
+	for rows.Next() {
+		var p FlowTimeseriesPoint
+		if err := rows.Scan(&p.Ts, &p.Bytes, &p.Packets, &p.Flows); err != nil {
+			return nil, fmt.Errorf("store: scan flows timeseries: %w", err)
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
 // QueryRecentFlows returns the most recent N rows from the flows table,
 // newest first. If exporter is non-empty, results are filtered to that
 // single exporter. Limit is clamped to [1, 1000].

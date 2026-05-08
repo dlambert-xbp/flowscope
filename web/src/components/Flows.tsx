@@ -17,6 +17,7 @@ import { useFilters, toQuery, keyLabelFor, FILTER_KEYS, type Filter, type Filter
 import { rangeLabel, toApi, type TimeRange } from '../timeRange'
 import { ServiceLabel, useServiceName } from './ServiceLabel'
 import { LiveTail } from './LiveTail'
+import { FlowDrawer, type FlowDrillDown } from './FlowDrawer'
 
 // Flows tab — page chrome:
 //   Live tail (collapsible, expanded by default)
@@ -59,6 +60,7 @@ export function Flows({
   const [tab, setTab] = useState<TabId>('talkers')
   const [sortBy, setSortBy] = useState<TopNSort>('bytes')
   const [topN, setTopN] = useState<number>(25)
+  const [drill, setDrill] = useState<FlowDrillDown | null>(null)
   return (
     <div>
       <LiveTail />
@@ -85,12 +87,20 @@ export function Flows({
         sortBy={sortBy}
         topN={topN}
         onAdd={f.add}
+        onDrill={setDrill}
       />
       <Investigate
         qs={qs}
         range={apiRange}
         rangeKey={rangeKey}
         onAdd={f.add}
+        onDrill={setDrill}
+      />
+      <FlowDrawer
+        drill={drill}
+        pageFilters={qs}
+        range={apiRange}
+        onClose={() => setDrill(null)}
       />
     </div>
   )
@@ -452,6 +462,7 @@ function ActivePanel({
   sortBy,
   topN,
   onAdd,
+  onDrill,
 }: {
   tab: TabId
   qs: URLSearchParams
@@ -460,6 +471,7 @@ function ActivePanel({
   sortBy: TopNSort
   topN: number
   onAdd: (f: Filter) => void
+  onDrill: (d: FlowDrillDown) => void
 }) {
   return (
     <Panel title={TAB_LABELS[tab]} sub={subtitleFor(tab, sortBy)} right="SOURCE · FLOWS">
@@ -467,6 +479,7 @@ function ActivePanel({
         <TalkersList
           qs={qs}
           onAdd={onAdd}
+          onDrill={onDrill}
           range={range}
           rangeKey={rangeKey}
           sortBy={sortBy}
@@ -477,6 +490,7 @@ function ActivePanel({
         <ServicesList
           qs={qs}
           onAdd={onAdd}
+          onDrill={onDrill}
           range={range}
           rangeKey={rangeKey}
           sortBy={sortBy}
@@ -487,6 +501,7 @@ function ActivePanel({
         <ProtocolsList
           qs={qs}
           onAdd={onAdd}
+          onDrill={onDrill}
           range={range}
           rangeKey={rangeKey}
           sortBy={sortBy}
@@ -497,6 +512,7 @@ function ActivePanel({
         <ConversationsList
           qs={qs}
           onAdd={onAdd}
+          onDrill={onDrill}
           range={range}
           rangeKey={rangeKey}
           sortBy={sortBy}
@@ -553,13 +569,14 @@ function Panel({
 type ListBase = {
   qs: URLSearchParams
   onAdd: (f: Filter) => void
+  onDrill: (d: FlowDrillDown) => void
   range: TimeRangeArg
   rangeKey: unknown
   sortBy: TopNSort
   topN: number
 }
 
-function TalkersList({ qs, onAdd, range, rangeKey, sortBy, topN }: ListBase) {
+function TalkersList({ qs, onAdd, onDrill, range, rangeKey, sortBy, topN }: ListBase) {
   const q = useQuery({
     queryKey: ['top-talkers', qs.toString(), rangeKey, sortBy, topN],
     queryFn: () => api.topTalkers(qs, range, topN, sortBy),
@@ -582,13 +599,22 @@ function TalkersList({ qs, onAdd, range, rangeKey, sortBy, topN }: ListBase) {
         )}
         valueOf={(r) => valueOfRow(sortBy, r)}
         renderRight={(r) => formatValue(sortBy, valueOfRow(sortBy, r))}
+        drillFor={(r) => ({
+          title: `${r.src_addr} → ${r.dst_addr}`,
+          subtitle: 'src→dst pair',
+          filters: [
+            { key: 'src_addr', value: r.src_addr },
+            { key: 'dst_addr', value: r.dst_addr },
+          ],
+        })}
+        onDrill={onDrill}
         sortBy={sortBy}
       />
     </ListShell>
   )
 }
 
-function ServicesList({ qs, onAdd, range, rangeKey, sortBy, topN }: ListBase) {
+function ServicesList({ qs, onAdd, onDrill, range, rangeKey, sortBy, topN }: ListBase) {
   const q = useQuery({
     queryKey: ['top-services', qs.toString(), rangeKey, sortBy, topN],
     queryFn: () => api.topServices(qs, range, topN, sortBy),
@@ -601,13 +627,22 @@ function ServicesList({ qs, onAdd, range, rangeKey, sortBy, topN }: ListBase) {
         renderLeft={(r: TopService) => <TopServiceLeft r={r} onAdd={onAdd} />}
         valueOf={(r) => valueOfRow(sortBy, r)}
         renderRight={(r) => formatValue(sortBy, valueOfRow(sortBy, r))}
+        drillFor={(r) => ({
+          title: `${fmt.proto(r.proto)} port ${r.dst_port}`,
+          subtitle: 'service',
+          filters: [
+            { key: 'dst_port', value: String(r.dst_port) },
+            { key: 'proto', value: String(r.proto), label: fmt.proto(r.proto) },
+          ],
+        })}
+        onDrill={onDrill}
         sortBy={sortBy}
       />
     </ListShell>
   )
 }
 
-function ProtocolsList({ qs, onAdd, range, rangeKey, sortBy, topN }: ListBase) {
+function ProtocolsList({ qs, onAdd, onDrill, range, rangeKey, sortBy, topN }: ListBase) {
   const q = useQuery({
     queryKey: ['top-protocols', qs.toString(), rangeKey, sortBy],
     queryFn: () => api.topProtocols(qs, range, sortBy),
@@ -635,13 +670,21 @@ function ProtocolsList({ qs, onAdd, range, rangeKey, sortBy, topN }: ListBase) {
           const v = valueOfRow(sortBy, r)
           return total > 0 ? `${((v / total) * 100).toFixed(1)}%` : '—'
         }}
+        drillFor={(r) => ({
+          title: `protocol ${fmt.proto(r.proto)}`,
+          subtitle: `IP proto ${r.proto}`,
+          filters: [
+            { key: 'proto', value: String(r.proto), label: fmt.proto(r.proto) },
+          ],
+        })}
+        onDrill={onDrill}
         sortBy={sortBy}
       />
     </ListShell>
   )
 }
 
-function ConversationsList({ qs, onAdd, range, rangeKey, sortBy, topN }: ListBase) {
+function ConversationsList({ qs, onAdd, onDrill, range, rangeKey, sortBy, topN }: ListBase) {
   const q = useQuery({
     queryKey: ['top-conversations', qs.toString(), rangeKey, sortBy, topN],
     queryFn: () => api.topConversations(qs, range, topN, sortBy),
@@ -669,6 +712,18 @@ function ConversationsList({ qs, onAdd, range, rangeKey, sortBy, topN }: ListBas
         )}
         valueOf={(r) => valueOfRow(sortBy, r)}
         renderRight={(r) => formatValue(sortBy, valueOfRow(sortBy, r))}
+        drillFor={(r) => ({
+          title: `${r.src_addr}:${r.src_port} → ${r.dst_addr}:${r.dst_port}`,
+          subtitle: `5-tuple · ${fmt.proto(r.proto)}`,
+          filters: [
+            { key: 'src_addr', value: r.src_addr },
+            { key: 'src_port', value: String(r.src_port) },
+            { key: 'dst_addr', value: r.dst_addr },
+            { key: 'dst_port', value: String(r.dst_port) },
+            { key: 'proto', value: String(r.proto), label: fmt.proto(r.proto) },
+          ],
+        })}
+        onDrill={onDrill}
         sortBy={sortBy}
       />
     </ListShell>
@@ -741,6 +796,8 @@ function Rows<T>({
   renderLeft,
   renderRight,
   valueOf,
+  drillFor,
+  onDrill,
   sortBy: _sortBy,
 }: {
   rows: T[]
@@ -748,6 +805,8 @@ function Rows<T>({
   renderLeft: (r: T) => ReactNode
   renderRight: (r: T) => ReactNode
   valueOf: (r: T) => number
+  drillFor?: (r: T) => FlowDrillDown
+  onDrill?: (d: FlowDrillDown) => void
   sortBy: TopNSort
 }) {
   const total = rows.reduce((a, r) => a + valueOf(r), 0)
@@ -756,11 +815,26 @@ function Rows<T>({
       {rows.map((r) => {
         const v = valueOf(r)
         const pct = total > 0 ? (v / total) * 100 : 0
+        const drill = drillFor?.(r)
         return (
-          <li key={keyOf(r)} className="px-4 py-2 border-b border-line-soft hover:bg-surface">
+          <li
+            key={keyOf(r)}
+            className="px-4 py-2 border-b border-line-soft hover:bg-surface group"
+          >
             <div className="flex items-baseline justify-between gap-3">
               <div className="min-w-0 truncate">{renderLeft(r)}</div>
-              <div className="font-mono text-[12px] tabular text-text shrink-0">{renderRight(r)}</div>
+              <div className="flex items-center gap-3 shrink-0">
+                <div className="font-mono text-[12px] tabular text-text">{renderRight(r)}</div>
+                {drill && onDrill && (
+                  <button
+                    type="button"
+                    onClick={() => onDrill(drill)}
+                    className="font-mono text-[10.5px] tracking-[0.06em] text-accent opacity-0 group-hover:opacity-100 hover:underline"
+                  >
+                    inspect →
+                  </button>
+                )}
+              </div>
             </div>
             <div className="mt-1.5 h-px bg-line w-full overflow-hidden">
               <div className="h-full bg-accent" style={{ width: `${Math.min(100, Math.max(0, pct))}%` }} />
@@ -852,11 +926,13 @@ function Investigate({
   range,
   rangeKey,
   onAdd,
+  onDrill,
 }: {
   qs: URLSearchParams
   range: TimeRangeArg
   rangeKey: unknown
   onAdd: (f: Filter) => void
+  onDrill: (d: FlowDrillDown) => void
 }) {
   const [collapsed, setCollapsed] = useState<boolean>(() => {
     try {
@@ -967,6 +1043,7 @@ function Investigate({
                 <col style={{ width: '80px' }} />
                 <col style={{ width: '90px' }} />
                 <col style={{ width: '100px' }} />
+                <col style={{ width: '76px' }} />
               </colgroup>
               <thead>
                 <tr>
@@ -1000,11 +1077,12 @@ function Investigate({
                   >
                     bytes
                   </ServerTh>
+                  <th />
                 </tr>
               </thead>
               <tbody>
                 {flows.map((f, i) => (
-                  <tr key={i} className="hover:bg-surface">
+                  <tr key={i} className="hover:bg-surface group">
                     <td className="n text-faint">{fmt.time(f.observed).slice(11, 23)}</td>
                     <td>
                       <FilterTrigger
@@ -1063,6 +1141,27 @@ function Investigate({
                     </td>
                     <td className="r n">{fmt.num(f.packets)}</td>
                     <td className="r n">{fmt.bytes(f.bytes)}</td>
+                    <td className="r">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          onDrill({
+                            title: `${f.src_addr}:${f.src_port} → ${f.dst_addr}:${f.dst_port}`,
+                            subtitle: `5-tuple · ${fmt.proto(f.proto)}`,
+                            filters: [
+                              { key: 'src_addr', value: f.src_addr },
+                              { key: 'src_port', value: String(f.src_port) },
+                              { key: 'dst_addr', value: f.dst_addr },
+                              { key: 'dst_port', value: String(f.dst_port) },
+                              { key: 'proto', value: String(f.proto), label: fmt.proto(f.proto) },
+                            ],
+                          })
+                        }
+                        className="font-mono text-[10.5px] tracking-[0.06em] text-accent opacity-0 group-hover:opacity-100 hover:underline"
+                      >
+                        inspect →
+                      </button>
+                    </td>
                   </tr>
                 ))}
               </tbody>
