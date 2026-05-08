@@ -1,7 +1,11 @@
 import { useQuery } from '@tanstack/react-query'
-import { useState, type ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { api, fmt } from '../api'
 import type {
+  FlowsListDir,
+  FlowsListResponse,
+  FlowsListSort,
+  RecentFlow,
   TopTalker,
   TopService,
   TopProtocol,
@@ -79,6 +83,12 @@ export function Flows({
         rangeKey={rangeKey}
         sortBy={sortBy}
         topN={topN}
+        onAdd={f.add}
+      />
+      <Investigate
+        qs={qs}
+        range={apiRange}
+        rangeKey={rangeKey}
         onAdd={f.add}
       />
     </div>
@@ -645,5 +655,314 @@ function TopServiceLeft({ r, onAdd }: { r: TopService; onAdd: (f: Filter) => voi
       </FilterTrigger>{' '}
       <span className="text-faint">{r.dst_port}</span>
     </span>
+  )
+}
+
+/* ----------------------------- Investigate ----------------------------- */
+
+const PAGE_SIZE_OPTIONS = [50, 100, 200] as const
+const COLLAPSE_KEY = 'flowscope.investigate.collapsed'
+
+// Investigate is the bottom panel of the Flows tab. Paginated,
+// server-sorted (observed / bytes / packets), filtered through the
+// same chip set as the Top panels above. Click any cell value to add
+// or replace a chip — the page scrolls back to the top of Investigate
+// after a chip change so you don't lose context to a stale page
+// number.
+function Investigate({
+  qs,
+  range,
+  rangeKey,
+  onAdd,
+}: {
+  qs: URLSearchParams
+  range: TimeRangeArg
+  rangeKey: unknown
+  onAdd: (f: Filter) => void
+}) {
+  const [collapsed, setCollapsed] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(COLLAPSE_KEY) === '1'
+    } catch {
+      return false
+    }
+  })
+  useEffect(() => {
+    try {
+      localStorage.setItem(COLLAPSE_KEY, collapsed ? '1' : '0')
+    } catch {
+      // ignore
+    }
+  }, [collapsed])
+  const [pageSize, setPageSize] = useState<number>(50)
+  const [page, setPage] = useState<number>(0)
+  const [sort, setSort] = useState<FlowsListSort>('observed')
+  const [dir, setDir] = useState<FlowsListDir>('desc')
+
+  // Reset to page 0 whenever the underlying narrowing changes — paged
+  // offset against a different result set is meaningless.
+  const filterKey = qs.toString()
+  useEffect(() => {
+    setPage(0)
+  }, [filterKey, pageSize, sort, dir])
+
+  const offset = page * pageSize
+  const q = useQuery({
+    queryKey: ['flows-list', filterKey, rangeKey, pageSize, offset, sort, dir],
+    queryFn: () =>
+      api.flowsList(qs, range, {
+        limit: pageSize,
+        offset,
+        sort,
+        dir,
+      }),
+    enabled: !collapsed,
+  })
+  const data: FlowsListResponse | undefined = q.data
+  const flows: RecentFlow[] = data?.flows ?? []
+  const hasNext = flows.length === pageSize
+  const showingFrom = flows.length === 0 ? 0 : offset + 1
+  const showingTo = offset + flows.length
+  const cycleSort = (k: FlowsListSort) => {
+    if (k === sort) {
+      setDir((d) => (d === 'asc' ? 'desc' : 'asc'))
+    } else {
+      setSort(k)
+      setDir('desc')
+    }
+  }
+
+  return (
+    <section className="border-t border-line">
+      <div className="flex items-center gap-3 px-4 py-3 border-b border-line bg-surface">
+        <button
+          type="button"
+          onClick={() => setCollapsed((c) => !c)}
+          aria-expanded={!collapsed}
+          aria-controls="investigate-body"
+          className="flex items-baseline gap-2 text-[11px] uppercase tracking-[0.1em] text-dim font-semibold hover:text-text"
+        >
+          <span
+            aria-hidden
+            className={`inline-block text-faint text-[9px] transition-transform ${collapsed ? '' : 'rotate-90'}`}
+          >
+            ▶
+          </span>
+          <span>Investigate</span>
+        </button>
+        <span className="font-mono text-[11px] text-faint">
+          paginated · sortable · filtered by chips above
+        </span>
+        {!collapsed && (
+          <div className="ml-auto flex items-center gap-3">
+            <Selector
+              label="rows"
+              value={String(pageSize)}
+              onChange={(v) => setPageSize(Number(v))}
+              options={PAGE_SIZE_OPTIONS.map((n) => ({
+                value: String(n),
+                label: String(n),
+              }))}
+            />
+          </div>
+        )}
+      </div>
+      {!collapsed && (
+        <div id="investigate-body">
+          {q.isLoading ? (
+            <div className="px-4 py-6 text-faint font-mono text-[12px]">loading…</div>
+          ) : q.error ? (
+            <div className="px-4 py-6 text-crit font-mono text-[12px]">
+              error · {(q.error as Error).message}
+            </div>
+          ) : flows.length === 0 ? (
+            <div className="px-4 py-8 text-center text-[12px] font-mono text-dim">
+              no flows match these filters in the window
+            </div>
+          ) : (
+            <table className="w-full table-fixed">
+              <colgroup>
+                <col style={{ width: '110px' }} />
+                <col style={{ width: '160px' }} />
+                <col />
+                <col style={{ width: '70px' }} />
+                <col style={{ width: '80px' }} />
+                <col style={{ width: '90px' }} />
+                <col style={{ width: '100px' }} />
+              </colgroup>
+              <thead>
+                <tr>
+                  <ServerTh
+                    sortKey="observed"
+                    active={sort}
+                    dir={dir}
+                    onToggle={cycleSort}
+                  >
+                    time
+                  </ServerTh>
+                  <th>exporter</th>
+                  <th>src → dst</th>
+                  <th>proto</th>
+                  <th>service</th>
+                  <ServerTh
+                    sortKey="packets"
+                    active={sort}
+                    dir={dir}
+                    onToggle={cycleSort}
+                    align="r"
+                  >
+                    packets
+                  </ServerTh>
+                  <ServerTh
+                    sortKey="bytes"
+                    active={sort}
+                    dir={dir}
+                    onToggle={cycleSort}
+                    align="r"
+                  >
+                    bytes
+                  </ServerTh>
+                </tr>
+              </thead>
+              <tbody>
+                {flows.map((f, i) => (
+                  <tr key={i} className="hover:bg-surface">
+                    <td className="n text-faint">{fmt.time(f.observed).slice(11, 23)}</td>
+                    <td>
+                      <FilterTrigger
+                        k="exporter"
+                        value={f.exporter}
+                        onAdd={onAdd}
+                        label={f.exporter_name || f.exporter}
+                      >
+                        <div className="font-mono truncate">
+                          {f.exporter_name || f.exporter}
+                        </div>
+                      </FilterTrigger>
+                      {f.exporter_name && (
+                        <div className="font-mono italic text-faint text-[10.5px] truncate">
+                          {f.exporter}
+                        </div>
+                      )}
+                    </td>
+                    <td className="n truncate">
+                      <FilterTrigger k="src_addr" value={f.src_addr} onAdd={onAdd}>
+                        {f.src_addr}
+                      </FilterTrigger>
+                      :
+                      <FilterTrigger
+                        k="src_port"
+                        value={String(f.src_port)}
+                        onAdd={onAdd}
+                      >
+                        {f.src_port}
+                      </FilterTrigger>{' '}
+                      <span className="text-faint">→</span>{' '}
+                      <FilterTrigger k="dst_addr" value={f.dst_addr} onAdd={onAdd}>
+                        {f.dst_addr}
+                      </FilterTrigger>
+                      :
+                      <FilterTrigger
+                        k="dst_port"
+                        value={String(f.dst_port)}
+                        onAdd={onAdd}
+                      >
+                        {f.dst_port}
+                      </FilterTrigger>
+                    </td>
+                    <td>
+                      <FilterTrigger
+                        k="proto"
+                        value={String(f.proto)}
+                        onAdd={onAdd}
+                        label={fmt.proto(f.proto)}
+                      >
+                        <span className="font-mono text-accent">{fmt.proto(f.proto)}</span>
+                      </FilterTrigger>
+                    </td>
+                    <td className="n text-dim">
+                      <ServiceLabel proto={f.proto} port={f.dst_port} fallback="—" />
+                    </td>
+                    <td className="r n">{fmt.num(f.packets)}</td>
+                    <td className="r n">{fmt.bytes(f.bytes)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          <div className="flex items-center gap-3 px-4 py-2.5 border-t border-line bg-ink">
+            <span className="font-mono text-[11px] text-dim tabular">
+              {flows.length === 0
+                ? '0 rows'
+                : `showing ${fmt.num(showingFrom)}–${fmt.num(showingTo)}`}
+            </span>
+            <span className="ml-auto flex items-center gap-2">
+              <PageBtn disabled={page === 0} onClick={() => setPage((p) => Math.max(0, p - 1))}>
+                ← prev
+              </PageBtn>
+              <span className="font-mono text-[11px] text-faint tabular">
+                page {page + 1}
+              </span>
+              <PageBtn disabled={!hasNext} onClick={() => setPage((p) => p + 1)}>
+                next →
+              </PageBtn>
+            </span>
+          </div>
+        </div>
+      )}
+    </section>
+  )
+}
+
+function ServerTh({
+  sortKey,
+  active,
+  dir,
+  onToggle,
+  align,
+  children,
+}: {
+  sortKey: FlowsListSort
+  active: FlowsListSort
+  dir: FlowsListDir
+  onToggle: (k: FlowsListSort) => void
+  align?: 'r'
+  children: ReactNode
+}) {
+  const isActive = active === sortKey
+  return (
+    <th className={align === 'r' ? 'r' : undefined}>
+      <button
+        type="button"
+        onClick={() => onToggle(sortKey)}
+        className={`th-sort ${align === 'r' ? 'th-sort-r' : ''} ${isActive ? 'is-active' : ''}`}
+      >
+        <span>{children}</span>
+        <span className="th-arrow" aria-hidden>
+          {isActive ? (dir === 'asc' ? '▲' : '▼') : '↕'}
+        </span>
+      </button>
+    </th>
+  )
+}
+
+function PageBtn({
+  disabled,
+  onClick,
+  children,
+}: {
+  disabled?: boolean
+  onClick: () => void
+  children: ReactNode
+}) {
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={onClick}
+      className="font-mono text-[11px] px-2 py-1 border border-line text-text hover:border-accent disabled:text-faint disabled:hover:border-line disabled:cursor-not-allowed"
+    >
+      {children}
+    </button>
   )
 }

@@ -133,6 +133,19 @@ export type StreamRow = {
   exporters: number
 }
 
+export type FlowsListSort = 'observed' | 'bytes' | 'packets'
+export type FlowsListDir = 'asc' | 'desc'
+
+export type FlowsListResponse = {
+  count: number
+  flows: RecentFlow[]
+  limit: number
+  offset: number
+  sort: FlowsListSort
+  dir: FlowsListDir
+  window: string
+}
+
 export type SNMPCredential = {
   exporter: string
   version: 'v2c' | 'v3'
@@ -433,6 +446,27 @@ export const api = {
       exporter
         ? `/api/flows/recent?limit=${limit}&exporter=${encodeURIComponent(exporter)}`
         : `/api/flows/recent?limit=${limit}`,
+    ),
+  flowsList: (
+    filters: URLSearchParams,
+    range?: TimeRangeArg,
+    {
+      limit = 50,
+      offset = 0,
+      sort = 'observed',
+      dir = 'desc',
+    }: {
+      limit?: number
+      offset?: number
+      sort?: FlowsListSort
+      dir?: FlowsListDir
+    } = {},
+  ) =>
+    getJSON<FlowsListResponse>(
+      withFilters(
+        `/api/flows/list?${timeQuery(range)}&limit=${limit}&offset=${offset}&sort=${sort}&dir=${dir}`,
+        filters,
+      ),
     ),
   interfaces: (range?: TimeRangeArg, exporter?: string) =>
     getJSON<{ count: number; interfaces: InterfaceRow[]; source: string; window: string }>(

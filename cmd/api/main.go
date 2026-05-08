@@ -116,6 +116,7 @@ func run() error {
 	r.Get("/api/summary", h.summary)
 	r.Get("/api/health/streams", h.healthStreams)
 	r.Get("/api/flows/recent", h.recentFlows)
+	r.Get("/api/flows/list", h.flowsList)
 	r.Get("/api/devices", h.devices)
 	r.Get("/api/devices/{exporter}", h.device)
 	r.Get("/api/devices/{exporter}/inventory", h.deviceInventory)
