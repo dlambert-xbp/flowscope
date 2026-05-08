@@ -10,6 +10,19 @@ export type FilterKey =
   | 'src_port'
   | 'dst_port'
   | 'proto'
+  | 'input_ifindex'
+  | 'output_ifindex'
+
+export const FILTER_KEYS: readonly FilterKey[] = [
+  'exporter',
+  'src_addr',
+  'dst_addr',
+  'src_port',
+  'dst_port',
+  'proto',
+  'input_ifindex',
+  'output_ifindex',
+] as const
 
 export type Filter = {
   key: FilterKey
@@ -33,31 +46,36 @@ const KEY_LABELS: Record<FilterKey, string> = {
   src_port: 'src port',
   dst_port: 'dst port',
   proto: 'proto',
+  input_ifindex: 'in iface',
+  output_ifindex: 'out iface',
 }
 
 export function keyLabelFor(key: FilterKey): string {
   return KEY_LABELS[key]
 }
 
-const ALLOWED: ReadonlySet<string> = new Set<FilterKey>([
-  'exporter',
-  'src_addr',
-  'dst_addr',
-  'src_port',
-  'dst_port',
-  'proto',
-])
+const ALLOWED: ReadonlySet<string> = new Set<FilterKey>(FILTER_KEYS)
+
+// LABEL_PARAM_PREFIX is the URL convention for round-tripping a
+// chip's human-readable label. Adding ?_l_exporter=troy-leaf-01
+// alongside ?exporter=10.110.0.182 lets a freshly mounted page
+// render the chip with the SNMP-resolved name instead of the bare
+// IP. Labels are optional — readFromURL falls back to the value if
+// the matching _l_<key> isn't present.
+const LABEL_PARAM_PREFIX = '_l_'
 
 // Read the current URL search params into an array of Filter values.
 // Unknown keys are dropped silently so a malformed URL never breaks
-// the dashboard.
+// the dashboard. Optional ?_l_<key>=label round-trips the human form
+// of the chip so reloads don't lose the SNMP-resolved name.
 function readFromURL(): Filter[] {
   if (typeof window === 'undefined') return []
   const sp = new URLSearchParams(window.location.search)
   const out: Filter[] = []
   for (const [k, v] of sp.entries()) {
     if (ALLOWED.has(k) && v !== '') {
-      out.push({ key: k as FilterKey, value: v })
+      const label = sp.get(LABEL_PARAM_PREFIX + k) ?? undefined
+      out.push({ key: k as FilterKey, value: v, label })
     }
   }
   return out
@@ -67,12 +85,20 @@ function readFromURL(): Filter[] {
 // Uses replaceState so chips coming and going don't pollute the back
 // stack — a hard refresh still reads the current set. Preserves all
 // non-filter params (time range, etc.) so other URL-backed state isn't
-// trampled.
+// trampled. Labels are persisted under the _l_<key> prefix.
 function writeToURL(filters: Filter[]) {
   if (typeof window === 'undefined') return
   const sp = new URLSearchParams(window.location.search)
-  for (const k of ALLOWED) sp.delete(k)
-  for (const f of filters) sp.set(f.key, f.value)
+  for (const k of ALLOWED) {
+    sp.delete(k)
+    sp.delete(LABEL_PARAM_PREFIX + k)
+  }
+  for (const f of filters) {
+    sp.set(f.key, f.value)
+    if (f.label && f.label !== f.value) {
+      sp.set(LABEL_PARAM_PREFIX + f.key, f.label)
+    }
+  }
   const qs = sp.toString()
   const next = qs ? `${window.location.pathname}?${qs}` : window.location.pathname
   if (window.location.pathname + window.location.search !== next) {

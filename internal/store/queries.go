@@ -162,7 +162,133 @@ type RecentFlow struct {
 	Packets        uint64    `json:"packets"`
 	InputIfIndex   uint32    `json:"input_ifindex"`
 	OutputIfIndex  uint32    `json:"output_ifindex"`
+	SrcAS          uint32    `json:"src_as"`
+	DstAS          uint32    `json:"dst_as"`
 	Source         string    `json:"source"`
+}
+
+// StorageHealth captures ClickHouse-side write health for the
+// Overview Storage panel. Insert lag is the gap between now and the
+// most recent flow row's observed timestamp — under healthy ingest
+// it stays under a second. Recent rate is rows/sec computed over
+// the last 60s.
+type StorageHealth struct {
+	InsertLagSeconds   float64   `json:"insert_lag_seconds"`
+	RowsPerSecRecent   float64   `json:"rows_per_sec_recent"`
+	RowsLast60s        uint64    `json:"rows_last_60s"`
+	NewestObserved     time.Time `json:"newest_observed"`
+	OldestObserved     time.Time `json:"oldest_observed"`
+	FlowsRows          uint64    `json:"flows_rows_estimate"`
+	IfaceCounterRows   uint64    `json:"iface_counter_samples_rows_estimate"`
+	DeviceInventoryRows uint64   `json:"device_inventory_rows_estimate"`
+}
+
+// QueryStorageHealth returns first-class write/lag indicators read
+// from ClickHouse system tables and the flows table directly.
+// Cheap — bounded scans on small system tables and an aggregate
+// over the trailing minute on flows.
+func QueryStorageHealth(ctx context.Context, conn driver.Conn) (StorageHealth, error) {
+	var h StorageHealth
+	row := conn.QueryRow(ctx, `
+SELECT
+    coalesce(toUnixTimestamp(now()) - toUnixTimestamp(max(observed)), 0) AS lag_seconds,
+    coalesce(countIf(observed >= now() - INTERVAL 60 SECOND) / 60.0, 0) AS rate_recent,
+    coalesce(countIf(observed >= now() - INTERVAL 60 SECOND), 0) AS rows_60s,
+    coalesce(max(observed), toDateTime(0)) AS newest,
+    coalesce(min(observed), toDateTime(0)) AS oldest
+FROM flows
+WHERE observed >= now() - INTERVAL 24 HOUR`)
+	if err := row.Scan(
+		&h.InsertLagSeconds,
+		&h.RowsPerSecRecent,
+		&h.RowsLast60s,
+		&h.NewestObserved,
+		&h.OldestObserved,
+	); err != nil {
+		return h, fmt.Errorf("store: query storage health flows: %w", err)
+	}
+	// Per-table row count estimates. system.tables.total_rows is an
+	// estimate (replicated/sharded clusters report partial values),
+	// fine for the Storage panel.
+	rows, err := conn.Query(ctx, `
+SELECT name, total_rows
+FROM system.tables
+WHERE database = currentDatabase()
+  AND name IN ('flows', 'iface_counter_samples', 'device_inventory')`)
+	if err != nil {
+		return h, fmt.Errorf("store: query storage tables: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		var total uint64
+		if err := rows.Scan(&name, &total); err != nil {
+			return h, fmt.Errorf("store: scan storage table: %w", err)
+		}
+		switch name {
+		case "flows":
+			h.FlowsRows = total
+		case "iface_counter_samples":
+			h.IfaceCounterRows = total
+		case "device_inventory":
+			h.DeviceInventoryRows = total
+		}
+	}
+	return h, rows.Err()
+}
+
+// ExporterHealthRow is one (exporter, source) aggregate over the
+// trailing window. LossPct = seq_gaps / (seq_gaps + datagrams) when
+// datagrams > 0; 0 when there's been no traffic.
+type ExporterHealthRow struct {
+	Exporter   string  `json:"exporter"`
+	SysName    string  `json:"sys_name"`
+	Source     string  `json:"source"`
+	Datagrams  uint64  `json:"datagrams"`
+	SeqGaps    uint64  `json:"seq_gaps"`
+	LossPct    float64 `json:"loss_pct"`
+	LastSeen   time.Time `json:"last_seen"`
+}
+
+// QueryExporterHealth aggregates per-(exporter, source) datagram +
+// gap counts from the exporter_health table over the time range.
+// LEFT JOINs SNMP inventory for the human sys_name.
+func QueryExporterHealth(ctx context.Context, conn driver.Conn, tr TimeRange) ([]ExporterHealthRow, error) {
+	pred, args := tr.Predicate("ts")
+	q := `
+WITH inv AS (` + sqlLatestInventory + `)
+SELECT
+    e.exporter,
+    ifNull(inv.sys_name, '') AS sys_name,
+    e.source,
+    sum(e.datagrams) AS datagrams,
+    sum(e.seq_gaps)  AS seq_gaps,
+    max(e.ts)        AS last_seen
+FROM exporter_health AS e
+LEFT JOIN inv ON e.exporter = inv.exporter
+WHERE ` + pred + `
+GROUP BY e.exporter, sys_name, e.source
+ORDER BY seq_gaps DESC, datagrams DESC`
+	rows, err := conn.Query(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("store: query exporter health: %w", err)
+	}
+	defer rows.Close()
+	out := make([]ExporterHealthRow, 0, 16)
+	for rows.Next() {
+		var r ExporterHealthRow
+		var exp netip.Addr
+		if err := rows.Scan(&exp, &r.SysName, &r.Source, &r.Datagrams, &r.SeqGaps, &r.LastSeen); err != nil {
+			return nil, fmt.Errorf("store: scan exporter health row: %w", err)
+		}
+		r.Exporter = exp.Unmap().String()
+		denom := r.Datagrams + r.SeqGaps
+		if denom > 0 {
+			r.LossPct = float64(r.SeqGaps) / float64(denom) * 100
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }
 
 // SourceBreakdown is one row per ingest source label observed in the
@@ -848,12 +974,14 @@ LIMIT 1`
 // are bound through the driver — never interpolated into SQL — so
 // untrusted user input cannot escape into the WHERE clause.
 type FlowFilter struct {
-	Exporter string // IP string ("10.2.0.11" or "2001:db8::1"); validated as netip.Addr
-	SrcAddr  string
-	DstAddr  string
-	SrcPort  uint16 // 0 = unset
-	DstPort  uint16
-	Proto    uint16 // 16-bit so 0 can mean "unset"; valid values fit in 8 bits
+	Exporter      string // IP string ("10.2.0.11" or "2001:db8::1"); validated as netip.Addr
+	SrcAddr       string
+	DstAddr       string
+	SrcPort       uint16 // 0 = unset
+	DstPort       uint16
+	Proto         uint16 // 16-bit so 0 can mean "unset"; valid values fit in 8 bits
+	InputIfIndex  uint32 // 0 = unset; observation interface on the exporter
+	OutputIfIndex uint32 // 0 = unset
 }
 
 // buildWhere returns SQL fragments and bound args for the WHERE clause
@@ -896,6 +1024,14 @@ func buildWhere(tr TimeRange, f FlowFilter) (string, []any, error) {
 	if f.Proto != 0 {
 		where = append(where, "proto = ?")
 		args = append(args, uint8(f.Proto))
+	}
+	if f.InputIfIndex != 0 {
+		where = append(where, "input_ifindex = ?")
+		args = append(args, f.InputIfIndex)
+	}
+	if f.OutputIfIndex != 0 {
+		where = append(where, "output_ifindex = ?")
+		args = append(args, f.OutputIfIndex)
 	}
 	return strings.Join(where, " AND "), args, nil
 }
@@ -963,6 +1099,57 @@ type TopProtocol struct {
 	Bytes   uint64 `json:"bytes"`
 	Packets uint64 `json:"packets"`
 	Flows   uint64 `json:"flows"`
+}
+
+// TopASN is a (src_as, dst_as) pair aggregated over a window.
+// Returned by /api/top/asn. Either side may be 0 — common when
+// the exporter doesn't have a BGP table covering the address (the
+// IP is in a default route or the exporter wasn't configured
+// with NetFlow ASN export).
+type TopASN struct {
+	SrcAS   uint32 `json:"src_as"`
+	DstAS   uint32 `json:"dst_as"`
+	Bytes   uint64 `json:"bytes"`
+	Packets uint64 `json:"packets"`
+	Flows   uint64 `json:"flows"`
+}
+
+// QueryTopASN returns the N largest (src_as, dst_as) aggregates
+// over the trailing window, narrowed by the FlowFilter. The sort
+// dimension (bytes / packets / flows) is whitelisted by the caller.
+func QueryTopASN(ctx context.Context, conn driver.Conn, tr TimeRange, limit int, sort TopNSort, f FlowFilter) ([]TopASN, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 20
+	}
+	whereSQL, args, err := buildWhere(tr, f)
+	if err != nil {
+		return nil, err
+	}
+	q := `
+SELECT src_as, dst_as,
+       sum(bytes)   AS bytes,
+       sum(packets) AS packets,
+       count()      AS flows
+FROM flows
+WHERE ` + whereSQL + `
+GROUP BY src_as, dst_as
+ORDER BY ` + sort.orderColumn() + ` DESC
+LIMIT ?`
+	args = append(args, uint64(limit))
+	rows, err := conn.Query(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("store: query top asn: %w", err)
+	}
+	defer rows.Close()
+	out := make([]TopASN, 0, limit)
+	for rows.Next() {
+		var a TopASN
+		if err := rows.Scan(&a.SrcAS, &a.DstAS, &a.Bytes, &a.Packets, &a.Flows); err != nil {
+			return nil, fmt.Errorf("store: scan top asn: %w", err)
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
 }
 
 // TopConversation is a full 5-tuple aggregate. Returned by
@@ -1217,7 +1404,7 @@ SELECT
     f.observed, f.exporter, ifNull(inv.sys_name, '') AS exporter_name,
     f.src_addr, f.dst_addr,
     f.src_port, f.dst_port, f.proto, f.bytes, f.packets,
-    f.input_ifindex, f.output_ifindex, f.source
+    f.input_ifindex, f.output_ifindex, f.src_as, f.dst_as, f.source
 FROM flows AS f
 LEFT JOIN inv ON f.exporter = inv.exporter
 WHERE ` + whereSQL + `
@@ -1242,6 +1429,7 @@ LIMIT ? OFFSET ?`
 			&rf.SrcPort, &rf.DstPort, &rf.Proto,
 			&rf.Bytes, &rf.Packets,
 			&rf.InputIfIndex, &rf.OutputIfIndex,
+			&rf.SrcAS, &rf.DstAS,
 			&rf.Source,
 		); err != nil {
 			return nil, fmt.Errorf("store: scan flows list row: %w", err)
@@ -1255,6 +1443,67 @@ LIMIT ? OFFSET ?`
 		return nil, err
 	}
 	return out, nil
+}
+
+// FlowTimeseriesPoint is one bucket on the per-filter flow chart
+// rendered in the drill-in drawer. Bytes and packets are the
+// summed totals for the bucket window.
+type FlowTimeseriesPoint struct {
+	Ts      time.Time `json:"ts"`
+	Bytes   uint64    `json:"bytes"`
+	Packets uint64    `json:"packets"`
+	Flows   uint64    `json:"flows"`
+}
+
+// QueryFlowsTimeseries returns bucketed bytes/packets/flow-count
+// per bucketSeconds over the time range, narrowed by the filter.
+// Buckets are aligned via toStartOfInterval so the same window over
+// a stable input always returns the same bucket boundaries.
+//
+// bucketSeconds is clamped to [1, 3600] — narrower than 1s rounds
+// down to bursts that aren't statistically interesting; wider than
+// an hour produces too few points to read as a chart.
+func QueryFlowsTimeseries(
+	ctx context.Context,
+	conn driver.Conn,
+	tr TimeRange,
+	bucketSeconds int,
+	f FlowFilter,
+) ([]FlowTimeseriesPoint, error) {
+	if bucketSeconds < 1 {
+		bucketSeconds = 1
+	}
+	if bucketSeconds > 3600 {
+		bucketSeconds = 3600
+	}
+	whereSQL, args, err := buildWhere(tr, f)
+	if err != nil {
+		return nil, err
+	}
+	q := `
+SELECT toStartOfInterval(observed, INTERVAL ? SECOND) AS ts,
+       sum(bytes)   AS bytes,
+       sum(packets) AS packets,
+       count()      AS flows
+FROM flows
+WHERE ` + whereSQL + `
+GROUP BY ts
+ORDER BY ts ASC`
+	args = append([]any{uint64(bucketSeconds)}, args...)
+	rows, err := conn.Query(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("store: query flows timeseries: %w", err)
+	}
+	defer rows.Close()
+	out := make([]FlowTimeseriesPoint, 0, 64)
+	for rows.Next() {
+		var p FlowTimeseriesPoint
+		if err := rows.Scan(&p.Ts, &p.Bytes, &p.Packets, &p.Flows); err != nil {
+			return nil, fmt.Errorf("store: scan flows timeseries: %w", err)
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
 }
 
 // QueryRecentFlows returns the most recent N rows from the flows table,
@@ -1283,7 +1532,7 @@ SELECT
     f.observed, f.exporter, ifNull(inv.sys_name, '') AS exporter_name,
     f.src_addr, f.dst_addr,
     f.src_port, f.dst_port, f.proto, f.bytes, f.packets,
-    f.input_ifindex, f.output_ifindex, f.source
+    f.input_ifindex, f.output_ifindex, f.src_as, f.dst_as, f.source
 FROM flows AS f
 LEFT JOIN inv ON f.exporter = inv.exporter` + exporterPredicate + `
 ORDER BY f.observed DESC
@@ -1307,6 +1556,7 @@ LIMIT ?`
 			&rf.SrcPort, &rf.DstPort, &rf.Proto,
 			&rf.Bytes, &rf.Packets,
 			&rf.InputIfIndex, &rf.OutputIfIndex,
+			&rf.SrcAS, &rf.DstAS,
 			&rf.Source,
 		); err != nil {
 			return nil, fmt.Errorf("store: scan recent flow: %w", err)

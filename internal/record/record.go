@@ -50,6 +50,14 @@ type Flow struct {
 	// TCP flags ORed across the flow's lifetime, when known.
 	TCPFlags uint8
 
+	// Autonomous System numbers from the exporter's BGP table at the
+	// time the flow was metered. NetFlow v9 / IPFIX field IDs 16
+	// (src_as) and 17 (dst_as). Zero = not exported / unknown — sFlow
+	// today doesn't extract these (would need the BGP gateway
+	// extension in the parser).
+	SrcAS uint32
+	DstAS uint32
+
 	// Source identifies which decoder produced this record. Used by
 	// telemetry counters and by the API to label data provenance.
 	Source SourceKind

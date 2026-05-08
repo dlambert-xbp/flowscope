@@ -5,6 +5,8 @@ import type {
   Alert,
   AlertSummary,
   Device,
+  ExporterHealthRow,
+  StorageHealth,
   StreamRow,
   Summary,
 } from '../api'
@@ -56,6 +58,16 @@ export function Overview({
     queryFn: () => api.alerts('open'),
     refetchInterval: 5000,
   })
+  const storage = useQuery({
+    queryKey: ['health-storage'],
+    queryFn: () => api.healthStorage(),
+    refetchInterval: 5000,
+  })
+  const exporterHealth = useQuery({
+    queryKey: ['health-exporters', rangeKey],
+    queryFn: () => api.healthExporters(apiRange),
+    refetchInterval: range.kind === 'preset' ? 10000 : false,
+  })
 
   const deviceList = devices.data?.devices ?? []
   const exporterStatus = classifyExporters(deviceList)
@@ -86,13 +98,20 @@ export function Overview({
           status={exporterStatus}
         />
       </div>
+      <div className="border-b border-line">
+        <ExporterAccuracyPanel
+          rows={exporterHealth.data?.rows ?? []}
+          loading={exporterHealth.isLoading}
+          range={range}
+        />
+      </div>
       <div className="grid grid-cols-1 lg:grid-cols-2 border-b border-line">
         <AlertsPanel
           alerts={openAlerts.data?.alerts ?? []}
           summary={alertSummary.data}
           loading={openAlerts.isLoading}
         />
-        <StoragePanel summary={summary.data} range={range} />
+        <StoragePanel summary={summary.data} range={range} storage={storage.data} />
       </div>
     </div>
   )
@@ -689,45 +708,202 @@ function SeverityBadge({ sev }: { sev: Alert['severity'] }) {
 
 /* ----------------------------- Storage panel ---------------------------- */
 
+/* ---------------------- Exporter accuracy panel ---------------------- */
+
+// ExporterAccuracyPanel surfaces per-(exporter, source) loss rate
+// derived from datagram sequence-number gaps in the ingest tracker.
+// 0% loss is healthy; >0.5% paints warn, >5% paints crit. The panel
+// hides the row count when there's been zero traffic in the window
+// — a common state during dev / quiet periods.
+function ExporterAccuracyPanel({
+  rows,
+  loading,
+  range,
+}: {
+  rows: ExporterHealthRow[]
+  loading: boolean
+  range: TimeRange
+}) {
+  const winLabel = rangeLabel(range)
+  const worst = rows.reduce((m, r) => (r.loss_pct > m ? r.loss_pct : m), 0)
+  const worstTone =
+    worst >= 5 ? 'text-crit' : worst >= 0.5 ? 'text-warn' : 'text-ok'
+  const worstLabel =
+    rows.length === 0
+      ? 'no datagrams'
+      : worst >= 5
+        ? 'lossy ingest'
+        : worst >= 0.5
+          ? 'minor loss'
+          : 'no loss'
+  return (
+    <PanelShell
+      title="Exporter accuracy"
+      sub={`per-exporter datagram loss · ${winLabel}`}
+      right={
+        <span className={`font-mono text-[10px] tracking-[0.06em] ${worstTone}`}>
+          {worstLabel}
+        </span>
+      }
+    >
+      {loading ? (
+        <Loading />
+      ) : rows.length === 0 ? (
+        <Empty>
+          no exporter health snapshots yet · the ingest service flushes the seq
+          tracker every 10s after the first datagram from any exporter
+        </Empty>
+      ) : (
+        <table className="w-full">
+          <colgroup>
+            <col style={{ width: '32%' }} />
+            <col style={{ width: '110px' }} />
+            <col />
+            <col />
+            <col style={{ width: '90px' }} />
+          </colgroup>
+          <thead>
+            <tr>
+              <th>exporter</th>
+              <th>source</th>
+              <th className="r">datagrams</th>
+              <th className="r">seq gaps</th>
+              <th className="r">loss</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r, i) => {
+              const tone =
+                r.loss_pct >= 5 ? 'text-crit' : r.loss_pct >= 0.5 ? 'text-warn' : 'text-ok'
+              return (
+                <tr key={i} className="hover:bg-surface">
+                  <td>
+                    <div className="font-mono truncate">{r.sys_name || r.exporter}</div>
+                    {r.sys_name && (
+                      <div className="font-mono italic text-faint text-[10.5px] truncate">
+                        {r.exporter}
+                      </div>
+                    )}
+                  </td>
+                  <td className="font-mono text-dim">{r.source}</td>
+                  <td className="r n">{fmt.num(r.datagrams)}</td>
+                  <td className={`r n ${r.seq_gaps > 0 ? 'text-warn' : 'text-faint'}`}>
+                    {fmt.num(r.seq_gaps)}
+                  </td>
+                  <td className={`r n ${tone}`}>{r.loss_pct.toFixed(2)}%</td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      )}
+    </PanelShell>
+  )
+}
+
 function StoragePanel({
   summary,
   range,
+  storage,
 }: {
   summary?: Summary
   range: TimeRange
+  storage?: StorageHealth
 }) {
   const winLabel = rangeLabel(range)
   const newest = summary ? fmt.time(summary.newest) : '—'
   const oldest = summary ? fmt.time(summary.oldest) : '—'
   const span = summary ? rangeSpan(summary) : '—'
+  const lag = storage?.insert_lag_seconds ?? null
+  const lagTone =
+    lag === null
+      ? 'text-dim'
+      : lag < 5
+        ? 'text-ok'
+        : lag < 30
+          ? 'text-warn'
+          : 'text-crit'
+  const rightLabel =
+    lag === null
+      ? 'CLICKHOUSE …'
+      : lag < 5
+        ? 'CLICKHOUSE OK'
+        : lag < 30
+          ? 'INGEST LAGGING'
+          : 'STALE'
   return (
     <PanelShell
       title="Storage / retention"
       sub={`flow span across the ${winLabel}`}
-      right={<span className="font-mono text-[10px] tracking-[0.06em] text-ok">CLICKHOUSE OK</span>}
+      right={
+        <span
+          className={`font-mono text-[10px] tracking-[0.06em] ${lagTone}`}
+        >
+          {rightLabel}
+        </span>
+      }
     >
       <div className="grid grid-cols-3 border-l border-t border-line-soft">
+        <Cell
+          k="insert lag"
+          v={lag === null ? '—' : `${lag.toFixed(1)}s`}
+          tone={lagTone}
+        />
+        <Cell
+          k="rows / sec (60s)"
+          v={
+            storage
+              ? `${fmt.num(Math.round(storage.rows_per_sec_recent))}`
+              : '—'
+          }
+        />
+        <Cell
+          k="rows last 60s"
+          v={storage ? fmt.num(storage.rows_last_60s) : '—'}
+        />
+      </div>
+      <div className="grid grid-cols-3 border-l border-line-soft">
         <Cell k="newest" v={newest.slice(0, 19) + 'Z'} />
         <Cell k="oldest" v={oldest.slice(0, 19) + 'Z'} />
         <Cell k="span" v={span} />
       </div>
+      <div className="grid grid-cols-3 border-l border-line-soft">
+        <Cell
+          k="flows rows"
+          v={storage ? fmt.num(storage.flows_rows_estimate) : '—'}
+        />
+        <Cell
+          k="counter samples"
+          v={storage ? fmt.num(storage.iface_counter_samples_rows_estimate) : '—'}
+        />
+        <Cell
+          k="device inventory"
+          v={storage ? fmt.num(storage.device_inventory_rows_estimate) : '—'}
+        />
+      </div>
       <div className="px-4 py-3 text-[11.5px] text-faint border-t border-line-soft leading-[1.5]">
-        Insert lag, batcher queue depth, and per-shard write health are exposed via the api service's{' '}
-        <code className="bg-raise px-1 font-mono text-text">/metrics</code> endpoint. A first-class
-        storage panel here lands once <code className="bg-raise px-1 font-mono text-text">/api/health/storage</code>{' '}
-        is wired.
+        Insert lag is the gap between now and the most recent flow row's observed timestamp.
+        Rows/sec is computed over the trailing 60s. Per-table row counts come from{' '}
+        <code className="bg-raise px-1 font-mono text-text">system.tables.total_rows</code> and
+        are estimates on replicated clusters. Batcher queue depth + parser drop counters live on
+        the ingest service's <code className="bg-raise px-1 font-mono text-text">/metrics</code>{' '}
+        Prometheus endpoint — that signal needs its own ingest-side health endpoint to surface
+        here.
       </div>
     </PanelShell>
   )
 }
 
-function Cell({ k, v }: { k: string; v: string }) {
+function Cell({ k, v, tone }: { k: string; v: string; tone?: string }) {
   return (
     <div className="px-3 py-2.5 border-r border-b border-line-soft min-w-0 overflow-hidden">
       <div className="text-[10px] uppercase tracking-[0.1em] text-faint font-semibold mb-0.5">
         {k}
       </div>
-      <div title={v} className="font-mono text-[13px] text-text truncate tabular">
+      <div
+        title={v}
+        className={`font-mono text-[13px] truncate tabular ${tone ?? 'text-text'}`}
+      >
         {v}
       </div>
     </div>

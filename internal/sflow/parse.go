@@ -76,6 +76,34 @@ const (
 	ipProtoUDP = 17
 )
 
+// ReadSequence extracts the sFlow datagram sequence number from
+// a v5 header without doing the full sample-area decode. Returns
+// (0, false) on a buffer that's too short or wrong-versioned.
+// Caller should call this before Parse so a partial or malformed
+// sample area still credits the datagram for loss-detection.
+func ReadSequence(buf []byte) (uint32, bool) {
+	if len(buf) < 8 {
+		return 0, false
+	}
+	if binary.BigEndian.Uint32(buf[0:4]) != sflowVersion {
+		return 0, false
+	}
+	addrType := binary.BigEndian.Uint32(buf[4:8])
+	var seqOff int
+	switch addrType {
+	case 1: // IPv4 agent address (4 bytes)
+		seqOff = 8 + 4 + 4 // header + agent + sub_agent_id
+	case 2: // IPv6 agent address (16 bytes)
+		seqOff = 8 + 16 + 4
+	default:
+		return 0, false
+	}
+	if len(buf) < seqOff+4 {
+		return 0, false
+	}
+	return binary.BigEndian.Uint32(buf[seqOff : seqOff+4]), true
+}
+
 // Parse decodes an sFlow v5 datagram from buf. Decoded flows are
 // appended to flowDst; decoded counter samples are appended to
 // counterDst. The caller's UDP source address is supplied as

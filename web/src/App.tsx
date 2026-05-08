@@ -9,18 +9,11 @@ import { Settings } from './components/Settings'
 import { ThemeToggle } from './theme'
 import { useTimeRange, type TimeRange } from './timeRange'
 import { TimeRangeSelector } from './components/TimeRangeSelector'
-import type { Filter, FilterKey } from './filters'
+import { FILTER_KEYS, type Filter } from './filters'
 
 type Tab = 'overview' | 'flows' | 'devices' | 'alerts' | 'settings'
 
-const FILTER_KEYS: FilterKey[] = [
-  'exporter',
-  'src_addr',
-  'dst_addr',
-  'src_port',
-  'dst_port',
-  'proto',
-]
+const LABEL_PREFIX = '_l_'
 
 const TAB_LABELS: Record<Tab, string> = {
   overview: 'Overview',
@@ -41,8 +34,16 @@ export function App() {
   // deep-link into Flows pre-filtered to the current exporter.
   const navigateToFlows = useCallback((filters: Filter[]) => {
     const sp = new URLSearchParams(window.location.search)
-    for (const k of FILTER_KEYS) sp.delete(k)
-    for (const f of filters) sp.set(f.key, f.value)
+    for (const k of FILTER_KEYS) {
+      sp.delete(k)
+      sp.delete(LABEL_PREFIX + k)
+    }
+    for (const f of filters) {
+      sp.set(f.key, f.value)
+      if (f.label && f.label !== f.value) {
+        sp.set(LABEL_PREFIX + f.key, f.label)
+      }
+    }
     const qs = sp.toString()
     const next = qs
       ? `${window.location.pathname}?${qs}`

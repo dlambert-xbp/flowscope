@@ -6,6 +6,7 @@ import type {
   FlowsListResponse,
   FlowsListSort,
   RecentFlow,
+  TopASN,
   TopTalker,
   TopService,
   TopProtocol,
@@ -13,10 +14,11 @@ import type {
   TopNSort,
   TimeRangeArg,
 } from '../api'
-import { useFilters, toQuery, keyLabelFor, type Filter, type FilterKey } from '../filters'
+import { useFilters, toQuery, keyLabelFor, FILTER_KEYS, type Filter, type FilterKey } from '../filters'
 import { rangeLabel, toApi, type TimeRange } from '../timeRange'
 import { ServiceLabel, useServiceName } from './ServiceLabel'
 import { LiveTail } from './LiveTail'
+import { FlowDrawer, type FlowDrillDown } from './FlowDrawer'
 
 // Flows tab — page chrome:
 //   Live tail (collapsible, expanded by default)
@@ -30,13 +32,14 @@ import { LiveTail } from './LiveTail'
 // full 5-tuple) to add or replace a filter chip; chips re-narrow
 // every panel's query and persist in the URL.
 
-type TabId = 'talkers' | 'services' | 'protocols' | 'conversations'
+type TabId = 'talkers' | 'services' | 'protocols' | 'conversations' | 'asn'
 
 const TAB_LABELS: Record<TabId, string> = {
   talkers: 'Top talkers',
   services: 'Top services',
   protocols: 'Top protocols',
   conversations: 'Top conversations',
+  asn: 'Top ASN',
 }
 
 const TOP_N_OPTIONS = [10, 25, 50] as const
@@ -59,11 +62,13 @@ export function Flows({
   const [tab, setTab] = useState<TabId>('talkers')
   const [sortBy, setSortBy] = useState<TopNSort>('bytes')
   const [topN, setTopN] = useState<number>(25)
+  const [drill, setDrill] = useState<FlowDrillDown | null>(null)
   return (
     <div>
       <LiveTail />
       <FilterBar
         filters={f.filters}
+        onAdd={f.add}
         onRemove={f.remove}
         onClear={f.clear}
         range={range}
@@ -84,12 +89,20 @@ export function Flows({
         sortBy={sortBy}
         topN={topN}
         onAdd={f.add}
+        onDrill={setDrill}
       />
       <Investigate
         qs={qs}
         range={apiRange}
         rangeKey={rangeKey}
         onAdd={f.add}
+        onDrill={setDrill}
+      />
+      <FlowDrawer
+        drill={drill}
+        pageFilters={qs}
+        range={apiRange}
+        onClose={() => setDrill(null)}
       />
     </div>
   )
@@ -99,41 +112,218 @@ export function Flows({
 
 function FilterBar({
   filters,
+  onAdd,
   onRemove,
   onClear,
   range,
 }: {
   filters: Filter[]
+  onAdd: (f: Filter) => void
   onRemove: (key: FilterKey, value?: string) => void
   onClear: () => void
   range: TimeRange
 }) {
   const has = filters.length > 0
+  const [building, setBuilding] = useState(false)
   return (
-    <div className="flex items-center gap-2 px-4 py-3 border-b border-line bg-surface flex-wrap">
-      <span className="text-[10.5px] uppercase tracking-[0.1em] text-faint font-semibold mr-1">
-        Filters
-      </span>
-      <Chip neutral>window · {rangeLabel(range)}</Chip>
-      {filters.map((f) => (
-        <Chip key={`${f.key}_${f.value}`} onRemove={() => onRemove(f.key, f.value)}>
-          <span className="text-faint">{f.keyLabel ?? keyLabelFor(f.key)} ·</span> {f.label ?? f.value}
-        </Chip>
-      ))}
-      {has ? (
+    <div className="border-b border-line bg-surface">
+      <div className="flex items-center gap-2 px-4 py-3 flex-wrap">
+        <span className="text-[10.5px] uppercase tracking-[0.1em] text-faint font-semibold mr-1">
+          Filters
+        </span>
+        <Chip neutral>window · {rangeLabel(range)}</Chip>
+        {filters.map((f) => (
+          <Chip key={`${f.key}_${f.value}`} onRemove={() => onRemove(f.key, f.value)}>
+            <span className="text-faint">{f.keyLabel ?? keyLabelFor(f.key)} ·</span>{' '}
+            {f.label ?? f.value}
+          </Chip>
+        ))}
         <button
-          className="ml-auto font-mono text-[11px] text-dim hover:text-text px-2 py-1 border border-line"
-          onClick={onClear}
+          onClick={() => setBuilding((b) => !b)}
+          aria-expanded={building}
+          aria-controls="filter-builder"
+          className="font-mono text-[11px] inline-flex items-center gap-1.5 px-2 py-1 border border-line text-dim hover:border-accent hover:text-text"
         >
-          clear all
+          <span aria-hidden className="text-accent">+</span>
+          add filter
         </button>
-      ) : (
-        <span className="ml-auto font-mono text-[11px] text-faint italic">
-          click any row to add a filter
+        {has && (
+          <button
+            className="font-mono text-[11px] text-dim hover:text-text px-2 py-1 border border-line"
+            onClick={onClear}
+          >
+            clear all
+          </button>
+        )}
+        {!has && !building && (
+          <span className="ml-auto font-mono text-[11px] text-faint italic">
+            click any row, or use <span className="text-dim">+ add filter</span>
+          </span>
+        )}
+      </div>
+      {building && (
+        <FilterBuilder
+          existing={filters}
+          onAdd={(f) => {
+            onAdd(f)
+            setBuilding(false)
+          }}
+          onCancel={() => setBuilding(false)}
+        />
+      )}
+    </div>
+  )
+}
+
+/* ----------------------------- Filter builder ----------------------------- */
+
+// FilterBuilder is the cold-start filter form. Lets the operator
+// type a value for any FilterKey without having to first see it on
+// screen. Validates per-key (IP, port number, ifindex) and submits
+// a Filter through onAdd. Pre-populates the value if the same key
+// already has a chip — adding the form's value replaces that chip
+// (one-value-per-key invariant in useFilters).
+function FilterBuilder({
+  existing,
+  onAdd,
+  onCancel,
+}: {
+  existing: Filter[]
+  onAdd: (f: Filter) => void
+  onCancel: () => void
+}) {
+  const [key, setKey] = useState<FilterKey>('exporter')
+  const [value, setValue] = useState<string>('')
+  const [label, setLabel] = useState<string>('')
+  const [error, setError] = useState<string | null>(null)
+  const placeholder = PLACEHOLDERS[key]
+  const submit = () => {
+    const v = value.trim()
+    if (!v) {
+      setError('value required')
+      return
+    }
+    const validationError = validateValue(key, v)
+    if (validationError) {
+      setError(validationError)
+      return
+    }
+    const f: Filter = { key, value: v }
+    const lbl = label.trim()
+    if (lbl && lbl !== v) f.label = lbl
+    onAdd(f)
+    setValue('')
+    setLabel('')
+    setError(null)
+  }
+  // Show a hint when the chosen key already has a chip so the
+  // operator knows submitting will replace it.
+  const replaces = existing.find((e) => e.key === key)
+  return (
+    <div
+      id="filter-builder"
+      className="px-4 py-3 border-t border-line-soft bg-ink flex items-center gap-2 flex-wrap"
+    >
+      <span className="text-[10.5px] uppercase tracking-[0.1em] text-faint font-semibold mr-1">
+        New filter
+      </span>
+      <select
+        value={key}
+        onChange={(e) => {
+          setKey(e.target.value as FilterKey)
+          setError(null)
+        }}
+        className="font-mono text-[12px] bg-surface border border-line text-text px-2 py-1 outline-none focus:border-accent"
+      >
+        {FILTER_KEYS.map((k) => (
+          <option key={k} value={k}>
+            {keyLabelFor(k)}
+          </option>
+        ))}
+      </select>
+      <input
+        value={value}
+        onChange={(e) => {
+          setValue(e.target.value)
+          setError(null)
+        }}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') submit()
+          else if (e.key === 'Escape') onCancel()
+        }}
+        placeholder={placeholder}
+        className="font-mono text-[12px] bg-surface border border-line text-text px-2 py-1 outline-none focus:border-accent w-[220px]"
+        autoFocus
+      />
+      <input
+        value={label}
+        onChange={(e) => setLabel(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') submit()
+          else if (e.key === 'Escape') onCancel()
+        }}
+        placeholder="display label (optional)"
+        className="font-mono text-[12px] bg-surface border border-line text-dim placeholder:text-faint px-2 py-1 outline-none focus:border-accent w-[180px]"
+      />
+      <button
+        onClick={submit}
+        className="font-mono text-[11px] px-2.5 py-1 border border-accent bg-accent-wash text-text hover:bg-accent hover:text-ink"
+      >
+        add
+      </button>
+      <button
+        onClick={onCancel}
+        className="font-mono text-[11px] px-2.5 py-1 border border-line text-dim hover:text-text"
+      >
+        cancel
+      </button>
+      {error && (
+        <span className="font-mono text-[11px] text-crit">· {error}</span>
+      )}
+      {!error && replaces && (
+        <span className="font-mono text-[11px] text-faint italic">
+          replaces {keyLabelFor(replaces.key)} · {replaces.label ?? replaces.value}
         </span>
       )}
     </div>
   )
+}
+
+const PLACEHOLDERS: Record<FilterKey, string> = {
+  exporter: 'exporter IP (e.g. 10.110.0.182)',
+  src_addr: 'source IP',
+  dst_addr: 'destination IP',
+  src_port: 'source port (1–65535)',
+  dst_port: 'destination port',
+  proto: 'protocol number (6=TCP, 17=UDP)',
+  input_ifindex: 'input ifindex',
+  output_ifindex: 'output ifindex',
+}
+
+function validateValue(key: FilterKey, value: string): string | null {
+  switch (key) {
+    case 'exporter':
+    case 'src_addr':
+    case 'dst_addr':
+      return /^[0-9a-fA-F:.]+$/.test(value) ? null : 'expected an IP address'
+    case 'src_port':
+    case 'dst_port': {
+      const n = Number(value)
+      if (!Number.isInteger(n) || n < 1 || n > 65535) return 'port 1–65535'
+      return null
+    }
+    case 'proto': {
+      const n = Number(value)
+      if (!Number.isInteger(n) || n < 0 || n > 255) return 'proto 0–255'
+      return null
+    }
+    case 'input_ifindex':
+    case 'output_ifindex': {
+      const n = Number(value)
+      if (!Number.isInteger(n) || n < 0) return 'non-negative integer'
+      return null
+    }
+  }
 }
 
 function Chip({
@@ -274,6 +464,7 @@ function ActivePanel({
   sortBy,
   topN,
   onAdd,
+  onDrill,
 }: {
   tab: TabId
   qs: URLSearchParams
@@ -282,6 +473,7 @@ function ActivePanel({
   sortBy: TopNSort
   topN: number
   onAdd: (f: Filter) => void
+  onDrill: (d: FlowDrillDown) => void
 }) {
   return (
     <Panel title={TAB_LABELS[tab]} sub={subtitleFor(tab, sortBy)} right="SOURCE · FLOWS">
@@ -289,6 +481,7 @@ function ActivePanel({
         <TalkersList
           qs={qs}
           onAdd={onAdd}
+          onDrill={onDrill}
           range={range}
           rangeKey={rangeKey}
           sortBy={sortBy}
@@ -299,6 +492,7 @@ function ActivePanel({
         <ServicesList
           qs={qs}
           onAdd={onAdd}
+          onDrill={onDrill}
           range={range}
           rangeKey={rangeKey}
           sortBy={sortBy}
@@ -309,6 +503,18 @@ function ActivePanel({
         <ProtocolsList
           qs={qs}
           onAdd={onAdd}
+          onDrill={onDrill}
+          range={range}
+          rangeKey={rangeKey}
+          sortBy={sortBy}
+          topN={topN}
+        />
+      )}
+      {tab === 'asn' && (
+        <ASNList
+          qs={qs}
+          onAdd={onAdd}
+          onDrill={onDrill}
           range={range}
           rangeKey={rangeKey}
           sortBy={sortBy}
@@ -319,6 +525,7 @@ function ActivePanel({
         <ConversationsList
           qs={qs}
           onAdd={onAdd}
+          onDrill={onDrill}
           range={range}
           rangeKey={rangeKey}
           sortBy={sortBy}
@@ -340,6 +547,8 @@ function subtitleFor(tab: TabId, sortBy: TopNSort): string {
       return `share of ${sortBy} total`
     case 'conversations':
       return `5-tuple · ${by}`
+    case 'asn':
+      return `src AS → dst AS · ${by}`
   }
 }
 
@@ -375,13 +584,14 @@ function Panel({
 type ListBase = {
   qs: URLSearchParams
   onAdd: (f: Filter) => void
+  onDrill: (d: FlowDrillDown) => void
   range: TimeRangeArg
   rangeKey: unknown
   sortBy: TopNSort
   topN: number
 }
 
-function TalkersList({ qs, onAdd, range, rangeKey, sortBy, topN }: ListBase) {
+function TalkersList({ qs, onAdd, onDrill, range, rangeKey, sortBy, topN }: ListBase) {
   const q = useQuery({
     queryKey: ['top-talkers', qs.toString(), rangeKey, sortBy, topN],
     queryFn: () => api.topTalkers(qs, range, topN, sortBy),
@@ -404,13 +614,22 @@ function TalkersList({ qs, onAdd, range, rangeKey, sortBy, topN }: ListBase) {
         )}
         valueOf={(r) => valueOfRow(sortBy, r)}
         renderRight={(r) => formatValue(sortBy, valueOfRow(sortBy, r))}
+        drillFor={(r) => ({
+          title: `${r.src_addr} → ${r.dst_addr}`,
+          subtitle: 'src→dst pair',
+          filters: [
+            { key: 'src_addr', value: r.src_addr },
+            { key: 'dst_addr', value: r.dst_addr },
+          ],
+        })}
+        onDrill={onDrill}
         sortBy={sortBy}
       />
     </ListShell>
   )
 }
 
-function ServicesList({ qs, onAdd, range, rangeKey, sortBy, topN }: ListBase) {
+function ServicesList({ qs, onAdd, onDrill, range, rangeKey, sortBy, topN }: ListBase) {
   const q = useQuery({
     queryKey: ['top-services', qs.toString(), rangeKey, sortBy, topN],
     queryFn: () => api.topServices(qs, range, topN, sortBy),
@@ -423,13 +642,22 @@ function ServicesList({ qs, onAdd, range, rangeKey, sortBy, topN }: ListBase) {
         renderLeft={(r: TopService) => <TopServiceLeft r={r} onAdd={onAdd} />}
         valueOf={(r) => valueOfRow(sortBy, r)}
         renderRight={(r) => formatValue(sortBy, valueOfRow(sortBy, r))}
+        drillFor={(r) => ({
+          title: `${fmt.proto(r.proto)} port ${r.dst_port}`,
+          subtitle: 'service',
+          filters: [
+            { key: 'dst_port', value: String(r.dst_port) },
+            { key: 'proto', value: String(r.proto), label: fmt.proto(r.proto) },
+          ],
+        })}
+        onDrill={onDrill}
         sortBy={sortBy}
       />
     </ListShell>
   )
 }
 
-function ProtocolsList({ qs, onAdd, range, rangeKey, sortBy, topN }: ListBase) {
+function ProtocolsList({ qs, onAdd, onDrill, range, rangeKey, sortBy, topN }: ListBase) {
   const q = useQuery({
     queryKey: ['top-protocols', qs.toString(), rangeKey, sortBy],
     queryFn: () => api.topProtocols(qs, range, sortBy),
@@ -457,13 +685,61 @@ function ProtocolsList({ qs, onAdd, range, rangeKey, sortBy, topN }: ListBase) {
           const v = valueOfRow(sortBy, r)
           return total > 0 ? `${((v / total) * 100).toFixed(1)}%` : '—'
         }}
+        drillFor={(r) => ({
+          title: `protocol ${fmt.proto(r.proto)}`,
+          subtitle: `IP proto ${r.proto}`,
+          filters: [
+            { key: 'proto', value: String(r.proto), label: fmt.proto(r.proto) },
+          ],
+        })}
+        onDrill={onDrill}
         sortBy={sortBy}
       />
     </ListShell>
   )
 }
 
-function ConversationsList({ qs, onAdd, range, rangeKey, sortBy, topN }: ListBase) {
+function ASNList({ qs, onAdd: _onAdd, onDrill, range, rangeKey, sortBy, topN }: ListBase) {
+  const q = useQuery({
+    queryKey: ['top-asn', qs.toString(), rangeKey, sortBy, topN],
+    queryFn: () => api.topASN(qs, range, topN, sortBy),
+  })
+  const rows = (q.data?.rows ?? []).filter((r) => r.src_as !== 0 || r.dst_as !== 0)
+  const dropped = (q.data?.rows.length ?? 0) - rows.length
+  return (
+    <ListShell loading={q.isLoading} empty={!rows.length} error={q.error as Error | undefined}>
+      <Rows
+        rows={rows}
+        keyOf={(r: TopASN) => `${r.src_as}>${r.dst_as}`}
+        renderLeft={(r) => (
+          <span className="font-mono text-[12px] text-text">
+            AS{r.src_as || '—'} <span className="text-faint">→</span> AS{r.dst_as || '—'}
+            {dropped > 0 && r === rows[0] && (
+              <span className="ml-3 font-mono text-[10.5px] text-faint italic">
+                · {dropped} unknown AS row{dropped === 1 ? '' : 's'} hidden
+              </span>
+            )}
+          </span>
+        )}
+        valueOf={(r) => valueOfRow(sortBy, r)}
+        renderRight={(r) => formatValue(sortBy, valueOfRow(sortBy, r))}
+        drillFor={(r) => ({
+          title: `AS${r.src_as} → AS${r.dst_as}`,
+          subtitle: 'src AS → dst AS',
+          // ASN isn't a FlowFilter dimension yet — drill carries an
+          // empty filter set; the chart and records reflect the page
+          // filters only. Adding src_as / dst_as to FlowFilter is a
+          // follow-up.
+          filters: [],
+        })}
+        onDrill={onDrill}
+        sortBy={sortBy}
+      />
+    </ListShell>
+  )
+}
+
+function ConversationsList({ qs, onAdd, onDrill, range, rangeKey, sortBy, topN }: ListBase) {
   const q = useQuery({
     queryKey: ['top-conversations', qs.toString(), rangeKey, sortBy, topN],
     queryFn: () => api.topConversations(qs, range, topN, sortBy),
@@ -491,6 +767,18 @@ function ConversationsList({ qs, onAdd, range, rangeKey, sortBy, topN }: ListBas
         )}
         valueOf={(r) => valueOfRow(sortBy, r)}
         renderRight={(r) => formatValue(sortBy, valueOfRow(sortBy, r))}
+        drillFor={(r) => ({
+          title: `${r.src_addr}:${r.src_port} → ${r.dst_addr}:${r.dst_port}`,
+          subtitle: `5-tuple · ${fmt.proto(r.proto)}`,
+          filters: [
+            { key: 'src_addr', value: r.src_addr },
+            { key: 'src_port', value: String(r.src_port) },
+            { key: 'dst_addr', value: r.dst_addr },
+            { key: 'dst_port', value: String(r.dst_port) },
+            { key: 'proto', value: String(r.proto), label: fmt.proto(r.proto) },
+          ],
+        })}
+        onDrill={onDrill}
         sortBy={sortBy}
       />
     </ListShell>
@@ -563,6 +851,8 @@ function Rows<T>({
   renderLeft,
   renderRight,
   valueOf,
+  drillFor,
+  onDrill,
   sortBy: _sortBy,
 }: {
   rows: T[]
@@ -570,6 +860,8 @@ function Rows<T>({
   renderLeft: (r: T) => ReactNode
   renderRight: (r: T) => ReactNode
   valueOf: (r: T) => number
+  drillFor?: (r: T) => FlowDrillDown
+  onDrill?: (d: FlowDrillDown) => void
   sortBy: TopNSort
 }) {
   const total = rows.reduce((a, r) => a + valueOf(r), 0)
@@ -578,11 +870,26 @@ function Rows<T>({
       {rows.map((r) => {
         const v = valueOf(r)
         const pct = total > 0 ? (v / total) * 100 : 0
+        const drill = drillFor?.(r)
         return (
-          <li key={keyOf(r)} className="px-4 py-2 border-b border-line-soft hover:bg-surface">
+          <li
+            key={keyOf(r)}
+            className="px-4 py-2 border-b border-line-soft hover:bg-surface group"
+          >
             <div className="flex items-baseline justify-between gap-3">
               <div className="min-w-0 truncate">{renderLeft(r)}</div>
-              <div className="font-mono text-[12px] tabular text-text shrink-0">{renderRight(r)}</div>
+              <div className="flex items-center gap-3 shrink-0">
+                <div className="font-mono text-[12px] tabular text-text">{renderRight(r)}</div>
+                {drill && onDrill && (
+                  <button
+                    type="button"
+                    onClick={() => onDrill(drill)}
+                    className="font-mono text-[10.5px] tracking-[0.06em] text-accent opacity-0 group-hover:opacity-100 hover:underline"
+                  >
+                    inspect →
+                  </button>
+                )}
+              </div>
             </div>
             <div className="mt-1.5 h-px bg-line w-full overflow-hidden">
               <div className="h-full bg-accent" style={{ width: `${Math.min(100, Math.max(0, pct))}%` }} />
@@ -674,11 +981,13 @@ function Investigate({
   range,
   rangeKey,
   onAdd,
+  onDrill,
 }: {
   qs: URLSearchParams
   range: TimeRangeArg
   rangeKey: unknown
   onAdd: (f: Filter) => void
+  onDrill: (d: FlowDrillDown) => void
 }) {
   const [collapsed, setCollapsed] = useState<boolean>(() => {
     try {
@@ -789,6 +1098,7 @@ function Investigate({
                 <col style={{ width: '80px' }} />
                 <col style={{ width: '90px' }} />
                 <col style={{ width: '100px' }} />
+                <col style={{ width: '76px' }} />
               </colgroup>
               <thead>
                 <tr>
@@ -822,11 +1132,12 @@ function Investigate({
                   >
                     bytes
                   </ServerTh>
+                  <th />
                 </tr>
               </thead>
               <tbody>
                 {flows.map((f, i) => (
-                  <tr key={i} className="hover:bg-surface">
+                  <tr key={i} className="hover:bg-surface group">
                     <td className="n text-faint">{fmt.time(f.observed).slice(11, 23)}</td>
                     <td>
                       <FilterTrigger
@@ -885,6 +1196,27 @@ function Investigate({
                     </td>
                     <td className="r n">{fmt.num(f.packets)}</td>
                     <td className="r n">{fmt.bytes(f.bytes)}</td>
+                    <td className="r">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          onDrill({
+                            title: `${f.src_addr}:${f.src_port} → ${f.dst_addr}:${f.dst_port}`,
+                            subtitle: `5-tuple · ${fmt.proto(f.proto)}`,
+                            filters: [
+                              { key: 'src_addr', value: f.src_addr },
+                              { key: 'src_port', value: String(f.src_port) },
+                              { key: 'dst_addr', value: f.dst_addr },
+                              { key: 'dst_port', value: String(f.dst_port) },
+                              { key: 'proto', value: String(f.proto), label: fmt.proto(f.proto) },
+                            ],
+                          })
+                        }
+                        className="font-mono text-[10.5px] tracking-[0.06em] text-accent opacity-0 group-hover:opacity-100 hover:underline"
+                      >
+                        inspect →
+                      </button>
+                    </td>
                   </tr>
                 ))}
               </tbody>

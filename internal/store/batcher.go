@@ -144,7 +144,12 @@ func (b *FlowBatcher) write(ctx context.Context, batch []record.Flow) error {
 	if b.conn == nil {
 		return errors.New("store: nil ClickHouse connection")
 	}
-	chBatch, err := b.conn.PrepareBatch(ctx, "INSERT INTO flows")
+	chBatch, err := b.conn.PrepareBatch(ctx, `INSERT INTO flows (
+        observed, exporter, src_addr, dst_addr,
+        src_port, dst_port, proto, bytes, packets,
+        input_ifindex, output_ifindex, vlan_id, tos, tcp_flags, source,
+        src_as, dst_as
+    )`)
 	if err != nil {
 		return fmt.Errorf("store: prepare batch: %w", err)
 	}
@@ -165,6 +170,8 @@ func (b *FlowBatcher) write(ctx context.Context, batch []record.Flow) error {
 			f.Tos,
 			f.TCPFlags,
 			f.Source.String(),
+			f.SrcAS,
+			f.DstAS,
 		); err != nil {
 			return fmt.Errorf("store: append row: %w", err)
 		}

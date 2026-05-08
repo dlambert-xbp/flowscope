@@ -85,6 +85,8 @@ const (
 	fieldFlowEndMillis  = 153 // absolute ms since epoch (IPFIX)
 	fieldOutBytes       = 23
 	fieldOutPackets     = 24
+	fieldSrcAS          = 16
+	fieldDstAS          = 17
 )
 
 // Sentinel errors for v9 / IPFIX parsing. Pre-existing errors from
@@ -178,6 +180,35 @@ func ParseV9OrIPFIX(
 	default:
 		return dst, ErrBadVersion
 	}
+}
+
+// ReadV9Sequence extracts the 32-bit datagram sequence number from
+// a NetFlow v9 header. Returns (0, false) on a buffer too short to
+// hold the header. Caller should run this before ParseV9OrIPFIX so
+// a parser failure on the body still credits the datagram for
+// loss-detection bookkeeping.
+func ReadV9Sequence(buf []byte) (uint32, bool) {
+	if len(buf) < v9HeaderLenBytes {
+		return 0, false
+	}
+	if binary.BigEndian.Uint16(buf[0:2]) != v9Version {
+		return 0, false
+	}
+	return binary.BigEndian.Uint32(buf[12:16]), true
+}
+
+// ReadIPFIXSequence extracts the 32-bit message sequence number
+// from an IPFIX (v10) header. IPFIX defines sequence as the count
+// of records the exporter has emitted so the increment is
+// per-record-count, not per-datagram — see RFC 7011 §3.1.
+func ReadIPFIXSequence(buf []byte) (uint32, bool) {
+	if len(buf) < ipfixHeaderLenBytes {
+		return 0, false
+	}
+	if binary.BigEndian.Uint16(buf[0:2]) != ipfixVersion {
+		return 0, false
+	}
+	return binary.BigEndian.Uint32(buf[8:12]), true
 }
 
 // ---------- v9 ----------
@@ -471,6 +502,10 @@ func decodeOneRecord(template []TemplateField, rec []byte, exporter netip.Addr, 
 			out.OutputIfIndex = uint32(readUintBE(val))
 		case fieldVlan:
 			out.VlanID = uint16(readUintBE(val))
+		case fieldSrcAS:
+			out.SrcAS = uint32(readUintBE(val))
+		case fieldDstAS:
+			out.DstAS = uint32(readUintBE(val))
 		case fieldLastSwitched:
 			lastSwitchedMs = uint32(readUintBE(val))
 			haveLastSwitched = true

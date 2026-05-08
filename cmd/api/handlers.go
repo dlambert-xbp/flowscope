@@ -56,6 +56,38 @@ func (h *handlers) summary(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s)
 }
 
+// healthExporters returns per-exporter loss aggregated over the
+// time range. Powers the Overview "Exporter accuracy" panel.
+//
+//	GET /api/health/exporters?window=300s
+func (h *handlers) healthExporters(w http.ResponseWriter, r *http.Request) {
+	tr := parseTimeRange(r, 5*time.Minute)
+	rows, err := store.QueryExporterHealth(r.Context(), h.conn, tr)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"count":  len(rows),
+		"rows":   rows,
+		"window": tr.WindowDuration().String(),
+	})
+}
+
+// healthStorage returns ClickHouse-side write health: insert lag,
+// recent rows/sec, table row-count estimates. Powers the Overview
+// Storage panel.
+//
+//	GET /api/health/storage
+func (h *handlers) healthStorage(w http.ResponseWriter, r *http.Request) {
+	s, err := store.QueryStorageHealth(r.Context(), h.conn)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, s)
+}
+
 // healthStreams returns one row per ingest source observed over the
 // time range. Powers the Overview "Streams" panel.
 //
@@ -72,6 +104,65 @@ func (h *handlers) healthStreams(w http.ResponseWriter, r *http.Request) {
 		"rows":   rows,
 		"window": tr.WindowDuration().String(),
 	})
+}
+
+// flowsTimeseries returns bucketed bytes/packets/flows over the
+// time range, narrowed by the filter. Powers the drill-in chart on
+// the Flows-tab drawer.
+//
+//	GET /api/flows/timeseries?window=300s&bucket=5
+//	     &exporter=...&src_addr=...&dst_addr=...&src_port=...&dst_port=...&proto=...
+//
+// bucket is in seconds; defaults to autoBucket(window) when 0 or
+// missing. All filter keys mirror /api/top/*, so the drawer can
+// reuse the same FilterTrigger wiring.
+func (h *handlers) flowsTimeseries(w http.ResponseWriter, r *http.Request) {
+	tr := parseTimeRange(r, 5*time.Minute)
+	bucket := parseInt(r.URL.Query().Get("bucket"), 0)
+	if bucket <= 0 {
+		bucket = autoBucket(tr)
+	}
+	rows, err := store.QueryFlowsTimeseries(r.Context(), h.conn, tr, bucket, parseFilter(r))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"count":          len(rows),
+		"points":         rows,
+		"bucket_seconds": bucket,
+		"window":         tr.WindowDuration().String(),
+	})
+}
+
+// autoBucket targets ~120 points across the window so the chart is
+// dense but readable. Values are clamped to a small set of human-
+// friendly multiples (1/5/15/30s, 1/5/15m, 1h) so axes don't show
+// awkward intervals.
+func autoBucket(tr store.TimeRange) int {
+	span := int(tr.Seconds())
+	if span < 120 {
+		span = 120
+	}
+	target := span / 120
+	switch {
+	case target <= 1:
+		return 1
+	case target <= 5:
+		return 5
+	case target <= 15:
+		return 15
+	case target <= 30:
+		return 30
+	case target <= 60:
+		return 60
+	case target <= 300:
+		return 300
+	case target <= 900:
+		return 900
+	default:
+		return 3600
+	}
 }
 
 // flowsList returns a paginated, filterable, sortable list of flow
@@ -136,13 +227,26 @@ func (h *handlers) recentFlows(w http.ResponseWriter, r *http.Request) {
 func parseFilter(r *http.Request) store.FlowFilter {
 	q := r.URL.Query()
 	return store.FlowFilter{
-		Exporter: q.Get("exporter"),
-		SrcAddr:  q.Get("src_addr"),
-		DstAddr:  q.Get("dst_addr"),
-		SrcPort:  parseUint16(q.Get("src_port")),
-		DstPort:  parseUint16(q.Get("dst_port")),
-		Proto:    parseUint16(q.Get("proto")),
+		Exporter:      q.Get("exporter"),
+		SrcAddr:       q.Get("src_addr"),
+		DstAddr:       q.Get("dst_addr"),
+		SrcPort:       parseUint16(q.Get("src_port")),
+		DstPort:       parseUint16(q.Get("dst_port")),
+		Proto:         parseUint16(q.Get("proto")),
+		InputIfIndex:  parseUint32(q.Get("input_ifindex")),
+		OutputIfIndex: parseUint32(q.Get("output_ifindex")),
 	}
+}
+
+func parseUint32(s string) uint32 {
+	if s == "" {
+		return 0
+	}
+	n, err := strconv.ParseUint(s, 10, 32)
+	if err != nil {
+		return 0
+	}
+	return uint32(n)
 }
 
 func parseUint16(s string) uint16 {
@@ -199,6 +303,24 @@ func (h *handlers) topProtocols(w http.ResponseWriter, r *http.Request) {
 	tr := parseTimeRange(r, 5*time.Minute)
 	sort := store.ParseTopNSort(r.URL.Query().Get("sort"))
 	rows, err := store.QueryTopProtocols(r.Context(), h.conn, tr, sort, parseFilter(r))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"count":  len(rows),
+		"rows":   rows,
+		"source": "flows",
+		"sort":   string(sort),
+		"window": tr.WindowDuration().String(),
+	})
+}
+
+func (h *handlers) topASN(w http.ResponseWriter, r *http.Request) {
+	tr := parseTimeRange(r, 5*time.Minute)
+	limit := parseInt(r.URL.Query().Get("limit"), 20)
+	sort := store.ParseTopNSort(r.URL.Query().Get("sort"))
+	rows, err := store.QueryTopASN(r.Context(), h.conn, tr, limit, sort, parseFilter(r))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return

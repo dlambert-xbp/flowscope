@@ -25,6 +25,8 @@ export type RecentFlow = {
   packets: number
   input_ifindex: number
   output_ifindex: number
+  src_as: number
+  dst_as: number
   source: string
 }
 
@@ -133,8 +135,43 @@ export type StreamRow = {
   exporters: number
 }
 
+export type ExporterHealthRow = {
+  exporter: string
+  sys_name: string
+  source: string
+  datagrams: number
+  seq_gaps: number
+  loss_pct: number
+  last_seen: string
+}
+
+export type StorageHealth = {
+  insert_lag_seconds: number
+  rows_per_sec_recent: number
+  rows_last_60s: number
+  newest_observed: string
+  oldest_observed: string
+  flows_rows_estimate: number
+  iface_counter_samples_rows_estimate: number
+  device_inventory_rows_estimate: number
+}
+
 export type FlowsListSort = 'observed' | 'bytes' | 'packets'
 export type FlowsListDir = 'asc' | 'desc'
+
+export type FlowTimeseriesPoint = {
+  ts: string
+  bytes: number
+  packets: number
+  flows: number
+}
+
+export type FlowsTimeseriesResponse = {
+  count: number
+  points: FlowTimeseriesPoint[]
+  bucket_seconds: number
+  window: string
+}
 
 export type FlowsListResponse = {
   count: number
@@ -194,6 +231,14 @@ export type TopNSort = 'bytes' | 'packets' | 'flows'
 
 export type TopProtocol = {
   proto: number
+  bytes: number
+  packets: number
+  flows: number
+}
+
+export type TopASN = {
+  src_as: number
+  dst_as: number
   bytes: number
   packets: number
   flows: number
@@ -441,6 +486,11 @@ export const api = {
     getJSON<{ count: number; rows: StreamRow[]; window: string }>(
       `/api/health/streams?${timeQuery(range)}`,
     ),
+  healthStorage: () => getJSON<StorageHealth>(`/api/health/storage`),
+  healthExporters: (range?: TimeRangeArg) =>
+    getJSON<{ count: number; rows: ExporterHealthRow[]; window: string }>(
+      `/api/health/exporters?${timeQuery(range)}`,
+    ),
   recentFlows: (limit = 20, exporter?: string) =>
     getJSON<{ count: number; flows: RecentFlow[] }>(
       exporter
@@ -465,6 +515,19 @@ export const api = {
     getJSON<FlowsListResponse>(
       withFilters(
         `/api/flows/list?${timeQuery(range)}&limit=${limit}&offset=${offset}&sort=${sort}&dir=${dir}`,
+        filters,
+      ),
+    ),
+  flowsTimeseries: (
+    filters: URLSearchParams,
+    range?: TimeRangeArg,
+    bucketSeconds?: number,
+  ) =>
+    getJSON<FlowsTimeseriesResponse>(
+      withFilters(
+        `/api/flows/timeseries?${timeQuery(range)}${
+          bucketSeconds ? `&bucket=${bucketSeconds}` : ''
+        }`,
         filters,
       ),
     ),
@@ -587,6 +650,18 @@ export const api = {
     getJSON<TopResponse<TopConversation>>(
       withFilters(
         `/api/top/conversations?${timeQuery(range)}&limit=${limit}&sort=${sort}`,
+        filters,
+      ),
+    ),
+  topASN: (
+    filters: URLSearchParams,
+    range?: TimeRangeArg,
+    limit = 20,
+    sort: TopNSort = 'bytes',
+  ) =>
+    getJSON<TopResponse<TopASN>>(
+      withFilters(
+        `/api/top/asn?${timeQuery(range)}&limit=${limit}&sort=${sort}`,
         filters,
       ),
     ),
