@@ -4,6 +4,7 @@ import uPlot from 'uplot'
 import 'uplot/dist/uPlot.min.css'
 import { api, fmt } from '../api'
 import type {
+  FlagsBucket,
   FlowTimeseriesPoint,
   RecentFlow,
   TimeRangeArg,
@@ -27,7 +28,7 @@ export type FlowDrillDown = {
   filters: Filter[]
 }
 
-type Tab = 'chart' | 'records'
+type Tab = 'chart' | 'state' | 'records'
 
 export function FlowDrawer({
   drill,
@@ -84,6 +85,7 @@ export function FlowDrawer({
         <DrawerTabs tab={tab} onChange={setTab} />
         <div className="flex-1 overflow-auto">
           {tab === 'chart' && <ChartTab filters={merged} range={range} />}
+          {tab === 'state' && <ConnectionStateTab filters={merged} range={range} />}
           {tab === 'records' && <RecordsTab filters={merged} range={range} />}
         </div>
       </aside>
@@ -146,6 +148,9 @@ function DrawerTabs({ tab, onChange }: { tab: Tab; onChange: (t: Tab) => void })
     <div className="flex border-b border-line bg-ink">
       <DrawerTab id="chart" active={tab} onChange={onChange}>
         Chart
+      </DrawerTab>
+      <DrawerTab id="state" active={tab} onChange={onChange}>
+        Connection state
       </DrawerTab>
       <DrawerTab id="records" active={tab} onChange={onChange}>
         Records
@@ -248,13 +253,23 @@ function ChartTab({
   )
 }
 
-function Stat({ label, value }: { label: string; value: string }) {
+function Stat({
+  label,
+  value,
+  tone,
+}: {
+  label: string
+  value: string
+  tone?: string
+}) {
   return (
     <div className="px-3 py-2.5 border-r border-line last:border-r-0 bg-surface">
       <div className="text-[10px] uppercase tracking-[0.1em] text-faint font-semibold">
         {label}
       </div>
-      <div className="font-mono text-[15px] tabular text-text mt-0.5">{value}</div>
+      <div className={`font-mono text-[15px] tabular mt-0.5 ${tone ?? 'text-text'}`}>
+        {value}
+      </div>
     </div>
   )
 }
@@ -451,6 +466,328 @@ function Legend({
   )
 }
 
+/* -------------------------- Connection state tab -------------------------- */
+
+// ConnectionStateTab visualises the TCP-flag mix over the active
+// window for the drilldown. Four sparklines stacked top-to-bottom
+// (SYN, SYN+ACK, FIN, RST) plus an "ACK-only" line for context —
+// these are the flags an operator cares about during an
+// investigation: connection initiation, handshake completion,
+// graceful close, hard reset, and bulk data flow respectively.
+//
+// The sparklines render only the flag in question, scaled to its
+// own peak — comparing the absolute count of SYN to the absolute
+// count of ACK isn't useful because ACK dominates by orders of
+// magnitude. What matters is the *shape* of each over time.
+//
+// PSH and URG are deliberately omitted from the chart row but
+// surface in the summary header when present, so the operator
+// knows to look elsewhere if those flags carry meaning for them.
+function ConnectionStateTab({
+  filters,
+  range,
+}: {
+  filters: URLSearchParams
+  range: TimeRangeArg
+}) {
+  const q = useQuery({
+    queryKey: ['flows-flags-ts', filters.toString(), JSON.stringify(range)],
+    queryFn: () => api.flowsFlagsTimeseries(filters, range),
+    refetchOnWindowFocus: false,
+  })
+  const buckets = q.data?.buckets ?? []
+  const totals = buckets.reduce(
+    (a, b) => ({
+      syn: a.syn + b.syn,
+      syn_ack: a.syn_ack + b.syn_ack,
+      fin: a.fin + b.fin,
+      rst: a.rst + b.rst,
+      ack_only: a.ack_only + b.ack_only,
+      psh: a.psh + b.psh,
+      urg: a.urg + b.urg,
+      total: a.total + b.total,
+    }),
+    { syn: 0, syn_ack: 0, fin: 0, rst: 0, ack_only: 0, psh: 0, urg: 0, total: 0 },
+  )
+  const handshakeRatio =
+    totals.syn > 0 ? Math.min(100, (totals.syn_ack / totals.syn) * 100) : 0
+  return (
+    <div className="px-5 py-4 space-y-4">
+      <StateSummary totals={totals} handshakeRatio={handshakeRatio} loading={q.isLoading} />
+      {q.error && (
+        <div className="font-mono text-[12px] text-crit">
+          flag timeseries: {(q.error as Error).message}
+        </div>
+      )}
+      {!q.isLoading && totals.total === 0 && !q.error && (
+        <div className="px-4 py-8 text-center text-[12px] font-mono text-dim border border-line">
+          no flow records in this window for this drilldown
+        </div>
+      )}
+      {!q.isLoading && totals.total > 0 && totals.syn + totals.fin + totals.rst + totals.ack_only === 0 && (
+        <div className="px-4 py-3 text-[11.5px] font-mono text-dim border border-line bg-surface">
+          no TCP flags in this window — likely a non-TCP drilldown (UDP, ICMP)
+        </div>
+      )}
+      <div className="grid grid-cols-1 gap-3">
+        <FlagSparkline
+          buckets={buckets}
+          field="syn"
+          label="SYN"
+          tone="accent"
+          help="connection initiation"
+          loading={q.isLoading}
+        />
+        <FlagSparkline
+          buckets={buckets}
+          field="syn_ack"
+          label="SYN+ACK"
+          tone="ok"
+          help="handshake completion"
+          loading={q.isLoading}
+        />
+        <FlagSparkline
+          buckets={buckets}
+          field="fin"
+          label="FIN"
+          tone="warn"
+          help="graceful close"
+          loading={q.isLoading}
+        />
+        <FlagSparkline
+          buckets={buckets}
+          field="rst"
+          label="RST"
+          tone="crit"
+          help="hard reset · interesting"
+          loading={q.isLoading}
+        />
+        <FlagSparkline
+          buckets={buckets}
+          field="ack_only"
+          label="ACK only"
+          tone="dim"
+          help="data flow / keepalive"
+          loading={q.isLoading}
+        />
+      </div>
+    </div>
+  )
+}
+
+function StateSummary({
+  totals,
+  handshakeRatio,
+  loading,
+}: {
+  totals: {
+    syn: number
+    syn_ack: number
+    fin: number
+    rst: number
+    ack_only: number
+    psh: number
+    urg: number
+    total: number
+  }
+  handshakeRatio: number
+  loading: boolean
+}) {
+  const handshakeTone =
+    handshakeRatio >= 90
+      ? 'text-ok'
+      : handshakeRatio >= 50
+        ? 'text-warn'
+        : totals.syn === 0
+          ? 'text-dim'
+          : 'text-crit'
+  const rstTone = totals.rst > 0 ? 'text-crit' : 'text-faint'
+  const flagsSeen: string[] = []
+  if (totals.syn > 0) flagsSeen.push('SYN')
+  if (totals.syn_ack > 0) flagsSeen.push('SYN+ACK')
+  if (totals.fin > 0) flagsSeen.push('FIN')
+  if (totals.rst > 0) flagsSeen.push('RST')
+  if (totals.ack_only > 0) flagsSeen.push('ACK')
+  if (totals.psh > 0) flagsSeen.push('PSH')
+  if (totals.urg > 0) flagsSeen.push('URG')
+  return (
+    <div className="grid grid-cols-2 md:grid-cols-4 border border-line">
+      <Stat label="records" value={loading ? '…' : fmt.num(totals.total)} />
+      <Stat
+        label="handshake completion"
+        value={
+          loading
+            ? '…'
+            : totals.syn === 0
+              ? '—'
+              : `${handshakeRatio.toFixed(0)}%`
+        }
+        tone={handshakeTone}
+      />
+      <Stat label="RST count" value={loading ? '…' : fmt.num(totals.rst)} tone={rstTone} />
+      <Stat
+        label="flags seen"
+        value={
+          loading
+            ? '…'
+            : flagsSeen.length > 0
+              ? flagsSeen.join(' · ')
+              : '—'
+        }
+      />
+    </div>
+  )
+}
+
+function FlagSparkline({
+  buckets,
+  field,
+  label,
+  tone,
+  help,
+  loading,
+}: {
+  buckets: FlagsBucket[]
+  field: 'syn' | 'syn_ack' | 'fin' | 'rst' | 'ack_only'
+  label: string
+  tone: 'accent' | 'ok' | 'warn' | 'crit' | 'dim'
+  help: string
+  loading: boolean
+}) {
+  const wrapRef = useRef<HTMLDivElement | null>(null)
+  const plotRef = useRef<uPlot | null>(null)
+  const themeRef = useRef<string>('')
+  const { resolved } = useTheme()
+  const total = buckets.reduce((a, b) => a + Number(b[field]), 0)
+
+  useEffect(() => {
+    const wrap = wrapRef.current
+    if (!wrap) return
+    const xs = buckets.map((b) => Math.floor(new Date(b.ts).getTime() / 1000))
+    const ys = buckets.map((b) => Number(b[field]))
+    const data: uPlot.AlignedData = [xs, ys]
+    const width = wrap.clientWidth || 600
+    const height = 64
+
+    if (plotRef.current && themeRef.current !== resolved) {
+      plotRef.current.destroy()
+      plotRef.current = null
+    }
+    themeRef.current = resolved
+
+    if (!plotRef.current) {
+      plotRef.current = new uPlot(buildSparkOpts(width, height, readPlotColors(), tone), data, wrap)
+    } else {
+      plotRef.current.setSize({ width, height })
+      plotRef.current.setData(data)
+    }
+  }, [buckets, field, tone, resolved])
+
+  useEffect(() => {
+    const wrap = wrapRef.current
+    if (!wrap) return
+    const ro = new ResizeObserver(() => {
+      if (plotRef.current && wrap.clientWidth > 0) {
+        plotRef.current.setSize({ width: wrap.clientWidth, height: 64 })
+      }
+    })
+    ro.observe(wrap)
+    return () => {
+      ro.disconnect()
+      plotRef.current?.destroy()
+      plotRef.current = null
+    }
+  }, [])
+
+  return (
+    <div className="border border-line">
+      <div className="flex items-baseline gap-3 px-3 py-1.5 border-b border-line bg-surface">
+        <span
+          className={`font-mono text-[11px] uppercase tracking-[0.06em] font-semibold ${toneToText(tone)}`}
+        >
+          {label}
+        </span>
+        <span className="font-mono text-[11px] text-faint">{help}</span>
+        <span className="ml-auto font-mono text-[11px] tabular text-text">{fmt.num(total)}</span>
+      </div>
+      <div className="relative">
+        <div ref={wrapRef} className="w-full h-[64px] bg-ink uplot-host" />
+        {loading && buckets.length === 0 && (
+          <div className="absolute inset-0 flex items-center justify-center text-faint font-mono text-[10.5px] pointer-events-none">
+            loading…
+          </div>
+        )}
+        {!loading && total === 0 && (
+          <div className="absolute inset-0 flex items-center justify-center text-faint font-mono text-[10.5px] pointer-events-none">
+            none in window
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function toneToText(t: 'accent' | 'ok' | 'warn' | 'crit' | 'dim'): string {
+  switch (t) {
+    case 'accent':
+      return 'text-accent'
+    case 'ok':
+      return 'text-ok'
+    case 'warn':
+      return 'text-warn'
+    case 'crit':
+      return 'text-crit'
+    case 'dim':
+      return 'text-dim'
+  }
+}
+
+function buildSparkOpts(
+  width: number,
+  height: number,
+  c: PlotColors,
+  tone: 'accent' | 'ok' | 'warn' | 'crit' | 'dim',
+): uPlot.Options {
+  const stroke =
+    tone === 'accent'
+      ? c.accent
+      : tone === 'ok'
+        ? c.ok
+        : tone === 'warn'
+          ? '#d4a017'
+          : tone === 'crit'
+            ? '#e04646'
+            : c.faint
+  return {
+    width,
+    height,
+    padding: [6, 8, 4, 8],
+    cursor: { drag: { x: false, y: false }, points: { size: 4 } },
+    legend: { show: false },
+    scales: {
+      x: { time: true },
+      y: {
+        range: (_u, _min, max) => [0, Math.max(1, max)],
+      },
+    },
+    axes: [
+      { show: false },
+      { show: false },
+    ],
+    series: [
+      {
+        value: (_u, v) => (v == null ? '—' : new Date(v * 1000).toLocaleTimeString()),
+      },
+      {
+        stroke,
+        width: 1.25,
+        points: { show: false },
+        value: (_u, v) => (v == null ? '0' : String(v)),
+      },
+    ],
+  }
+}
+
 /* ----------------------------- Records tab ----------------------------- */
 
 function RecordsTab({
@@ -568,6 +905,15 @@ function RawRecord({ flow }: { flow: RecentFlow }) {
     { k: 'output_ifindex', v: String(flow.output_ifindex), mono: true },
     { k: 'src_as', v: flow.src_as ? `AS${flow.src_as}` : '—', mono: true },
     { k: 'dst_as', v: flow.dst_as ? `AS${flow.dst_as}` : '—', mono: true },
+    {
+      k: 'tcp_flags',
+      v:
+        flow.proto === 6
+          ? `${decodeFlags(flow.tcp_flags)} (0x${flow.tcp_flags.toString(16).padStart(2, '0')})`
+          : '—',
+      mono: true,
+      title: `0x${flow.tcp_flags.toString(16).padStart(2, '0')} = ${flow.tcp_flags}`,
+    },
     { k: 'source', v: flow.source, mono: true },
   ]
   return (
@@ -601,4 +947,26 @@ function RawRecord({ flow }: { flow: RecentFlow }) {
       </dl>
     </div>
   )
+}
+
+// decodeFlags turns the 8-bit TCP flag byte (RFC 793 + RFC 3168) into
+// the operator-friendly stack: "SYN+ACK", "FIN+ACK", "RST", "ACK",
+// etc. ECN bits (CWR / ECE) are decoded but very rarely matter in
+// this context — included for completeness.
+function decodeFlags(flags: number): string {
+  if (flags === 0) return '—'
+  const parts: string[] = []
+  if (flags & 0x80) parts.push('CWR')
+  if (flags & 0x40) parts.push('ECE')
+  if (flags & 0x20) parts.push('URG')
+  if (flags & 0x10) parts.push('ACK')
+  if (flags & 0x08) parts.push('PSH')
+  if (flags & 0x04) parts.push('RST')
+  if (flags & 0x02) parts.push('SYN')
+  if (flags & 0x01) parts.push('FIN')
+  // Reorder to the ordering operators expect: SYN before ACK, FIN
+  // last, RST stands alone visually.
+  const order = ['SYN', 'ACK', 'PSH', 'URG', 'CWR', 'ECE', 'FIN', 'RST']
+  parts.sort((a, b) => order.indexOf(a) - order.indexOf(b))
+  return parts.join('+')
 }
