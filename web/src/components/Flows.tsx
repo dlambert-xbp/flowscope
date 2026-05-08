@@ -10,6 +10,7 @@ import type {
 } from '../api'
 import { useFilters, toQuery, keyLabelFor, type Filter, type FilterKey } from '../filters'
 import { rangeLabel, toApi, type TimeRange } from '../timeRange'
+import { ServiceLabel, useServiceName } from './ServiceLabel'
 
 // Flows tab — top-N panels narrowed by a composable filter set. Click
 // any value (talker src, talker dst, service port, protocol, full
@@ -213,29 +214,7 @@ function ServicesList({
         rows={q.data?.rows ?? []}
         total={q.data?.rows.reduce((a, r) => a + r.bytes, 0) ?? 0}
         keyOf={(r) => `${r.dst_port}_${r.proto}`}
-        renderLeft={(r: TopService) => (
-          <span className="font-mono text-[12px]">
-            <FilterTrigger
-              k="dst_port"
-              value={String(r.dst_port)}
-              onAdd={onAdd}
-              label={`${serviceFor(r.dst_port) ?? `port ${r.dst_port}`}`}
-              keyLabel="service"
-            >
-              <span className="text-text">{serviceFor(r.dst_port) ?? `port ${r.dst_port}`}</span>
-            </FilterTrigger>{' '}
-            <span className="text-faint">·</span>{' '}
-            <FilterTrigger
-              k="proto"
-              value={String(r.proto)}
-              onAdd={onAdd}
-              label={fmt.proto(r.proto)}
-            >
-              <span className="text-faint">{fmt.proto(r.proto)}</span>
-            </FilterTrigger>{' '}
-            <span className="text-faint">{r.dst_port}</span>
-          </span>
-        )}
+        renderLeft={(r: TopService) => <TopServiceLeft r={r} onAdd={onAdd} />}
         renderRight={(r: TopService) => fmt.bytes(r.bytes)}
         valueOf={(r) => r.bytes}
       />
@@ -422,29 +401,40 @@ function Rows<T>({
   )
 }
 
-/* ----------------------------- service map ----------------------------- */
+/* ----------------------------- TopServiceLeft ----------------------------- */
 
-function serviceFor(port: number): string | undefined {
+// TopServiceLeft renders one row of the Top services panel. Lifted
+// out of the renderLeft callback so we can call useServiceName here
+// — the resolver uses the same /api/services/lookup path the rest of
+// the app uses, so custom services land here without a UI change.
+function TopServiceLeft({ r, onAdd }: { r: TopService; onAdd: (f: Filter) => void }) {
+  const lookup = useServiceName(r.proto, r.dst_port)
+  const labelText = lookup.data?.found
+    ? lookup.data.primary.name
+    : `port ${r.dst_port}`
   return (
-    {
-      22: 'ssh',
-      53: 'dns',
-      80: 'http',
-      443: 'https',
-      445: 'smb',
-      3389: 'rdp',
-      161: 'snmp',
-      162: 'snmp-trap',
-      2055: 'netflow',
-      6343: 'sflow',
-      25: 'smtp',
-      587: 'submission',
-      993: 'imaps',
-      995: 'pop3s',
-      123: 'ntp',
-      389: 'ldap',
-      636: 'ldaps',
-      8080: 'http-alt',
-    } as Record<number, string>
-  )[port]
+    <span className="font-mono text-[12px]">
+      <FilterTrigger
+        k="dst_port"
+        value={String(r.dst_port)}
+        onAdd={onAdd}
+        label={labelText}
+        keyLabel="service"
+      >
+        <span className="text-text">
+          <ServiceLabel proto={r.proto} port={r.dst_port} />
+        </span>
+      </FilterTrigger>{' '}
+      <span className="text-faint">·</span>{' '}
+      <FilterTrigger
+        k="proto"
+        value={String(r.proto)}
+        onAdd={onAdd}
+        label={fmt.proto(r.proto)}
+      >
+        <span className="text-faint">{fmt.proto(r.proto)}</span>
+      </FilterTrigger>{' '}
+      <span className="text-faint">{r.dst_port}</span>
+    </span>
+  )
 }
