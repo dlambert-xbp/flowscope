@@ -109,7 +109,8 @@ func parseUint16(s string) uint16 {
 func (h *handlers) topTalkers(w http.ResponseWriter, r *http.Request) {
 	tr := parseTimeRange(r, 5*time.Minute)
 	limit := parseInt(r.URL.Query().Get("limit"), 20)
-	rows, err := store.QueryTopTalkers(r.Context(), h.conn, tr, limit, parseFilter(r))
+	sort := store.ParseTopNSort(r.URL.Query().Get("sort"))
+	rows, err := store.QueryTopTalkers(r.Context(), h.conn, tr, limit, sort, parseFilter(r))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -118,6 +119,7 @@ func (h *handlers) topTalkers(w http.ResponseWriter, r *http.Request) {
 		"count":  len(rows),
 		"rows":   rows,
 		"source": "flows",
+		"sort":   string(sort),
 		"window": tr.WindowDuration().String(),
 	})
 }
@@ -125,7 +127,8 @@ func (h *handlers) topTalkers(w http.ResponseWriter, r *http.Request) {
 func (h *handlers) topServices(w http.ResponseWriter, r *http.Request) {
 	tr := parseTimeRange(r, 5*time.Minute)
 	limit := parseInt(r.URL.Query().Get("limit"), 20)
-	rows, err := store.QueryTopServices(r.Context(), h.conn, tr, limit, parseFilter(r))
+	sort := store.ParseTopNSort(r.URL.Query().Get("sort"))
+	rows, err := store.QueryTopServices(r.Context(), h.conn, tr, limit, sort, parseFilter(r))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -134,13 +137,15 @@ func (h *handlers) topServices(w http.ResponseWriter, r *http.Request) {
 		"count":  len(rows),
 		"rows":   rows,
 		"source": "flows",
+		"sort":   string(sort),
 		"window": tr.WindowDuration().String(),
 	})
 }
 
 func (h *handlers) topProtocols(w http.ResponseWriter, r *http.Request) {
 	tr := parseTimeRange(r, 5*time.Minute)
-	rows, err := store.QueryTopProtocols(r.Context(), h.conn, tr, parseFilter(r))
+	sort := store.ParseTopNSort(r.URL.Query().Get("sort"))
+	rows, err := store.QueryTopProtocols(r.Context(), h.conn, tr, sort, parseFilter(r))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -149,6 +154,7 @@ func (h *handlers) topProtocols(w http.ResponseWriter, r *http.Request) {
 		"count":  len(rows),
 		"rows":   rows,
 		"source": "flows",
+		"sort":   string(sort),
 		"window": tr.WindowDuration().String(),
 	})
 }
@@ -156,7 +162,8 @@ func (h *handlers) topProtocols(w http.ResponseWriter, r *http.Request) {
 func (h *handlers) topConversations(w http.ResponseWriter, r *http.Request) {
 	tr := parseTimeRange(r, 5*time.Minute)
 	limit := parseInt(r.URL.Query().Get("limit"), 20)
-	rows, err := store.QueryTopConversations(r.Context(), h.conn, tr, limit, parseFilter(r))
+	sort := store.ParseTopNSort(r.URL.Query().Get("sort"))
+	rows, err := store.QueryTopConversations(r.Context(), h.conn, tr, limit, sort, parseFilter(r))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -165,6 +172,7 @@ func (h *handlers) topConversations(w http.ResponseWriter, r *http.Request) {
 		"count":  len(rows),
 		"rows":   rows,
 		"source": "flows",
+		"sort":   string(sort),
 		"window": tr.WindowDuration().String(),
 	})
 }

@@ -1,21 +1,47 @@
 import { useQuery } from '@tanstack/react-query'
-import type { ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 import { api, fmt } from '../api'
 import type {
   TopTalker,
   TopService,
   TopProtocol,
   TopConversation,
+  TopNSort,
   TimeRangeArg,
 } from '../api'
 import { useFilters, toQuery, keyLabelFor, type Filter, type FilterKey } from '../filters'
 import { rangeLabel, toApi, type TimeRange } from '../timeRange'
 import { ServiceLabel, useServiceName } from './ServiceLabel'
+import { LiveTail } from './LiveTail'
 
-// Flows tab — top-N panels narrowed by a composable filter set. Click
-// any value (talker src, talker dst, service port, protocol, full
-// 5-tuple) to add or replace a filter chip; chips re-narrow every
-// panel's query and persist in the URL.
+// Flows tab — page chrome:
+//   Live tail (collapsible, expanded by default)
+//   Filter bar (URL-synced filter chips)
+//   Tab bar (Talkers / Services / Protocols / Conversations)
+//     + sort selector (bytes / packets / flows)
+//     + top-N selector (10 / 25 / 50, default 25)
+//   Active panel
+//
+// Click any value (talker src, talker dst, service port, protocol,
+// full 5-tuple) to add or replace a filter chip; chips re-narrow
+// every panel's query and persist in the URL.
+
+type TabId = 'talkers' | 'services' | 'protocols' | 'conversations'
+
+const TAB_LABELS: Record<TabId, string> = {
+  talkers: 'Top talkers',
+  services: 'Top services',
+  protocols: 'Top protocols',
+  conversations: 'Top conversations',
+}
+
+const TOP_N_OPTIONS = [10, 25, 50] as const
+const SORT_OPTIONS: { id: TopNSort; label: string }[] = [
+  { id: 'bytes', label: 'bytes' },
+  { id: 'packets', label: 'packets' },
+  { id: 'flows', label: 'flows' },
+]
+
 export function Flows({
   range,
   rangeKey,
@@ -26,28 +52,35 @@ export function Flows({
   const f = useFilters()
   const qs = toQuery(f.filters)
   const apiRange = toApi(range)
+  const [tab, setTab] = useState<TabId>('talkers')
+  const [sortBy, setSortBy] = useState<TopNSort>('bytes')
+  const [topN, setTopN] = useState<number>(25)
   return (
     <div>
+      <LiveTail />
       <FilterBar
         filters={f.filters}
         onRemove={f.remove}
         onClear={f.clear}
         range={range}
       />
-      <div className="grid grid-cols-1 lg:grid-cols-2 border-b border-line">
-        <Panel title="Top talkers" sub="src → dst · by bytes" right="SOURCE · FLOWS">
-          <TalkersList qs={qs} onAdd={f.add} range={apiRange} rangeKey={rangeKey} />
-        </Panel>
-        <Panel title="Top services" sub="dst port · by bytes" right="SOURCE · FLOWS">
-          <ServicesList qs={qs} onAdd={f.add} range={apiRange} rangeKey={rangeKey} />
-        </Panel>
-        <Panel title="Top protocols" sub="share of total" right="SOURCE · FLOWS">
-          <ProtocolsList qs={qs} onAdd={f.add} range={apiRange} rangeKey={rangeKey} />
-        </Panel>
-        <Panel title="Top conversations" sub="5-tuple · by bytes" right="SOURCE · FLOWS">
-          <ConversationsList qs={qs} onAdd={f.add} range={apiRange} rangeKey={rangeKey} />
-        </Panel>
-      </div>
+      <TabBar
+        tab={tab}
+        onChangeTab={setTab}
+        sortBy={sortBy}
+        onChangeSort={setSortBy}
+        topN={topN}
+        onChangeTopN={setTopN}
+      />
+      <ActivePanel
+        tab={tab}
+        qs={qs}
+        range={apiRange}
+        rangeKey={rangeKey}
+        sortBy={sortBy}
+        topN={topN}
+        onAdd={f.add}
+      />
     </div>
   )
 }
@@ -125,6 +158,181 @@ function Chip({
   )
 }
 
+/* ----------------------------- Tab bar ----------------------------- */
+
+function TabBar({
+  tab,
+  onChangeTab,
+  sortBy,
+  onChangeSort,
+  topN,
+  onChangeTopN,
+}: {
+  tab: TabId
+  onChangeTab: (t: TabId) => void
+  sortBy: TopNSort
+  onChangeSort: (s: TopNSort) => void
+  topN: number
+  onChangeTopN: (n: number) => void
+}) {
+  return (
+    <div className="flex items-center border-b border-line bg-ink">
+      {(Object.keys(TAB_LABELS) as TabId[]).map((id) => (
+        <Tab key={id} id={id} active={tab} onChange={onChangeTab}>
+          {TAB_LABELS[id]}
+        </Tab>
+      ))}
+      <div className="ml-auto flex items-center gap-3 px-4 py-2">
+        <Selector
+          label="sort"
+          value={sortBy}
+          onChange={(v) => onChangeSort(v as TopNSort)}
+          options={SORT_OPTIONS.map((o) => ({ value: o.id, label: o.label }))}
+        />
+        <Selector
+          label="show"
+          value={String(topN)}
+          onChange={(v) => onChangeTopN(Number(v))}
+          options={TOP_N_OPTIONS.map((n) => ({ value: String(n), label: String(n) }))}
+        />
+      </div>
+    </div>
+  )
+}
+
+function Tab({
+  id,
+  active,
+  onChange,
+  children,
+}: {
+  id: TabId
+  active: TabId
+  onChange: (t: TabId) => void
+  children: ReactNode
+}) {
+  const selected = id === active
+  return (
+    <button
+      onClick={() => onChange(id)}
+      className={`relative px-4 py-2.5 text-[13px] border-r border-line ${
+        selected ? 'text-text' : 'text-dim hover:text-text hover:bg-surface'
+      }`}
+    >
+      {children}
+      {selected && <span className="absolute left-0 right-0 -bottom-px h-0.5 bg-accent" />}
+    </button>
+  )
+}
+
+function Selector({
+  label,
+  value,
+  onChange,
+  options,
+}: {
+  label: string
+  value: string
+  onChange: (v: string) => void
+  options: { value: string; label: string }[]
+}) {
+  return (
+    <label className="flex items-center gap-1.5 font-mono text-[11px] text-faint">
+      <span className="uppercase tracking-[0.1em]">{label}</span>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="bg-ink border border-line text-text px-1.5 py-0.5 text-[11.5px] outline-none focus:border-accent"
+      >
+        {options.map((o) => (
+          <option key={o.value} value={o.value}>
+            {o.label}
+          </option>
+        ))}
+      </select>
+    </label>
+  )
+}
+
+/* ----------------------------- Active panel ----------------------------- */
+
+function ActivePanel({
+  tab,
+  qs,
+  range,
+  rangeKey,
+  sortBy,
+  topN,
+  onAdd,
+}: {
+  tab: TabId
+  qs: URLSearchParams
+  range: TimeRangeArg
+  rangeKey: unknown
+  sortBy: TopNSort
+  topN: number
+  onAdd: (f: Filter) => void
+}) {
+  return (
+    <Panel title={TAB_LABELS[tab]} sub={subtitleFor(tab, sortBy)} right="SOURCE · FLOWS">
+      {tab === 'talkers' && (
+        <TalkersList
+          qs={qs}
+          onAdd={onAdd}
+          range={range}
+          rangeKey={rangeKey}
+          sortBy={sortBy}
+          topN={topN}
+        />
+      )}
+      {tab === 'services' && (
+        <ServicesList
+          qs={qs}
+          onAdd={onAdd}
+          range={range}
+          rangeKey={rangeKey}
+          sortBy={sortBy}
+          topN={topN}
+        />
+      )}
+      {tab === 'protocols' && (
+        <ProtocolsList
+          qs={qs}
+          onAdd={onAdd}
+          range={range}
+          rangeKey={rangeKey}
+          sortBy={sortBy}
+          topN={topN}
+        />
+      )}
+      {tab === 'conversations' && (
+        <ConversationsList
+          qs={qs}
+          onAdd={onAdd}
+          range={range}
+          rangeKey={rangeKey}
+          sortBy={sortBy}
+          topN={topN}
+        />
+      )}
+    </Panel>
+  )
+}
+
+function subtitleFor(tab: TabId, sortBy: TopNSort): string {
+  const by = `by ${sortBy}`
+  switch (tab) {
+    case 'talkers':
+      return `src → dst · ${by}`
+    case 'services':
+      return `dst port · ${by}`
+    case 'protocols':
+      return `share of ${sortBy} total`
+    case 'conversations':
+      return `5-tuple · ${by}`
+  }
+}
+
 /* ----------------------------- Panel chrome ----------------------------- */
 
 function Panel({
@@ -139,7 +347,7 @@ function Panel({
   children: ReactNode
 }) {
   return (
-    <section className="border-r border-line border-b last:border-r-0 lg:[&:nth-child(2n)]:border-r-0">
+    <section className="border-b border-line">
       <div className="flex items-baseline gap-3 px-4 py-3 border-b border-line">
         <span className="text-[11px] uppercase tracking-[0.1em] text-dim font-semibold">{title}</span>
         {sub && <span className="font-mono text-[11px] text-faint">{sub}</span>}
@@ -154,26 +362,24 @@ function Panel({
 
 /* ----------------------------- Per-panel lists ----------------------------- */
 
-function TalkersList({
-  qs,
-  onAdd,
-  range,
-  rangeKey,
-}: {
+type ListBase = {
   qs: URLSearchParams
   onAdd: (f: Filter) => void
   range: TimeRangeArg
   rangeKey: unknown
-}) {
+  sortBy: TopNSort
+  topN: number
+}
+
+function TalkersList({ qs, onAdd, range, rangeKey, sortBy, topN }: ListBase) {
   const q = useQuery({
-    queryKey: ['top-talkers', qs.toString(), rangeKey],
-    queryFn: () => api.topTalkers(qs, range, 12),
+    queryKey: ['top-talkers', qs.toString(), rangeKey, sortBy, topN],
+    queryFn: () => api.topTalkers(qs, range, topN, sortBy),
   })
   return (
     <ListShell loading={q.isLoading} empty={!q.data?.rows.length} error={q.error as Error | undefined}>
       <Rows
         rows={q.data?.rows ?? []}
-        total={q.data?.rows.reduce((a, r) => a + r.bytes, 0) ?? 0}
         keyOf={(r) => `${r.src_addr}>${r.dst_addr}`}
         renderLeft={(r: TopTalker) => (
           <span className="font-mono text-[12px]">
@@ -186,63 +392,47 @@ function TalkersList({
             </FilterTrigger>
           </span>
         )}
-        renderRight={(r: TopTalker) => fmt.bytes(r.bytes)}
-        valueOf={(r) => r.bytes}
+        valueOf={(r) => valueOfRow(sortBy, r)}
+        renderRight={(r) => formatValue(sortBy, valueOfRow(sortBy, r))}
+        sortBy={sortBy}
       />
     </ListShell>
   )
 }
 
-function ServicesList({
-  qs,
-  onAdd,
-  range,
-  rangeKey,
-}: {
-  qs: URLSearchParams
-  onAdd: (f: Filter) => void
-  range: TimeRangeArg
-  rangeKey: unknown
-}) {
+function ServicesList({ qs, onAdd, range, rangeKey, sortBy, topN }: ListBase) {
   const q = useQuery({
-    queryKey: ['top-services', qs.toString(), rangeKey],
-    queryFn: () => api.topServices(qs, range, 12),
+    queryKey: ['top-services', qs.toString(), rangeKey, sortBy, topN],
+    queryFn: () => api.topServices(qs, range, topN, sortBy),
   })
   return (
     <ListShell loading={q.isLoading} empty={!q.data?.rows.length} error={q.error as Error | undefined}>
       <Rows
         rows={q.data?.rows ?? []}
-        total={q.data?.rows.reduce((a, r) => a + r.bytes, 0) ?? 0}
         keyOf={(r) => `${r.dst_port}_${r.proto}`}
         renderLeft={(r: TopService) => <TopServiceLeft r={r} onAdd={onAdd} />}
-        renderRight={(r: TopService) => fmt.bytes(r.bytes)}
-        valueOf={(r) => r.bytes}
+        valueOf={(r) => valueOfRow(sortBy, r)}
+        renderRight={(r) => formatValue(sortBy, valueOfRow(sortBy, r))}
+        sortBy={sortBy}
       />
     </ListShell>
   )
 }
 
-function ProtocolsList({
-  qs,
-  onAdd,
-  range,
-  rangeKey,
-}: {
-  qs: URLSearchParams
-  onAdd: (f: Filter) => void
-  range: TimeRangeArg
-  rangeKey: unknown
-}) {
+function ProtocolsList({ qs, onAdd, range, rangeKey, sortBy, topN }: ListBase) {
   const q = useQuery({
-    queryKey: ['top-protocols', qs.toString(), rangeKey],
-    queryFn: () => api.topProtocols(qs, range),
+    queryKey: ['top-protocols', qs.toString(), rangeKey, sortBy],
+    queryFn: () => api.topProtocols(qs, range, sortBy),
   })
-  const total = q.data?.rows.reduce((a, r) => a + r.bytes, 0) ?? 0
+  // Protocols return all rows already sorted by the chosen dimension
+  // server-side; we still slice to topN client-side so the visual
+  // density matches Talkers / Services / Conversations.
+  const rows = (q.data?.rows ?? []).slice(0, topN)
+  const total = rows.reduce((a, r) => a + valueOfRow(sortBy, r), 0)
   return (
-    <ListShell loading={q.isLoading} empty={!q.data?.rows.length} error={q.error as Error | undefined}>
+    <ListShell loading={q.isLoading} empty={!rows.length} error={q.error as Error | undefined}>
       <Rows
-        rows={q.data?.rows ?? []}
-        total={total}
+        rows={rows}
         keyOf={(r) => String(r.proto)}
         renderLeft={(r: TopProtocol) => (
           <span className="font-mono text-[12px]">
@@ -252,35 +442,26 @@ function ProtocolsList({
             <span className="text-faint">· {r.proto}</span>
           </span>
         )}
-        renderRight={(r: TopProtocol) =>
-          total > 0 ? `${((r.bytes / total) * 100).toFixed(1)}%` : '—'
-        }
-        valueOf={(r) => r.bytes}
+        valueOf={(r) => valueOfRow(sortBy, r)}
+        renderRight={(r) => {
+          const v = valueOfRow(sortBy, r)
+          return total > 0 ? `${((v / total) * 100).toFixed(1)}%` : '—'
+        }}
+        sortBy={sortBy}
       />
     </ListShell>
   )
 }
 
-function ConversationsList({
-  qs,
-  onAdd,
-  range,
-  rangeKey,
-}: {
-  qs: URLSearchParams
-  onAdd: (f: Filter) => void
-  range: TimeRangeArg
-  rangeKey: unknown
-}) {
+function ConversationsList({ qs, onAdd, range, rangeKey, sortBy, topN }: ListBase) {
   const q = useQuery({
-    queryKey: ['top-conversations', qs.toString(), rangeKey],
-    queryFn: () => api.topConversations(qs, range, 12),
+    queryKey: ['top-conversations', qs.toString(), rangeKey, sortBy, topN],
+    queryFn: () => api.topConversations(qs, range, topN, sortBy),
   })
   return (
     <ListShell loading={q.isLoading} empty={!q.data?.rows.length} error={q.error as Error | undefined}>
       <Rows
         rows={q.data?.rows ?? []}
-        total={q.data?.rows.reduce((a, r) => a + r.bytes, 0) ?? 0}
         keyOf={(r) => `${r.src_addr}_${r.src_port}_${r.dst_addr}_${r.dst_port}_${r.proto}`}
         renderLeft={(r: TopConversation) => (
           <span className="font-mono text-[12px] text-text">
@@ -298,8 +479,9 @@ function ConversationsList({
             </FilterTrigger>
           </span>
         )}
-        renderRight={(r: TopConversation) => fmt.bytes(r.bytes)}
-        valueOf={(r) => r.bytes}
+        valueOf={(r) => valueOfRow(sortBy, r)}
+        renderRight={(r) => formatValue(sortBy, valueOfRow(sortBy, r))}
+        sortBy={sortBy}
       />
     </ListShell>
   )
@@ -367,19 +549,20 @@ function ListShell({
 
 function Rows<T>({
   rows,
-  total,
   keyOf,
   renderLeft,
   renderRight,
   valueOf,
+  sortBy: _sortBy,
 }: {
   rows: T[]
-  total: number
   keyOf: (r: T) => string
   renderLeft: (r: T) => ReactNode
   renderRight: (r: T) => ReactNode
   valueOf: (r: T) => number
+  sortBy: TopNSort
 }) {
+  const total = rows.reduce((a, r) => a + valueOf(r), 0)
   return (
     <ul>
       {rows.map((r) => {
@@ -399,6 +582,32 @@ function Rows<T>({
       })}
     </ul>
   )
+}
+
+/* ----------------------------- Sort helpers ----------------------------- */
+
+type Sortable = { bytes: number; packets?: number; flows?: number }
+
+function valueOfRow(sortBy: TopNSort, r: Sortable): number {
+  switch (sortBy) {
+    case 'packets':
+      return r.packets ?? 0
+    case 'flows':
+      return r.flows ?? 0
+    default:
+      return r.bytes
+  }
+}
+
+function formatValue(sortBy: TopNSort, v: number): string {
+  switch (sortBy) {
+    case 'packets':
+      return `${fmt.num(v)} pkts`
+    case 'flows':
+      return `${fmt.num(v)} flows`
+    default:
+      return fmt.bytes(v)
+  }
 }
 
 /* ----------------------------- TopServiceLeft ----------------------------- */
