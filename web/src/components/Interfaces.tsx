@@ -2,6 +2,7 @@ import { Fragment, useState, type ReactNode } from 'react'
 import { fmt, labelExporter, labelInterface } from '../api'
 import type { InterfaceRow } from '../api'
 import { InterfaceChart } from './InterfaceChart'
+import { rangeLabel, type TimeRange, DEFAULT_TIME_RANGE } from '../timeRange'
 
 function TwoLine({
   primary,
@@ -25,17 +26,20 @@ function TwoLine({
 export function Interfaces({
   rows,
   loading,
+  range = DEFAULT_TIME_RANGE,
 }: {
   rows: InterfaceRow[]
   loading: boolean
+  range?: TimeRange
 }) {
   const [active, setActive] = useState<{ exporter: string; ifindex: number } | null>(null)
+  const winLabel = rangeLabel(range)
 
   return (
     <section>
       <SectionHead
         title="Top interfaces"
-        sub={loading ? 'loading…' : `${rows.length} seen · last 5 min`}
+        sub={loading ? 'loading…' : `${rows.length} seen · last ${winLabel}`}
         right={<SourceBadge>SOURCE · COUNTERS</SourceBadge>}
       />
       {!loading && rows.length === 0 && (
@@ -102,7 +106,7 @@ export function Interfaces({
                   {isActive && (
                     <tr>
                       <td colSpan={8} style={{ padding: 0, borderBottom: 'none' }}>
-                        <InterfaceChart exporter={r.exporter} ifindex={r.ifindex} />
+                        <InterfaceChart exporter={r.exporter} ifindex={r.ifindex} range={range} />
                       </td>
                     </tr>
                   )}

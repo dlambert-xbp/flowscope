@@ -35,14 +35,16 @@ func (h *handlers) health(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// summary returns the Overview-tab aggregates over a trailing window.
+// summary returns the Overview-tab aggregates over a time range.
 //
 //	GET /api/summary?window=300s
+//	GET /api/summary?from=2026-05-07T14:00:00Z&to=2026-05-07T15:00:00Z
 //
 // Window defaults to 5 minutes; values from "1s" to "168h" are accepted.
+// Absolute from/to (RFC3339) take precedence when both are supplied.
 func (h *handlers) summary(w http.ResponseWriter, r *http.Request) {
-	window := parseWindow(r.URL.Query().Get("window"), 5*time.Minute)
-	s, err := store.QuerySummary(r.Context(), h.conn, window)
+	tr := parseTimeRange(r, 5*time.Minute)
+	s, err := store.QuerySummary(r.Context(), h.conn, tr)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -101,9 +103,9 @@ func parseUint16(s string) uint16 {
 // share window=, limit= (where applicable), and the filter query
 // parameters parsed by parseFilter. Source label = "flows".
 func (h *handlers) topTalkers(w http.ResponseWriter, r *http.Request) {
-	window := parseWindow(r.URL.Query().Get("window"), 5*time.Minute)
+	tr := parseTimeRange(r, 5*time.Minute)
 	limit := parseInt(r.URL.Query().Get("limit"), 20)
-	rows, err := store.QueryTopTalkers(r.Context(), h.conn, window, limit, parseFilter(r))
+	rows, err := store.QueryTopTalkers(r.Context(), h.conn, tr, limit, parseFilter(r))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -112,14 +114,14 @@ func (h *handlers) topTalkers(w http.ResponseWriter, r *http.Request) {
 		"count":  len(rows),
 		"rows":   rows,
 		"source": "flows",
-		"window": window.String(),
+		"window": tr.WindowDuration().String(),
 	})
 }
 
 func (h *handlers) topServices(w http.ResponseWriter, r *http.Request) {
-	window := parseWindow(r.URL.Query().Get("window"), 5*time.Minute)
+	tr := parseTimeRange(r, 5*time.Minute)
 	limit := parseInt(r.URL.Query().Get("limit"), 20)
-	rows, err := store.QueryTopServices(r.Context(), h.conn, window, limit, parseFilter(r))
+	rows, err := store.QueryTopServices(r.Context(), h.conn, tr, limit, parseFilter(r))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -128,13 +130,13 @@ func (h *handlers) topServices(w http.ResponseWriter, r *http.Request) {
 		"count":  len(rows),
 		"rows":   rows,
 		"source": "flows",
-		"window": window.String(),
+		"window": tr.WindowDuration().String(),
 	})
 }
 
 func (h *handlers) topProtocols(w http.ResponseWriter, r *http.Request) {
-	window := parseWindow(r.URL.Query().Get("window"), 5*time.Minute)
-	rows, err := store.QueryTopProtocols(r.Context(), h.conn, window, parseFilter(r))
+	tr := parseTimeRange(r, 5*time.Minute)
+	rows, err := store.QueryTopProtocols(r.Context(), h.conn, tr, parseFilter(r))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -143,14 +145,14 @@ func (h *handlers) topProtocols(w http.ResponseWriter, r *http.Request) {
 		"count":  len(rows),
 		"rows":   rows,
 		"source": "flows",
-		"window": window.String(),
+		"window": tr.WindowDuration().String(),
 	})
 }
 
 func (h *handlers) topConversations(w http.ResponseWriter, r *http.Request) {
-	window := parseWindow(r.URL.Query().Get("window"), 5*time.Minute)
+	tr := parseTimeRange(r, 5*time.Minute)
 	limit := parseInt(r.URL.Query().Get("limit"), 20)
-	rows, err := store.QueryTopConversations(r.Context(), h.conn, window, limit, parseFilter(r))
+	rows, err := store.QueryTopConversations(r.Context(), h.conn, tr, limit, parseFilter(r))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -159,7 +161,7 @@ func (h *handlers) topConversations(w http.ResponseWriter, r *http.Request) {
 		"count":  len(rows),
 		"rows":   rows,
 		"source": "flows",
-		"window": window.String(),
+		"window": tr.WindowDuration().String(),
 	})
 }
 
@@ -399,12 +401,13 @@ func actorFromRequest(r *http.Request) string {
 }
 
 // devices lists every exporter that produced at least one flow in
-// the trailing window.
+// the time range.
 //
 //	GET /api/devices?window=300s
+//	GET /api/devices?from=...&to=...
 func (h *handlers) devices(w http.ResponseWriter, r *http.Request) {
-	window := parseWindow(r.URL.Query().Get("window"), 5*time.Minute)
-	rows, err := store.QueryDevices(r.Context(), h.conn, window)
+	tr := parseTimeRange(r, 5*time.Minute)
+	rows, err := store.QueryDevices(r.Context(), h.conn, tr)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -412,7 +415,7 @@ func (h *handlers) devices(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"count":   len(rows),
 		"devices": rows,
-		"window":  window.String(),
+		"window":  tr.WindowDuration().String(),
 	})
 }
 
@@ -444,6 +447,7 @@ func (h *handlers) deviceInventory(w http.ResponseWriter, r *http.Request) {
 // device returns the summary for a single exporter.
 //
 //	GET /api/devices/{exporter}?window=300s
+//	GET /api/devices/{exporter}?from=...&to=...
 func (h *handlers) device(w http.ResponseWriter, r *http.Request) {
 	exporterStr := chi.URLParam(r, "exporter")
 	exporter, err := netip.ParseAddr(exporterStr)
@@ -451,8 +455,8 @@ func (h *handlers) device(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid exporter address")
 		return
 	}
-	window := parseWindow(r.URL.Query().Get("window"), 5*time.Minute)
-	d, err := store.QueryDevice(r.Context(), h.conn, exporter, window)
+	tr := parseTimeRange(r, 5*time.Minute)
+	d, err := store.QueryDevice(r.Context(), h.conn, exporter, tr)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "no flows from this exporter in the requested window")
@@ -465,13 +469,14 @@ func (h *handlers) device(w http.ResponseWriter, r *http.Request) {
 }
 
 // interfaces returns one row per (exporter, ifindex) seen in the
-// trailing window, ranked by peak bandwidth.
+// time range, ranked by peak bandwidth.
 //
 //	GET /api/interfaces?window=300s&exporter=10.2.0.11
+//	GET /api/interfaces?from=...&to=...&exporter=10.2.0.11
 func (h *handlers) interfaces(w http.ResponseWriter, r *http.Request) {
-	window := parseWindow(r.URL.Query().Get("window"), 5*time.Minute)
+	tr := parseTimeRange(r, 5*time.Minute)
 	exporter := r.URL.Query().Get("exporter")
-	rows, err := store.QueryInterfaces(r.Context(), h.conn, window, exporter)
+	rows, err := store.QueryInterfaces(r.Context(), h.conn, tr, exporter)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -480,7 +485,7 @@ func (h *handlers) interfaces(w http.ResponseWriter, r *http.Request) {
 		"count":      len(rows),
 		"interfaces": rows,
 		"source":     "counters",
-		"window":     window.String(),
+		"window":     tr.WindowDuration().String(),
 	})
 }
 
@@ -488,6 +493,7 @@ func (h *handlers) interfaces(w http.ResponseWriter, r *http.Request) {
 // counter samples. Per VISION.md §3.3, this is the AUTHORITATIVE rate.
 //
 //	GET /api/interfaces/{exporter}/{ifindex}/timeseries?seconds=300
+//	GET /api/interfaces/{exporter}/{ifindex}/timeseries?from=...&to=...
 func (h *handlers) interfaceTimeseries(w http.ResponseWriter, r *http.Request) {
 	exporterStr := chi.URLParam(r, "exporter")
 	ifindexStr := chi.URLParam(r, "ifindex")
@@ -503,16 +509,32 @@ func (h *handlers) interfaceTimeseries(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	seconds := parseInt(r.URL.Query().Get("seconds"), 300)
-	if seconds < 1 {
-		seconds = 1
+	// Prefer absolute from/to when both are present; otherwise honor the
+	// `seconds` param for backwards compatibility, and finally fall back
+	// to the trailing `window` form.
+	q := r.URL.Query()
+	var tr store.TimeRange
+	if from, errFrom := time.Parse(time.RFC3339, q.Get("from")); errFrom == nil {
+		if to, errTo := time.Parse(time.RFC3339, q.Get("to")); errTo == nil {
+			tr = store.AbsoluteRange(from, to)
+		}
 	}
-	if seconds > 24*60*60 {
-		seconds = 24 * 60 * 60
+	if !tr.IsAbsolute() {
+		if s := q.Get("seconds"); s != "" {
+			seconds := parseInt(s, 300)
+			if seconds < 1 {
+				seconds = 1
+			}
+			if seconds > 24*60*60 {
+				seconds = 24 * 60 * 60
+			}
+			tr = store.TrailingWindow(time.Duration(seconds) * time.Second)
+		} else {
+			tr = store.TrailingWindow(parseWindow(q.Get("window"), 5*time.Minute))
+		}
 	}
-	window := time.Duration(seconds) * time.Second
 
-	ts, err := store.QueryInterfaceTimeseries(r.Context(), h.conn, exporter, uint32(ifindex64), window)
+	ts, err := store.QueryInterfaceTimeseries(r.Context(), h.conn, exporter, uint32(ifindex64), tr)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -537,6 +559,24 @@ func parseWindow(s string, def time.Duration) time.Duration {
 		return 168 * time.Hour
 	}
 	return d
+}
+
+// parseTimeRange returns a TimeRange from the request's query string.
+// When both `from` and `to` are present and parseable as RFC3339
+// timestamps, it returns an absolute range. Otherwise it falls back to
+// the trailing `window` parameter (or the supplied default).
+func parseTimeRange(r *http.Request, defWindow time.Duration) store.TimeRange {
+	q := r.URL.Query()
+	fromStr := q.Get("from")
+	toStr := q.Get("to")
+	if fromStr != "" && toStr != "" {
+		from, errFrom := time.Parse(time.RFC3339, fromStr)
+		to, errTo := time.Parse(time.RFC3339, toStr)
+		if errFrom == nil && errTo == nil && !from.IsZero() && !to.IsZero() {
+			return store.AbsoluteRange(from, to)
+		}
+	}
+	return store.TrailingWindow(parseWindow(q.Get("window"), defWindow))
 }
 
 func parseInt(s string, def int) int {

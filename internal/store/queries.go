@@ -10,6 +10,72 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 )
 
+// TimeRange represents either a trailing window (From.IsZero(), To.IsZero(),
+// Window > 0) or an absolute range (both From and To set). Queries use
+// Predicate() to get the SQL fragment and bound args.
+type TimeRange struct {
+	Window time.Duration // trailing window; used when From/To are zero
+	From   time.Time     // absolute start (inclusive)
+	To     time.Time     // absolute end (exclusive)
+}
+
+// TrailingWindow returns a TimeRange for a trailing window of the given
+// duration. This is the backwards-compatible default.
+func TrailingWindow(d time.Duration) TimeRange {
+	if d <= 0 {
+		d = 5 * time.Minute
+	}
+	return TimeRange{Window: d}
+}
+
+// AbsoluteRange returns a TimeRange for an absolute [from, to) interval.
+// The span is clamped to 168h (7 days) to keep ClickHouse queries bounded.
+func AbsoluteRange(from, to time.Time) TimeRange {
+	if to.Before(from) {
+		from, to = to, from
+	}
+	const maxSpan = 168 * time.Hour
+	if to.Sub(from) > maxSpan {
+		from = to.Add(-maxSpan)
+	}
+	return TimeRange{From: from, To: to}
+}
+
+// IsAbsolute returns true when From and To are both set.
+func (tr TimeRange) IsAbsolute() bool {
+	return !tr.From.IsZero() && !tr.To.IsZero()
+}
+
+// Seconds returns the span in seconds — either the window duration or
+// the absolute range span.
+func (tr TimeRange) Seconds() float64 {
+	if tr.IsAbsolute() {
+		return tr.To.Sub(tr.From).Seconds()
+	}
+	return tr.Window.Seconds()
+}
+
+// WindowDuration returns the effective window for display purposes.
+func (tr TimeRange) WindowDuration() time.Duration {
+	if tr.IsAbsolute() {
+		return tr.To.Sub(tr.From)
+	}
+	return tr.Window
+}
+
+// Predicate returns the SQL WHERE fragment and bound args for the time
+// column named col (e.g. "observed" or "ts").
+func (tr TimeRange) Predicate(col string) (string, []any) {
+	if tr.IsAbsolute() {
+		return col + " >= ? AND " + col + " < ?", []any{tr.From, tr.To}
+	}
+	w := tr.Window
+	if w <= 0 {
+		w = 5 * time.Minute
+	}
+	return col + " >= now() - INTERVAL ? SECOND", []any{uint64(w.Seconds())}
+}
+
 // SQL fragments that compute the latest SNMP enrichment per
 // (exporter) and per (exporter, ifindex). Inlined into per-query
 // CTEs so we don't depend on a SELECT FINAL on the underlying
@@ -99,13 +165,10 @@ type RecentFlow struct {
 	Source         string    `json:"source"`
 }
 
-// QuerySummary returns aggregate stats over the trailing window.
-// A zero or negative window defaults to 5 minutes.
-func QuerySummary(ctx context.Context, conn driver.Conn, window time.Duration) (Summary, error) {
-	if window <= 0 {
-		window = 5 * time.Minute
-	}
-	const q = `
+// QuerySummary returns aggregate stats over the supplied time range.
+func QuerySummary(ctx context.Context, conn driver.Conn, tr TimeRange) (Summary, error) {
+	pred, args := tr.Predicate("observed")
+	q := `
 SELECT
     count() AS flows,
     sum(bytes) AS bytes,
@@ -114,10 +177,10 @@ SELECT
     max(observed) AS newest,
     min(observed) AS oldest
 FROM flows
-WHERE observed >= now() - INTERVAL ? SECOND`
-	row := conn.QueryRow(ctx, q, uint64(window.Seconds()))
+WHERE ` + pred
+	row := conn.QueryRow(ctx, q, args...)
 	var s Summary
-	s.Window = window
+	s.Window = tr.WindowDuration()
 	if err := row.Scan(&s.Flows, &s.Bytes, &s.Packets, &s.Exporters, &s.Newest, &s.Oldest); err != nil {
 		return s, fmt.Errorf("store: query summary: %w", err)
 	}
@@ -130,13 +193,10 @@ WHERE observed >= now() - INTERVAL ? SECOND`
 // diffs — see comment in QueryInterfaceTimeseries.
 //
 // If exporter is non-empty, the result is filtered to that single
-// exporter. Window defaults to 5 minutes when zero or negative.
-func QueryInterfaces(ctx context.Context, conn driver.Conn, window time.Duration, exporter string) ([]InterfaceRow, error) {
-	if window <= 0 {
-		window = 5 * time.Minute
-	}
+// exporter.
+func QueryInterfaces(ctx context.Context, conn driver.Conn, tr TimeRange, exporter string) ([]InterfaceRow, error) {
+	tsPred, args := tr.Predicate("ts")
 	exporterPredicate := ""
-	args := []any{uint64(window.Seconds())}
 	if exporter != "" {
 		addr, err := netip.ParseAddr(exporter)
 		if err != nil {
@@ -156,7 +216,7 @@ diffed AS (
         toFloat64(out_octets - lagInFrame(out_octets) OVER w) AS d_out,
         date_diff('millisecond', lagInFrame(ts) OVER w, ts) AS dt_ms
     FROM iface_counter_samples
-    WHERE ts >= now() - INTERVAL ? SECOND` + exporterPredicate + `
+    WHERE ` + tsPred + exporterPredicate + `
     WINDOW w AS (PARTITION BY exporter, ifindex ORDER BY ts)
 ),
 agg AS (
@@ -216,11 +276,9 @@ LIMIT 50`
 // adjacent samples and dividing by the inter-sample interval.
 // Negative diffs (counter rollover, device reboot) are clamped to
 // zero.
-func QueryInterfaceTimeseries(ctx context.Context, conn driver.Conn, exporter netip.Addr, ifindex uint32, window time.Duration) (*InterfaceTimeseries, error) {
-	if window <= 0 {
-		window = 5 * time.Minute
-	}
-	const q = `
+func QueryInterfaceTimeseries(ctx context.Context, conn driver.Conn, exporter netip.Addr, ifindex uint32, tr TimeRange) (*InterfaceTimeseries, error) {
+	tsPred, tsArgs := tr.Predicate("ts")
+	q := `
 WITH diffed AS (
     SELECT
         ts,
@@ -229,7 +287,7 @@ WITH diffed AS (
         date_diff('millisecond', lagInFrame(ts) OVER w, ts) AS dt_ms
     FROM iface_counter_samples
     WHERE exporter = ? AND ifindex = ?
-      AND ts >= now() - INTERVAL ? SECOND
+      AND ` + tsPred + `
     WINDOW w AS (ORDER BY ts)
 )
 SELECT
@@ -239,7 +297,8 @@ SELECT
 FROM diffed
 WHERE dt_ms > 0
 ORDER BY ts`
-	rows, err := conn.Query(ctx, q, toIPv6(exporter), ifindex, uint64(window.Seconds()))
+	args := append([]any{toIPv6(exporter), ifindex}, tsArgs...)
+	rows, err := conn.Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("store: query interface timeseries: %w", err)
 	}
@@ -247,7 +306,7 @@ ORDER BY ts`
 	out := &InterfaceTimeseries{
 		Exporter:      exporter.Unmap().String(),
 		IfIndex:       ifindex,
-		WindowSeconds: int(window.Seconds()),
+		WindowSeconds: int(tr.Seconds()),
 		Source:        "counters",
 		Points:        make([]InterfaceTimeseriesPt, 0, 64),
 	}
@@ -302,10 +361,9 @@ type Device struct {
 // of unique ifindex values that produced counter samples in the same
 // window — populated only for sFlow / gNMI-capable exporters.
 // sys_name comes from the latest SNMP walk; empty when no walk yet.
-func QueryDevices(ctx context.Context, conn driver.Conn, window time.Duration) ([]Device, error) {
-	if window <= 0 {
-		window = 5 * time.Minute
-	}
+func QueryDevices(ctx context.Context, conn driver.Conn, tr TimeRange) ([]Device, error) {
+	obsPred, obsArgs := tr.Predicate("observed")
+	tsPred, tsArgs := tr.Predicate("ts")
 	q := `
 WITH inv AS (` + sqlLatestInventory + `)
 SELECT
@@ -326,19 +384,20 @@ FROM (
         min(observed) AS first_seen,
         max(observed) AS last_seen
     FROM flows
-    WHERE observed >= now() - INTERVAL ? SECOND
+    WHERE ` + obsPred + `
     GROUP BY exporter
 ) AS f
 LEFT JOIN (
     SELECT exporter, uniq(ifindex) AS iface_count
     FROM iface_counter_samples
-    WHERE ts >= now() - INTERVAL ? SECOND
+    WHERE ` + tsPred + `
     GROUP BY exporter
 ) AS i ON f.exporter = i.exporter
 LEFT JOIN inv ON f.exporter = inv.exporter
 ORDER BY f.bytes DESC`
-	w := uint64(window.Seconds())
-	rows, err := conn.Query(ctx, q, w, w)
+	args := append([]any{}, obsArgs...)
+	args = append(args, tsArgs...)
+	rows, err := conn.Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("store: query devices: %w", err)
 	}
@@ -361,11 +420,9 @@ ORDER BY f.bytes DESC`
 // QueryDevice returns the same shape as one row of QueryDevices,
 // scoped to the supplied exporter address. Empty result (no flows in
 // window) returns ErrNotFound — the api maps this to 404.
-func QueryDevice(ctx context.Context, conn driver.Conn, exporter netip.Addr, window time.Duration) (*Device, error) {
-	if window <= 0 {
-		window = 5 * time.Minute
-	}
-	const q = `
+func QueryDevice(ctx context.Context, conn driver.Conn, exporter netip.Addr, tr TimeRange) (*Device, error) {
+	obsPred, obsArgs := tr.Predicate("observed")
+	q := `
 SELECT
     count() AS flows,
     sum(bytes)   AS bytes,
@@ -373,10 +430,12 @@ SELECT
     min(observed) AS first_seen,
     max(observed) AS last_seen
 FROM flows
-WHERE observed >= now() - INTERVAL ? SECOND AND exporter = ?
+WHERE ` + obsPred + ` AND exporter = ?
 GROUP BY exporter`
 	expIP := toIPv6(exporter)
-	row := conn.QueryRow(ctx, q, uint64(window.Seconds()), expIP)
+	args := append([]any{}, obsArgs...)
+	args = append(args, expIP)
+	row := conn.QueryRow(ctx, q, args...)
 	var d Device
 	if err := row.Scan(&d.Flows, &d.Bytes, &d.Packets, &d.FirstSeen, &d.LastSeen); err != nil {
 		// clickhouse-go returns sql.ErrNoRows wrapped on empty groups
@@ -399,11 +458,14 @@ GROUP BY exporter`
 	}
 
 	// Interface count for this exporter.
-	const qi = `
+	tsPred, tsArgs := tr.Predicate("ts")
+	qi := `
 SELECT uniq(ifindex)
 FROM iface_counter_samples
-WHERE ts >= now() - INTERVAL ? SECOND AND exporter = ?`
-	if err := conn.QueryRow(ctx, qi, uint64(window.Seconds()), expIP).Scan(&d.IfaceCount); err != nil {
+WHERE ` + tsPred + ` AND exporter = ?`
+	ifaceArgs := append([]any{}, tsArgs...)
+	ifaceArgs = append(ifaceArgs, expIP)
+	if err := conn.QueryRow(ctx, qi, ifaceArgs...).Scan(&d.IfaceCount); err != nil {
 		// Non-fatal; counter samples may not exist for NetFlow-only
 		// exporters.
 		d.IfaceCount = 0
@@ -753,15 +815,12 @@ type FlowFilter struct {
 }
 
 // buildWhere returns SQL fragments and bound args for the WHERE clause
-// produced by a FlowFilter. The first fragment is always the trailing
-// window predicate; the rest are filter terms appended only for fields
+// produced by a FlowFilter. The first fragment is always the time-range
+// predicate; the rest are filter terms appended only for fields
 // the operator actually set.
-func buildWhere(window time.Duration, f FlowFilter) (string, []any, error) {
-	if window <= 0 {
-		window = 5 * time.Minute
-	}
-	where := []string{"observed >= now() - INTERVAL ? SECOND"}
-	args := []any{uint64(window.Seconds())}
+func buildWhere(tr TimeRange, f FlowFilter) (string, []any, error) {
+	pred, args := tr.Predicate("observed")
+	where := []string{pred}
 
 	addAddr := func(name, raw string) error {
 		if raw == "" {
@@ -842,11 +901,11 @@ type TopConversation struct {
 
 // QueryTopTalkers returns the N largest src→dst byte aggregates over
 // the trailing window, narrowed by the supplied FlowFilter.
-func QueryTopTalkers(ctx context.Context, conn driver.Conn, window time.Duration, limit int, f FlowFilter) ([]TopTalker, error) {
+func QueryTopTalkers(ctx context.Context, conn driver.Conn, tr TimeRange, limit int, f FlowFilter) ([]TopTalker, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 20
 	}
-	whereSQL, args, err := buildWhere(window, f)
+	whereSQL, args, err := buildWhere(tr, f)
 	if err != nil {
 		return nil, err
 	}
@@ -885,11 +944,11 @@ LIMIT ?`
 
 // QueryTopServices returns the N largest (dst_port, proto) byte
 // aggregates over the trailing window, narrowed by the FlowFilter.
-func QueryTopServices(ctx context.Context, conn driver.Conn, window time.Duration, limit int, f FlowFilter) ([]TopService, error) {
+func QueryTopServices(ctx context.Context, conn driver.Conn, tr TimeRange, limit int, f FlowFilter) ([]TopService, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 20
 	}
-	whereSQL, args, err := buildWhere(window, f)
+	whereSQL, args, err := buildWhere(tr, f)
 	if err != nil {
 		return nil, err
 	}
@@ -921,8 +980,8 @@ LIMIT ?`
 
 // QueryTopProtocols returns one row per IP protocol number, ordered by
 // total bytes desc, narrowed by the FlowFilter.
-func QueryTopProtocols(ctx context.Context, conn driver.Conn, window time.Duration, f FlowFilter) ([]TopProtocol, error) {
-	whereSQL, args, err := buildWhere(window, f)
+func QueryTopProtocols(ctx context.Context, conn driver.Conn, tr TimeRange, f FlowFilter) ([]TopProtocol, error) {
+	whereSQL, args, err := buildWhere(tr, f)
 	if err != nil {
 		return nil, err
 	}
@@ -953,11 +1012,11 @@ ORDER BY bytes DESC`
 
 // QueryTopConversations returns the N largest 5-tuple aggregates over
 // the trailing window, narrowed by the FlowFilter.
-func QueryTopConversations(ctx context.Context, conn driver.Conn, window time.Duration, limit int, f FlowFilter) ([]TopConversation, error) {
+func QueryTopConversations(ctx context.Context, conn driver.Conn, tr TimeRange, limit int, f FlowFilter) ([]TopConversation, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 20
 	}
-	whereSQL, args, err := buildWhere(window, f)
+	whereSQL, args, err := buildWhere(tr, f)
 	if err != nil {
 		return nil, err
 	}

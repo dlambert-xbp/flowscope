@@ -200,32 +200,83 @@ async function getJSON<T>(url: string): Promise<T> {
   return (await r.json()) as T
 }
 
+// TimeRangeArg is the API-facing slice of a TimeRange — either a
+// preset window string ("5m") or a number of seconds, or an explicit
+// {from, to} pair. Pass either to any api wrapper that supports it.
+export type TimeRangeArg =
+  | number
+  | string
+  | { from: Date; to: Date }
+
+function timeQuery(t: TimeRangeArg | undefined, defaultSec = 300): string {
+  if (t === undefined) return `window=${defaultSec}s`
+  if (typeof t === 'number') return `window=${t}s`
+  if (typeof t === 'string') return `window=${encodeURIComponent(t)}`
+  const from = encodeURIComponent(t.from.toISOString())
+  const to = encodeURIComponent(t.to.toISOString())
+  return `from=${from}&to=${to}`
+}
+
+// timeQuerySeconds emits the legacy `seconds=N` form for endpoints that
+// only accept it (interface timeseries on older clients). Falls back to
+// the absolute form when {from,to} is given — the backend handles both.
+function timeQuerySeconds(t: TimeRangeArg | undefined, defaultSec = 300): string {
+  if (t === undefined) return `seconds=${defaultSec}`
+  if (typeof t === 'number') return `seconds=${t}`
+  if (typeof t === 'string') {
+    // Map preset to seconds.
+    const sec = presetToSeconds(t)
+    return `seconds=${sec}`
+  }
+  const from = encodeURIComponent(t.from.toISOString())
+  const to = encodeURIComponent(t.to.toISOString())
+  return `from=${from}&to=${to}`
+}
+
+function presetToSeconds(p: string): number {
+  switch (p) {
+    case '5m': return 300
+    case '15m': return 900
+    case '1h': return 3600
+    case '6h': return 21600
+    case '24h': return 86400
+    default: {
+      const m = /^(\d+)([smhd])$/.exec(p)
+      if (!m) return 300
+      const n = Number(m[1])
+      const u = m[2]
+      const mul = u === 's' ? 1 : u === 'm' ? 60 : u === 'h' ? 3600 : 86400
+      return n * mul
+    }
+  }
+}
+
 export const api = {
-  summary: (windowSec = 300) =>
-    getJSON<Summary>(`/api/summary?window=${windowSec}s`),
+  summary: (range?: TimeRangeArg) =>
+    getJSON<Summary>(`/api/summary?${timeQuery(range)}`),
   recentFlows: (limit = 20, exporter?: string) =>
     getJSON<{ count: number; flows: RecentFlow[] }>(
       exporter
         ? `/api/flows/recent?limit=${limit}&exporter=${encodeURIComponent(exporter)}`
         : `/api/flows/recent?limit=${limit}`,
     ),
-  interfaces: (windowSec = 300, exporter?: string) =>
+  interfaces: (range?: TimeRangeArg, exporter?: string) =>
     getJSON<{ count: number; interfaces: InterfaceRow[]; source: string; window: string }>(
       exporter
-        ? `/api/interfaces?window=${windowSec}s&exporter=${encodeURIComponent(exporter)}`
-        : `/api/interfaces?window=${windowSec}s`,
+        ? `/api/interfaces?${timeQuery(range)}&exporter=${encodeURIComponent(exporter)}`
+        : `/api/interfaces?${timeQuery(range)}`,
     ),
-  interfaceTimeseries: (exporter: string, ifindex: number, seconds = 300) =>
+  interfaceTimeseries: (exporter: string, ifindex: number, range?: TimeRangeArg) =>
     getJSON<InterfaceTimeseries>(
-      `/api/interfaces/${exporter}/${ifindex}/timeseries?seconds=${seconds}`,
+      `/api/interfaces/${exporter}/${ifindex}/timeseries?${timeQuerySeconds(range)}`,
     ),
-  devices: (windowSec = 300) =>
+  devices: (range?: TimeRangeArg) =>
     getJSON<{ count: number; devices: Device[]; window: string }>(
-      `/api/devices?window=${windowSec}s`,
+      `/api/devices?${timeQuery(range)}`,
     ),
-  device: (exporter: string, windowSec = 300) =>
+  device: (exporter: string, range?: TimeRangeArg) =>
     getJSON<Device>(
-      `/api/devices/${encodeURIComponent(exporter)}?window=${windowSec}s`,
+      `/api/devices/${encodeURIComponent(exporter)}?${timeQuery(range)}`,
     ),
   deviceInventory: (exporter: string) =>
     getJSON<DeviceInventory>(
@@ -284,21 +335,21 @@ export const api = {
     if (!r.ok) throw new Error(`test ${exporter} → ${r.status}`)
     return r.json()
   },
-  topTalkers: (filters: URLSearchParams, windowSec = 300, limit = 20) =>
+  topTalkers: (filters: URLSearchParams, range?: TimeRangeArg, limit = 20) =>
     getJSON<TopResponse<TopTalker>>(
-      withFilters(`/api/top/talkers?window=${windowSec}s&limit=${limit}`, filters),
+      withFilters(`/api/top/talkers?${timeQuery(range)}&limit=${limit}`, filters),
     ),
-  topServices: (filters: URLSearchParams, windowSec = 300, limit = 20) =>
+  topServices: (filters: URLSearchParams, range?: TimeRangeArg, limit = 20) =>
     getJSON<TopResponse<TopService>>(
-      withFilters(`/api/top/services?window=${windowSec}s&limit=${limit}`, filters),
+      withFilters(`/api/top/services?${timeQuery(range)}&limit=${limit}`, filters),
     ),
-  topProtocols: (filters: URLSearchParams, windowSec = 300) =>
+  topProtocols: (filters: URLSearchParams, range?: TimeRangeArg) =>
     getJSON<TopResponse<TopProtocol>>(
-      withFilters(`/api/top/protocols?window=${windowSec}s`, filters),
+      withFilters(`/api/top/protocols?${timeQuery(range)}`, filters),
     ),
-  topConversations: (filters: URLSearchParams, windowSec = 300, limit = 20) =>
+  topConversations: (filters: URLSearchParams, range?: TimeRangeArg, limit = 20) =>
     getJSON<TopResponse<TopConversation>>(
-      withFilters(`/api/top/conversations?window=${windowSec}s&limit=${limit}`, filters),
+      withFilters(`/api/top/conversations?${timeQuery(range)}&limit=${limit}`, filters),
     ),
 }
 

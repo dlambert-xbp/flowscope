@@ -5,6 +5,12 @@ import 'uplot/dist/uPlot.min.css'
 import { api, fmt } from '../api'
 import type { InterfaceTimeseriesPoint } from '../api'
 import { useTheme } from '../theme'
+import {
+  DEFAULT_TIME_RANGE,
+  rangeLabel,
+  toApi,
+  type TimeRange,
+} from '../timeRange'
 
 // uPlot reads plain strings, not CSS vars, so we resolve the live design
 // tokens from the document at construction time and rebuild the plot when
@@ -31,14 +37,22 @@ function readPlotColors(): PlotColors {
 export function InterfaceChart({
   exporter,
   ifindex,
+  range = DEFAULT_TIME_RANGE,
 }: {
   exporter: string
   ifindex: number
+  range?: TimeRange
 }) {
+  const apiRange = toApi(range)
+  const winLabel = rangeLabel(range)
+  const rangeKey =
+    range.kind === 'preset'
+      ? ['preset', range.window]
+      : ['absolute', range.from.toISOString(), range.to.toISOString()]
   const ts = useQuery({
-    queryKey: ['iface_ts', exporter, ifindex],
-    queryFn: () => api.interfaceTimeseries(exporter, ifindex, 300),
-    refetchInterval: 5000,
+    queryKey: ['iface_ts', exporter, ifindex, rangeKey],
+    queryFn: () => api.interfaceTimeseries(exporter, ifindex, apiRange),
+    refetchInterval: range.kind === 'preset' ? 5000 : false,
   })
   const points = ts.data?.points ?? []
   const meta = ts.data
@@ -50,7 +64,7 @@ export function InterfaceChart({
     <div className="border-b border-line">
       <SectionHead
         title={`${ifaceLabel} · ${exporterLabel}`}
-        sub={aliasLabel ? aliasLabel : 'counter timeseries · 5 min'}
+        sub={aliasLabel ? aliasLabel : `counter timeseries · ${winLabel}`}
         right={<SourceBadge>SOURCE · COUNTERS · 1s SAMPLE</SourceBadge>}
       />
       <div className="px-4 py-3 bg-surface">
