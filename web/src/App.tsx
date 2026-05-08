@@ -22,17 +22,6 @@ const FILTER_KEYS: FilterKey[] = [
   'proto',
 ]
 
-// scopeForTab maps the active tab to the URL-namespace key used by
-// useTimeRange. Each tab keeps its own range under its own params.
-function scopeForTab(t: Tab): string {
-  switch (t) {
-    case 'overview': return 'ov'
-    case 'flows': return 'fl'
-    case 'devices': return 'dv'
-    default: return 'ov' // unused for non-time tabs
-  }
-}
-
 const TAB_LABELS: Record<Tab, string> = {
   overview: 'Overview',
   flows: 'Flows',
@@ -45,7 +34,7 @@ const TIME_TABS: ReadonlySet<Tab> = new Set<Tab>(['overview', 'flows', 'devices'
 
 export function App() {
   const [tab, setTab] = useState<Tab>('overview')
-  const tr = useTimeRange(scopeForTab(tab))
+  const tr = useTimeRange()
   const showRange = TIME_TABS.has(tab)
   // Cross-tab navigation primitive: writes filter chips into the URL,
   // then switches tabs. Devices "Investigate →" links use this to
