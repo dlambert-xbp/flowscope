@@ -1,8 +1,16 @@
 import { useQuery } from '@tanstack/react-query'
 import { Fragment, useEffect, useState, type ReactNode } from 'react'
 import { api, fmt, labelExporter, labelInterface } from '../api'
-import type { Device, DeviceInventory, InterfaceRow, RecentFlow } from '../api'
+import type {
+  Device,
+  DeviceInventory,
+  InterfaceRow,
+  RecentFlow,
+  TopService,
+  TopTalker,
+} from '../api'
 import { InterfaceChart } from './InterfaceChart'
+import { ServiceLabel } from './ServiceLabel'
 import {
   rangeLabel,
   rangeSeconds,
@@ -11,6 +19,12 @@ import {
 } from '../timeRange'
 import { Th, useTableSort, type SortColumns } from './sortable'
 import { formatModel } from '../lib/oidModels'
+import type { Filter } from '../filters'
+
+// NavigateToFlows is the cross-tab navigation primitive injected by
+// the App shell. Devices "Investigate →" buttons use it to deep-link
+// into Flows with the supplied filter chips pre-applied.
+type NavigateToFlows = (filters: Filter[]) => void
 
 const DEVICE_IFACE_COLS: SortColumns<InterfaceRow> = {
   interface: (r) => labelInterface(r).primary,
@@ -108,9 +122,11 @@ function TwoLine({
 export function Devices({
   range,
   rangeKey,
+  onNavigateToFlows,
 }: {
   range: TimeRange
   rangeKey: unknown
+  onNavigateToFlows: NavigateToFlows
 }) {
   const apiRange = toApi(range)
   const list = useQuery({
@@ -147,6 +163,7 @@ export function Devices({
         exporter={selected}
         range={range}
         rangeKey={rangeKey}
+        onNavigateToFlows={onNavigateToFlows}
       />
     </div>
   )
@@ -262,10 +279,12 @@ function Feature({
   exporter,
   range,
   rangeKey,
+  onNavigateToFlows,
 }: {
   exporter: string | null
   range: TimeRange
   rangeKey: unknown
+  onNavigateToFlows: NavigateToFlows
 }) {
   const [sub, setSub] = useState<SubTab>('summary')
   if (!exporter) {
@@ -282,7 +301,9 @@ function Feature({
       <div>
         {sub === 'summary' && <SummaryTab exporter={exporter} range={range} rangeKey={rangeKey} />}
         {sub === 'interfaces' && <InterfacesTab exporter={exporter} range={range} rangeKey={rangeKey} />}
-        {sub === 'flows' && <FlowsTab exporter={exporter} />}
+        {sub === 'flows' && (
+          <FlowsTab exporter={exporter} onNavigateToFlows={onNavigateToFlows} />
+        )}
       </div>
     </article>
   )
@@ -771,7 +792,13 @@ function InterfacesTab({
 
 /* ----------------------------- Flows tab ----------------------------- */
 
-function FlowsTab({ exporter }: { exporter: string }) {
+function FlowsTab({
+  exporter,
+  onNavigateToFlows,
+}: {
+  exporter: string
+  onNavigateToFlows: NavigateToFlows
+}) {
   const q = useQuery({
     queryKey: ['device-flows', exporter],
     queryFn: () => api.recentFlows(50, exporter),
@@ -788,6 +815,8 @@ function FlowsTab({ exporter }: { exporter: string }) {
     dir: sortDir,
     onToggle: toggle,
   })
+  const investigateExporter = () =>
+    onNavigateToFlows([{ key: 'exporter', value: exporter }])
   return (
     <div>
       <div className="flex items-baseline gap-3 px-4 py-3 border-b border-line">
@@ -797,9 +826,12 @@ function FlowsTab({ exporter }: { exporter: string }) {
         <span className="font-mono text-[11px] text-faint">
           {q.isLoading ? 'loading…' : `${flows.length} most recent`}
         </span>
-        <span className="ml-auto font-mono text-[10px] tracking-[0.06em] text-faint">
-          REFRESH · 2s
-        </span>
+        <button
+          onClick={investigateExporter}
+          className="ml-auto font-mono text-[10.5px] tracking-[0.06em] text-accent hover:underline"
+        >
+          Investigate on Flows →
+        </button>
       </div>
       <p className="px-4 py-2 text-[11.5px] text-dim border-b border-line bg-surface leading-[1.5]">
         Switches export flows for traffic they <span className="text-text">forward</span>, not just
@@ -848,7 +880,180 @@ function FlowsTab({ exporter }: { exporter: string }) {
           </tbody>
         </table>
       )}
+      <div className="grid grid-cols-1 lg:grid-cols-2 border-t border-line">
+        <MiniTalkers exporter={exporter} onNavigateToFlows={onNavigateToFlows} />
+        <MiniServices exporter={exporter} onNavigateToFlows={onNavigateToFlows} />
+      </div>
     </div>
+  )
+}
+
+/* ----------------------- Top-5 mini panels ----------------------- */
+
+function MiniPanelHead({
+  title,
+  sub,
+  onInvestigate,
+  borderRight,
+}: {
+  title: string
+  sub: string
+  onInvestigate: () => void
+  borderRight?: boolean
+}) {
+  return (
+    <div
+      className={`flex items-baseline gap-3 px-4 py-3 border-b border-line ${
+        borderRight ? 'lg:border-r' : ''
+      }`}
+    >
+      <span className="text-[11px] uppercase tracking-[0.1em] text-dim font-semibold">
+        {title}
+      </span>
+      <span className="font-mono text-[11px] text-faint">{sub}</span>
+      <button
+        onClick={onInvestigate}
+        className="ml-auto font-mono text-[10.5px] tracking-[0.06em] text-accent hover:underline"
+      >
+        Investigate →
+      </button>
+    </div>
+  )
+}
+
+function MiniBars<T>({
+  rows,
+  loading,
+  empty,
+  keyOf,
+  renderLeft,
+  renderRight,
+  valueOf,
+}: {
+  rows: T[]
+  loading: boolean
+  empty: string
+  keyOf: (r: T) => string
+  renderLeft: (r: T) => ReactNode
+  renderRight: (r: T) => ReactNode
+  valueOf: (r: T) => number
+}) {
+  if (loading) {
+    return <div className="px-4 py-6 text-faint font-mono text-[12px]">loading…</div>
+  }
+  if (rows.length === 0) {
+    return <div className="px-4 py-6 text-center text-[12px] font-mono text-dim">{empty}</div>
+  }
+  const total = rows.reduce((a, r) => a + valueOf(r), 0)
+  return (
+    <ul>
+      {rows.map((r) => {
+        const v = valueOf(r)
+        const pct = total > 0 ? (v / total) * 100 : 0
+        return (
+          <li
+            key={keyOf(r)}
+            className="px-4 py-2 border-b border-line-soft last:border-b-0 hover:bg-surface"
+          >
+            <div className="flex items-baseline justify-between gap-3">
+              <div className="min-w-0 truncate">{renderLeft(r)}</div>
+              <div className="font-mono text-[12px] tabular text-text shrink-0">
+                {renderRight(r)}
+              </div>
+            </div>
+            <div className="mt-1.5 h-px bg-line w-full overflow-hidden">
+              <div
+                className="h-full bg-accent"
+                style={{ width: `${Math.min(100, Math.max(0, pct))}%` }}
+              />
+            </div>
+          </li>
+        )
+      })}
+    </ul>
+  )
+}
+
+function MiniTalkers({
+  exporter,
+  onNavigateToFlows,
+}: {
+  exporter: string
+  onNavigateToFlows: NavigateToFlows
+}) {
+  const qs = new URLSearchParams({ exporter })
+  const q = useQuery({
+    queryKey: ['device-mini-talkers', exporter],
+    queryFn: () => api.topTalkers(qs, 300, 5, 'bytes'),
+    refetchInterval: 5000,
+  })
+  return (
+    <section className="lg:border-r lg:border-line">
+      <MiniPanelHead
+        title="Top talkers"
+        sub="this exporter · 5min · by bytes"
+        onInvestigate={() =>
+          onNavigateToFlows([{ key: 'exporter', value: exporter }])
+        }
+      />
+      <MiniBars
+        rows={q.data?.rows ?? []}
+        loading={q.isLoading}
+        empty="no talkers in last 5 min"
+        keyOf={(r: TopTalker) => `${r.src_addr}>${r.dst_addr}`}
+        renderLeft={(r) => (
+          <span className="font-mono text-[12px]">
+            <span className="text-text">{r.src_addr}</span>{' '}
+            <span className="text-faint">→</span>{' '}
+            <span className="text-text">{r.dst_addr}</span>
+          </span>
+        )}
+        renderRight={(r) => fmt.bytes(r.bytes)}
+        valueOf={(r) => r.bytes}
+      />
+    </section>
+  )
+}
+
+function MiniServices({
+  exporter,
+  onNavigateToFlows,
+}: {
+  exporter: string
+  onNavigateToFlows: NavigateToFlows
+}) {
+  const qs = new URLSearchParams({ exporter })
+  const q = useQuery({
+    queryKey: ['device-mini-services', exporter],
+    queryFn: () => api.topServices(qs, 300, 5, 'bytes'),
+    refetchInterval: 5000,
+  })
+  return (
+    <section>
+      <MiniPanelHead
+        title="Top services"
+        sub="this exporter · 5min · by bytes"
+        onInvestigate={() =>
+          onNavigateToFlows([{ key: 'exporter', value: exporter }])
+        }
+      />
+      <MiniBars
+        rows={q.data?.rows ?? []}
+        loading={q.isLoading}
+        empty="no services in last 5 min"
+        keyOf={(r: TopService) => `${r.dst_port}_${r.proto}`}
+        renderLeft={(r) => (
+          <span className="font-mono text-[12px] text-text">
+            <ServiceLabel proto={r.proto} port={r.dst_port} />{' '}
+            <span className="text-faint">
+              · {fmt.proto(r.proto)} {r.dst_port}
+            </span>
+          </span>
+        )}
+        renderRight={(r) => fmt.bytes(r.bytes)}
+        valueOf={(r) => r.bytes}
+      />
+    </section>
   )
 }
 

@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { useEffect, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import { api, fmt } from './api'
 import { Overview } from './components/Overview'
 import { Flows } from './components/Flows'
@@ -9,8 +9,18 @@ import { Settings } from './components/Settings'
 import { ThemeToggle } from './theme'
 import { useTimeRange, type TimeRange } from './timeRange'
 import { TimeRangeSelector } from './components/TimeRangeSelector'
+import type { Filter, FilterKey } from './filters'
 
 type Tab = 'overview' | 'flows' | 'devices' | 'alerts' | 'settings'
+
+const FILTER_KEYS: FilterKey[] = [
+  'exporter',
+  'src_addr',
+  'dst_addr',
+  'src_port',
+  'dst_port',
+  'proto',
+]
 
 // scopeForTab maps the active tab to the URL-namespace key used by
 // useTimeRange. Each tab keeps its own range under its own params.
@@ -37,6 +47,20 @@ export function App() {
   const [tab, setTab] = useState<Tab>('overview')
   const tr = useTimeRange(scopeForTab(tab))
   const showRange = TIME_TABS.has(tab)
+  // Cross-tab navigation primitive: writes filter chips into the URL,
+  // then switches tabs. Devices "Investigate →" links use this to
+  // deep-link into Flows pre-filtered to the current exporter.
+  const navigateToFlows = useCallback((filters: Filter[]) => {
+    const sp = new URLSearchParams(window.location.search)
+    for (const k of FILTER_KEYS) sp.delete(k)
+    for (const f of filters) sp.set(f.key, f.value)
+    const qs = sp.toString()
+    const next = qs
+      ? `${window.location.pathname}?${qs}`
+      : window.location.pathname
+    window.history.replaceState({}, '', next)
+    setTab('flows')
+  }, [])
   return (
     <div
       className="grid bg-ink text-text overflow-hidden h-screen"
@@ -53,7 +77,11 @@ export function App() {
           <Flows range={tr.range} rangeKey={tr.queryKey} />
         )}
         {tab === 'devices' && (
-          <Devices range={tr.range} rangeKey={tr.queryKey} />
+          <Devices
+            range={tr.range}
+            rangeKey={tr.queryKey}
+            onNavigateToFlows={navigateToFlows}
+          />
         )}
         {tab === 'alerts' && <Alerts />}
         {tab === 'settings' && <Settings />}
