@@ -12,6 +12,8 @@ export type FilterKey =
   | 'proto'
   | 'input_ifindex'
   | 'output_ifindex'
+  | 'src_as'
+  | 'dst_as'
 
 export const FILTER_KEYS: readonly FilterKey[] = [
   'exporter',
@@ -22,6 +24,8 @@ export const FILTER_KEYS: readonly FilterKey[] = [
   'proto',
   'input_ifindex',
   'output_ifindex',
+  'src_as',
+  'dst_as',
 ] as const
 
 export type Filter = {
@@ -48,6 +52,8 @@ const KEY_LABELS: Record<FilterKey, string> = {
   proto: 'proto',
   input_ifindex: 'in iface',
   output_ifindex: 'out iface',
+  src_as: 'src AS',
+  dst_as: 'dst AS',
 }
 
 export function keyLabelFor(key: FilterKey): string {

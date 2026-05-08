@@ -199,10 +199,18 @@ func runNetFlowListener(ctx context.Context, addr string, emitter *record.Emitte
 			scratch, err = netflow.ParseV9OrIPFIX(cache, buf[:n], exporter, scratch)
 		case 10:
 			protocol = "ipfix"
-			if seq, ok := netflow.ReadIPFIXSequence(buf[:n]); ok {
-				tracker.Note(exporter, seqtrack.SourceIPFIX, seq)
-			}
 			scratch, err = netflow.ParseV9OrIPFIX(cache, buf[:n], exporter, scratch)
+			// IPFIX seq increments by record count, not per
+			// datagram (RFC 7011 §3.1). Call after parsing so we
+			// have len(scratch) for an accurate expected-increment.
+			// Skipped on parse failure — losing the seq for one bad
+			// datagram is acceptable; the parse error counter
+			// already records the failure.
+			if err == nil {
+				if seq, ok := netflow.ReadIPFIXSequence(buf[:n]); ok {
+					tracker.NoteRecords(exporter, seqtrack.SourceIPFIX, seq, uint32(len(scratch)))
+				}
+			}
 		default:
 			obs.ParseErrorsTotal.WithLabelValues("netflow", "unknown_version").Inc()
 			slog.Debug("unhandled netflow version", "version", version, "src", src)

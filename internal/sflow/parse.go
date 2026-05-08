@@ -59,6 +59,8 @@ const (
 	// Flow record formats inside a flow_sample.
 	flowRecordRawPacketHeader = 1
 	flowRecordExtSwitch       = 1001 // 802.1Q VLAN context — not yet decoded
+	flowRecordExtRouter       = 1002 // next-hop info — not yet decoded
+	flowRecordExtGateway      = 1003 // BGP route info: src_as, dst_as_path, communities
 
 	// Counter record formats inside a counters_sample.
 	counterRecordIfCounters = 1
@@ -286,17 +288,26 @@ func parseFlowSample(body []byte, exporter netip.Addr, expanded bool) ([]record.
 	numRecords := binary.BigEndian.Uint32(body[off : off+4])
 	off += 4
 
-	out := make([]record.Flow, 0, numRecords)
+	// Real-world sFlow flow_samples carry one raw_packet_header per
+	// sample plus zero or more decorator records (extended_switch,
+	// extended_router, extended_gateway). We merge the decorators
+	// into the Flow built from raw_packet_header before appending.
+	var (
+		base    record.Flow
+		baseOK  bool
+		srcAS   uint32
+		dstAS   uint32
+	)
 	for i := uint32(0); i < numRecords; i++ {
 		if off+8 > len(body) {
-			return out, ErrTruncated
+			return nil, ErrTruncated
 		}
 		recType := binary.BigEndian.Uint32(body[off : off+4])
 		recLen := binary.BigEndian.Uint32(body[off+4 : off+8])
 		off += 8
 		end := off + int(recLen)
 		if end > len(body) {
-			return out, ErrTruncated
+			return nil, ErrTruncated
 		}
 		recBody := body[off:end]
 		off = end
@@ -304,15 +315,93 @@ func parseFlowSample(body []byte, exporter netip.Addr, expanded bool) ([]record.
 		if (recType >> 20) != 0 {
 			continue // non-standard enterprise
 		}
-		if recType&0xFFFFF != flowRecordRawPacketHeader {
-			continue // ignore other record types for now
-		}
-		f, ok := parseRawPacketHeader(recBody, exporter, inIfIndex, outIfIndex)
-		if ok {
-			out = append(out, f)
+		switch recType & 0xFFFFF {
+		case flowRecordRawPacketHeader:
+			if f, ok := parseRawPacketHeader(recBody, exporter, inIfIndex, outIfIndex); ok {
+				base = f
+				baseOK = true
+			}
+		case flowRecordExtGateway:
+			if s, d, ok := parseExtendedGateway(recBody); ok {
+				srcAS = s
+				dstAS = d
+			}
 		}
 	}
+	out := make([]record.Flow, 0, 1)
+	if baseOK {
+		base.SrcAS = srcAS
+		base.DstAS = dstAS
+		out = append(out, base)
+	}
 	return out, nil
+}
+
+// parseExtendedGateway decodes the BGP route-info record inside a
+// flow_sample. We extract src_as and the last AS in the destination
+// AS path (typically the origin AS for the dst prefix). Returns
+// (0, 0, false) on a body too short to walk past the required
+// fields — callers should treat this as "no ASN data" not an error.
+//
+// Wire layout (sFlow v5):
+//
+//	next_hop_type uint32        (1 = IPv4, 2 = IPv6)
+//	next_hop      4 or 16 bytes
+//	as            uint32        (router's AS — ignored)
+//	src_as        uint32
+//	src_peer_as   uint32        (ignored)
+//	dst_as_path[] of as_path_segment, where each segment is:
+//	    type      uint32        (1 = AS_SET, 2 = AS_SEQUENCE)
+//	    as[]      uint32×N
+//	communities[] uint32×N      (skipped)
+//	localpref     uint32        (skipped)
+func parseExtendedGateway(body []byte) (srcAS, dstAS uint32, ok bool) {
+	if len(body) < 4 {
+		return 0, 0, false
+	}
+	off := 0
+	nextHopType := binary.BigEndian.Uint32(body[off : off+4])
+	off += 4
+	switch nextHopType {
+	case 1: // IPv4
+		off += 4
+	case 2: // IPv6
+		off += 16
+	default:
+		return 0, 0, false
+	}
+	// router as + src_as + src_peer_as + dst_as_path count
+	if off+16 > len(body) {
+		return 0, 0, false
+	}
+	off += 4 // router as
+	srcAS = binary.BigEndian.Uint32(body[off : off+4])
+	off += 4
+	off += 4 // src_peer_as
+	pathSegCount := binary.BigEndian.Uint32(body[off : off+4])
+	off += 4
+	// Walk each path segment; remember the last AS we saw — that's
+	// the destination AS for typical (single-segment) AS paths.
+	for i := uint32(0); i < pathSegCount; i++ {
+		if off+8 > len(body) {
+			return srcAS, dstAS, true // partial; what we have is fine
+		}
+		off += 4 // segment type
+		count := binary.BigEndian.Uint32(body[off : off+4])
+		off += 4
+		if count == 0 {
+			continue
+		}
+		end := off + int(count)*4
+		if end > len(body) {
+			return srcAS, dstAS, true
+		}
+		// Last AS in this segment
+		lastOff := end - 4
+		dstAS = binary.BigEndian.Uint32(body[lastOff : lastOff+4])
+		off = end
+	}
+	return srcAS, dstAS, true
 }
 
 // parseRawPacketHeader decodes the raw_packet_header record that

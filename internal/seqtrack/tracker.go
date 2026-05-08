@@ -34,11 +34,12 @@ type key struct {
 }
 
 type state struct {
-	lastSeq    uint32
-	hasSeen    bool
-	datagrams  uint64
-	seqGaps    uint64
-	updatedAt  time.Time
+	lastSeq           uint32
+	expectedIncrement uint32 // 1 for v9/sFlow, set per-call for IPFIX
+	hasSeen           bool
+	datagrams         uint64
+	seqGaps           uint64
+	updatedAt         time.Time
 }
 
 // Tracker accumulates per-stream seq counters. Safe for concurrent
@@ -52,21 +53,32 @@ func New() *Tracker {
 	return &Tracker{by: make(map[key]*state)}
 }
 
-// Note records that a datagram with the given sequence number was
-// received from exporter on the named source. Returns the gap
-// observed for this datagram (0 if first seen or perfectly
-// sequential).
-//
-// The sequence increment between successive datagrams is
-// per-source-defined: for NetFlow v9 it's per-datagram (+1 each),
-// for IPFIX it's per-record-count (+N), for sFlow v5 it's
-// per-datagram (+1). We can't infer the expected increment without
-// the parser also passing a hint, so this function tracks the raw
-// uint32 and reports any non-1 difference as a "gap" — meaningful
-// for v9 / sFlow, an over-count for IPFIX (the IPFIX caller may
-// post-correct by passing a recordsInDatagram argument in a future
-// extension; a TODO).
+// Note records a datagram from a per-datagram-incrementing source
+// (NetFlow v9, sFlow v5). Equivalent to NoteRecords with
+// recordsInThisDatagram = 1.
 func (t *Tracker) Note(exporter netip.Addr, source Source, seq uint32) (gap uint32) {
+	return t.NoteRecords(exporter, source, seq, 1)
+}
+
+// NoteRecords records that a datagram with the given sequence
+// number and record count was received from exporter on the named
+// source. Returns the gap observed for this datagram (0 if first
+// seen or perfectly sequential).
+//
+// The "expected increment" between consecutive datagrams varies by
+// protocol:
+//
+//   - NetFlow v9 + sFlow v5 increment seq by 1 per datagram. Pass
+//     recordsInThisDatagram = 1 (or call Note).
+//   - IPFIX (RFC 7011 §3.1) increments seq by the number of Data
+//     Records sent. So the *previous* datagram's record count is
+//     what determines the expected jump in this datagram's seq.
+//     Pass len(scratch) after parsing (the records this datagram
+//     contributes) — the tracker remembers it across calls.
+//
+// Gap is computed as: current_seq - last_seq - last_expected_increment.
+// We deliberately don't penalize duplicate / reorder / wrap.
+func (t *Tracker) NoteRecords(exporter netip.Addr, source Source, seq uint32, recordsInThisDatagram uint32) (gap uint32) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	k := key{exporter: exporter, source: source}
@@ -80,22 +92,32 @@ func (t *Tracker) Note(exporter netip.Addr, source Source, seq uint32) (gap uint
 	if !s.hasSeen {
 		s.hasSeen = true
 		s.lastSeq = seq
+		s.expectedIncrement = recordsInThisDatagram
 		return 0
 	}
 	delta := seq - s.lastSeq
+	expected := s.expectedIncrement
+	if expected == 0 {
+		// We saw the previous datagram but never recorded an
+		// expected increment for it — be permissive and treat any
+		// forward jump as zero gap. Avoids false-positives for the
+		// first IPFIX datagram after a v9 fallback / source switch.
+		expected = delta
+	}
 	switch {
-	case delta == 1:
+	case delta == expected:
 		// perfectly sequential, no gap
 	case delta == 0:
-		// duplicate datagram — uncommon but seen on multipath; not a loss
-	case delta > 1 && delta < 0x80000000:
+		// duplicate datagram — not a loss
+	case delta > expected && delta < 0x80000000:
 		// forward jump — count the missed seq numbers
-		gap = delta - 1
+		gap = delta - expected
 		s.seqGaps += uint64(gap)
 	default:
 		// reorder / wrap — don't penalize on either path
 	}
 	s.lastSeq = seq
+	s.expectedIncrement = recordsInThisDatagram
 	return gap
 }
 

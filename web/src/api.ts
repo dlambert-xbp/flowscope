@@ -135,6 +135,17 @@ export type StreamRow = {
   exporters: number
 }
 
+export type IngestHealth = {
+  started_at: string
+  uptime_seconds: number
+  udp_received_total: Record<string, number>
+  parse_records_total: { protocol: string; label: string; value: number }[]
+  parse_errors_total: { protocol: string; label: string; value: number }[]
+  emit_errors_total: Record<string, number>
+  template_cache: { hits: number; misses: number; size: number }
+  ring_size: number
+}
+
 export type ExporterHealthRow = {
   exporter: string
   sys_name: string
@@ -487,6 +498,7 @@ export const api = {
       `/api/health/streams?${timeQuery(range)}`,
     ),
   healthStorage: () => getJSON<StorageHealth>(`/api/health/storage`),
+  healthIngest: () => getJSON<IngestHealth>(`/api/health/ingest`),
   healthExporters: (range?: TimeRangeArg) =>
     getJSON<{ count: number; rows: ExporterHealthRow[]; window: string }>(
       `/api/health/exporters?${timeQuery(range)}`,

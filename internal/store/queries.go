@@ -982,6 +982,8 @@ type FlowFilter struct {
 	Proto         uint16 // 16-bit so 0 can mean "unset"; valid values fit in 8 bits
 	InputIfIndex  uint32 // 0 = unset; observation interface on the exporter
 	OutputIfIndex uint32 // 0 = unset
+	SrcAS         uint32 // 0 = unset; per the convention used by the flows table default
+	DstAS         uint32
 }
 
 // buildWhere returns SQL fragments and bound args for the WHERE clause
@@ -1032,6 +1034,14 @@ func buildWhere(tr TimeRange, f FlowFilter) (string, []any, error) {
 	if f.OutputIfIndex != 0 {
 		where = append(where, "output_ifindex = ?")
 		args = append(args, f.OutputIfIndex)
+	}
+	if f.SrcAS != 0 {
+		where = append(where, "src_as = ?")
+		args = append(args, f.SrcAS)
+	}
+	if f.DstAS != 0 {
+		where = append(where, "dst_as = ?")
+		args = append(args, f.DstAS)
 	}
 	return strings.Join(where, " AND "), args, nil
 }

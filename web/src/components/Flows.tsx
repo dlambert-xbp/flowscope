@@ -298,6 +298,8 @@ const PLACEHOLDERS: Record<FilterKey, string> = {
   proto: 'protocol number (6=TCP, 17=UDP)',
   input_ifindex: 'input ifindex',
   output_ifindex: 'output ifindex',
+  src_as: 'source ASN (e.g. 13335)',
+  dst_as: 'destination ASN',
 }
 
 function validateValue(key: FilterKey, value: string): string | null {
@@ -318,7 +320,9 @@ function validateValue(key: FilterKey, value: string): string | null {
       return null
     }
     case 'input_ifindex':
-    case 'output_ifindex': {
+    case 'output_ifindex':
+    case 'src_as':
+    case 'dst_as': {
       const n = Number(value)
       if (!Number.isInteger(n) || n < 0) return 'non-negative integer'
       return null
@@ -699,7 +703,7 @@ function ProtocolsList({ qs, onAdd, onDrill, range, rangeKey, sortBy, topN }: Li
   )
 }
 
-function ASNList({ qs, onAdd: _onAdd, onDrill, range, rangeKey, sortBy, topN }: ListBase) {
+function ASNList({ qs, onAdd, onDrill, range, rangeKey, sortBy, topN }: ListBase) {
   const q = useQuery({
     queryKey: ['top-asn', qs.toString(), rangeKey, sortBy, topN],
     queryFn: () => api.topASN(qs, range, topN, sortBy),
@@ -713,7 +717,33 @@ function ASNList({ qs, onAdd: _onAdd, onDrill, range, rangeKey, sortBy, topN }: 
         keyOf={(r: TopASN) => `${r.src_as}>${r.dst_as}`}
         renderLeft={(r) => (
           <span className="font-mono text-[12px] text-text">
-            AS{r.src_as || '—'} <span className="text-faint">→</span> AS{r.dst_as || '—'}
+            {r.src_as !== 0 ? (
+              <FilterTrigger
+                k="src_as"
+                value={String(r.src_as)}
+                onAdd={onAdd}
+                label={`AS${r.src_as}`}
+                keyLabel="src AS"
+              >
+                AS{r.src_as}
+              </FilterTrigger>
+            ) : (
+              <span className="text-faint">AS—</span>
+            )}{' '}
+            <span className="text-faint">→</span>{' '}
+            {r.dst_as !== 0 ? (
+              <FilterTrigger
+                k="dst_as"
+                value={String(r.dst_as)}
+                onAdd={onAdd}
+                label={`AS${r.dst_as}`}
+                keyLabel="dst AS"
+              >
+                AS{r.dst_as}
+              </FilterTrigger>
+            ) : (
+              <span className="text-faint">AS—</span>
+            )}
             {dropped > 0 && r === rows[0] && (
               <span className="ml-3 font-mono text-[10.5px] text-faint italic">
                 · {dropped} unknown AS row{dropped === 1 ? '' : 's'} hidden
@@ -723,15 +753,33 @@ function ASNList({ qs, onAdd: _onAdd, onDrill, range, rangeKey, sortBy, topN }: 
         )}
         valueOf={(r) => valueOfRow(sortBy, r)}
         renderRight={(r) => formatValue(sortBy, valueOfRow(sortBy, r))}
-        drillFor={(r) => ({
-          title: `AS${r.src_as} → AS${r.dst_as}`,
-          subtitle: 'src AS → dst AS',
-          // ASN isn't a FlowFilter dimension yet — drill carries an
-          // empty filter set; the chart and records reflect the page
-          // filters only. Adding src_as / dst_as to FlowFilter is a
-          // follow-up.
-          filters: [],
-        })}
+        drillFor={(r) => {
+          const filters: Filter[] = []
+          if (r.src_as !== 0) {
+            filters.push({
+              key: 'src_as',
+              value: String(r.src_as),
+              label: `AS${r.src_as}`,
+            })
+          }
+          if (r.dst_as !== 0) {
+            filters.push({
+              key: 'dst_as',
+              value: String(r.dst_as),
+              label: `AS${r.dst_as}`,
+            })
+          }
+          return {
+            title:
+              r.src_as && r.dst_as
+                ? `AS${r.src_as} → AS${r.dst_as}`
+                : r.src_as
+                  ? `AS${r.src_as} → unknown`
+                  : `unknown → AS${r.dst_as}`,
+            subtitle: 'src AS → dst AS',
+            filters,
+          }
+        }}
         onDrill={onDrill}
         sortBy={sortBy}
       />

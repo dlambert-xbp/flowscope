@@ -111,12 +111,17 @@ func run() error {
 			audit:    auditWriter,
 			reader:   auditReader,
 		},
+		ingestHealthURL: os.Getenv("FLOWSCOPE_INGEST_HEALTH_URL"),
+		ingestHealthHTTP: &http.Client{
+			Timeout: 3 * time.Second,
+		},
 	}
 	r.Get("/healthz", h.health)
 	r.Get("/api/summary", h.summary)
 	r.Get("/api/health/streams", h.healthStreams)
 	r.Get("/api/health/storage", h.healthStorage)
 	r.Get("/api/health/exporters", h.healthExporters)
+	r.Get("/api/health/ingest", h.healthIngest)
 	r.Get("/api/flows/recent", h.recentFlows)
 	r.Get("/api/flows/list", h.flowsList)
 	r.Get("/api/flows/timeseries", h.flowsTimeseries)
