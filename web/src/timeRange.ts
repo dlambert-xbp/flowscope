@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 // PRESETS are the trailing-window options offered in the selector. The
 // values are Go-duration strings the API understands directly.
@@ -130,6 +130,16 @@ export function useTimeRange(scope: string): {
   queryKey: unknown
 } {
   const [range, setRange] = useState<TimeRange>(() => readFromURL(scope))
+
+  // Reset state from the URL when scope changes — e.g. App.tsx passes
+  // a scope derived from the active tab; switching tabs must show that
+  // tab's saved range, not the prior tab's. Using the "render-time
+  // setState" pattern from the React docs to avoid an extra render.
+  const lastScopeRef = useRef(scope)
+  if (lastScopeRef.current !== scope) {
+    lastScopeRef.current = scope
+    setRange(readFromURL(scope))
+  }
 
   // React to back/forward navigation that may change the URL.
   useEffect(() => {
