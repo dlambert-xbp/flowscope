@@ -150,6 +150,7 @@ func run() error {
 		r.Put("/api/snmp/credentials/{exporter}", h.putCredential)
 		r.Delete("/api/snmp/credentials/{exporter}", h.deleteCredential)
 		r.Post("/api/snmp/credentials/{exporter}/test", h.testCredential)
+		r.Post("/api/devices/{exporter}/snmp/walk", h.requestSnmpWalk)
 	})
 
 	// Settings & Services. Reads are open (proxy-trust, Phase 1);
