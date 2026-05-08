@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 
 // PRESETS are the trailing-window options offered in the selector. The
 // values are Go-duration strings the API understands directly.
@@ -72,15 +72,11 @@ export function rangeToParams(r: TimeRange): URLSearchParams {
   return sp
 }
 
-// keyFor produces the namespaced URL params used by useTimeRange so
-// each tab keeps an independent range. Key is the scope (e.g. 'ov').
-const keyFor = (scope: string, suffix: 'window' | 'from' | 'to') => `${scope}_${suffix}`
-
-function readFromURL(scope: string): TimeRange {
+function readFromURL(): TimeRange {
   if (typeof window === 'undefined') return DEFAULT_TIME_RANGE
   const sp = new URLSearchParams(window.location.search)
-  const fromStr = sp.get(keyFor(scope, 'from'))
-  const toStr = sp.get(keyFor(scope, 'to'))
+  const fromStr = sp.get('from')
+  const toStr = sp.get('to')
   if (fromStr && toStr) {
     const from = new Date(fromStr)
     const to = new Date(toStr)
@@ -88,27 +84,27 @@ function readFromURL(scope: string): TimeRange {
       return { kind: 'absolute', from, to }
     }
   }
-  const win = sp.get(keyFor(scope, 'window'))
+  const win = sp.get('window')
   if (win && (PRESETS as readonly string[]).includes(win)) {
     return { kind: 'preset', window: win as Preset }
   }
   return DEFAULT_TIME_RANGE
 }
 
-function writeToURL(scope: string, r: TimeRange) {
+function writeToURL(r: TimeRange) {
   if (typeof window === 'undefined') return
   const sp = new URLSearchParams(window.location.search)
-  // Wipe any prior keys for this scope so we never end up with stale
-  // window= alongside a fresh from/to.
-  sp.delete(keyFor(scope, 'window'))
-  sp.delete(keyFor(scope, 'from'))
-  sp.delete(keyFor(scope, 'to'))
+  // Wipe any prior time keys so we never end up with stale window=
+  // alongside a fresh from/to.
+  sp.delete('window')
+  sp.delete('from')
+  sp.delete('to')
   if (r.kind === 'preset') {
     // Default preset is implicit — leave the URL clean.
-    if (r.window !== DEFAULT_PRESET) sp.set(keyFor(scope, 'window'), r.window)
+    if (r.window !== DEFAULT_PRESET) sp.set('window', r.window)
   } else {
-    sp.set(keyFor(scope, 'from'), r.from.toISOString())
-    sp.set(keyFor(scope, 'to'), r.to.toISOString())
+    sp.set('from', r.from.toISOString())
+    sp.set('to', r.to.toISOString())
   }
   const qs = sp.toString()
   const next = qs ? `${window.location.pathname}?${qs}` : window.location.pathname
@@ -117,11 +113,12 @@ function writeToURL(scope: string, r: TimeRange) {
   }
 }
 
-// useTimeRange is a per-tab time range hook. The `scope` arg names the
-// tab so each tab's range is encoded under its own URL params (e.g.
-// ov_window, fl_window, dv_window). React Query callers should include
-// the queryKey() helper in their queryKey so range changes refetch.
-export function useTimeRange(scope: string): {
+// useTimeRange is the global time-range hook. One range applies across
+// every tab; switching tabs preserves the operator's selection. State
+// mirrors to URL params (window=, from=, to=) so refresh and shared
+// links keep the range. React Query callers should include `queryKey`
+// in their queryKey so range changes trigger refetches.
+export function useTimeRange(): {
   range: TimeRange
   set: (r: TimeRange) => void
   setPreset: (p: Preset) => void
@@ -129,29 +126,19 @@ export function useTimeRange(scope: string): {
   reset: () => void
   queryKey: unknown
 } {
-  const [range, setRange] = useState<TimeRange>(() => readFromURL(scope))
-
-  // Reset state from the URL when scope changes — e.g. App.tsx passes
-  // a scope derived from the active tab; switching tabs must show that
-  // tab's saved range, not the prior tab's. Using the "render-time
-  // setState" pattern from the React docs to avoid an extra render.
-  const lastScopeRef = useRef(scope)
-  if (lastScopeRef.current !== scope) {
-    lastScopeRef.current = scope
-    setRange(readFromURL(scope))
-  }
+  const [range, setRange] = useState<TimeRange>(() => readFromURL())
 
   // React to back/forward navigation that may change the URL.
   useEffect(() => {
-    const onPop = () => setRange(readFromURL(scope))
+    const onPop = () => setRange(readFromURL())
     window.addEventListener('popstate', onPop)
     return () => window.removeEventListener('popstate', onPop)
-  }, [scope])
+  }, [])
 
   // Mirror state to URL whenever it changes.
   useEffect(() => {
-    writeToURL(scope, range)
-  }, [scope, range])
+    writeToURL(range)
+  }, [range])
 
   const set = useCallback((r: TimeRange) => setRange(r), [])
   const setPreset = useCallback(
