@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { getConfig } from './config'
 
 // PRESETS are the trailing-window options offered in the selector. The
 // values are Go-duration strings the API understands directly.
@@ -6,6 +7,16 @@ export const PRESETS = ['5m', '15m', '1h', '6h', '24h'] as const
 export type Preset = (typeof PRESETS)[number]
 
 export const DEFAULT_PRESET: Preset = '5m'
+
+// configuredPreset returns the operator-configured tenant default
+// (Settings -> General -> default_time_range) when it's a known
+// preset, otherwise the hard-coded DEFAULT_PRESET. Read at hook-mount
+// time so the value is always the freshly hydrated config.
+function configuredPreset(): Preset {
+  const cfg = getConfig().default_time_range
+  if ((PRESETS as readonly string[]).includes(cfg)) return cfg as Preset
+  return DEFAULT_PRESET
+}
 
 // TimeRange is either a trailing-window preset or an absolute interval.
 export type TimeRange =
@@ -88,7 +99,7 @@ function readFromURL(): TimeRange {
   if (win && (PRESETS as readonly string[]).includes(win)) {
     return { kind: 'preset', window: win as Preset }
   }
-  return DEFAULT_TIME_RANGE
+  return { kind: 'preset', window: configuredPreset() }
 }
 
 function writeToURL(r: TimeRange) {
@@ -100,8 +111,10 @@ function writeToURL(r: TimeRange) {
   sp.delete('from')
   sp.delete('to')
   if (r.kind === 'preset') {
-    // Default preset is implicit — leave the URL clean.
-    if (r.window !== DEFAULT_PRESET) sp.set('window', r.window)
+    // The currently-effective default preset (operator-configured or
+    // hard-coded) is implicit — leave the URL clean. Anything else is
+    // an explicit override and gets serialized.
+    if (r.window !== configuredPreset()) sp.set('window', r.window)
   } else {
     sp.set('from', r.from.toISOString())
     sp.set('to', r.to.toISOString())

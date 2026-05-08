@@ -87,7 +87,7 @@ Last updated: 2026-05-08.
       triggered + linked flows.
 - [ ] Per-rule history view ("how often does `exporter_silent` fire
       for this device this week?").
-- [ ] Auto-close after stability window. Currently the engine
+- [x] Auto-close after stability window. Currently the engine
       auto-closes the moment the condition clears; production rules
       typically want N-minute confirmation.
 - [ ] Grouping key for incident correlation. Engine writes `group_key`
@@ -100,7 +100,7 @@ Last updated: 2026-05-08.
       when gNMI is available for the same OIDs.
 - [ ] NetFlow v9 / IPFIX enterprise fields and options templates.
       Decoded but skipped today.
-- [ ] Variable-length IPFIX records. Currently records with an
+- [x] Variable-length IPFIX records. Currently records with an
       `0xFFFF` length field abandon the rest of the body — TODO in
       `decodeDataRecords`.
 
@@ -135,7 +135,7 @@ Last updated: 2026-05-08.
 
 ## Docs / ops
 
-- [ ] `README.md` is still Python-era. Should describe the Go
+- [x] `README.md` is still Python-era. Should describe the Go
       architecture and link to VISION.md / BUILD.md / CLAUDE.md.
 - [ ] Helm chart for AKS. Compose works for dev; prod needs Helm per
       VISION.md §8.2.
@@ -158,18 +158,18 @@ Smallest delta, highest immediate operator value. **Goal:** edits to
 `alert_rule_settings` (made via Settings → Alert rules) actually
 change how `internal/alerteng` evaluates the built-in rules.
 
-- [ ] On `cmd/alert` startup, load `alert_rule_settings` rows and
+- [x] On `cmd/alert` startup, load `alert_rule_settings` rows and
       apply per-rule overrides to `DefaultRules()` in
       `internal/alerteng/rules.go`. Specifically: `enabled`,
       `severity` override, `params` (silence_seconds, active_seconds,
       window_seconds, bytes_threshold).
-- [ ] Periodic refresh tick (60s) so live edits propagate without a
+- [x] Periodic refresh tick (60s) so live edits propagate without a
       restart. Store version timestamp; only re-construct rules when
       the table's `max(updated_at)` has advanced.
-- [ ] Surface effective values back through `/api/settings/alert-rules`
+- [x] Surface effective values back through `/api/settings/alert-rules`
       so the UI shows what's actually running, not just what was last
       saved.
-- [ ] Unit test: a rule loaded with custom `params` evaluates with
+- [x] Unit test: a rule loaded with custom `params` evaluates with
       those values.
 
 ### [Session B] Webhook dispatcher
@@ -220,9 +220,9 @@ than display values.
 **[Session D1] Display values** (theme, default time range, display
 name, timezone — easy):
 
-- [ ] `GET /api/config/effective` — returns the active values from
+- [x] `GET /api/config/effective` — returns the active values from
       `app_settings` (with defaults baked in for missing keys).
-- [ ] `App.tsx` hydrates from this on boot before the first paint;
+- [x] `App.tsx` hydrates from this on boot before the first paint;
       wire `default_theme` into `theme.tsx` (still allow per-session
       localStorage override), `default_time_range` into the
       `useTimeRange` initial value, `display_name` into the brand

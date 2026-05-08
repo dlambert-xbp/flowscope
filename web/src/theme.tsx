@@ -1,4 +1,5 @@
 import { useEffect, useState, type ReactNode } from 'react'
+import { getConfig } from './config'
 
 export type ThemePref = 'light' | 'dark' | 'system'
 export type ResolvedTheme = 'light' | 'dark'
@@ -12,6 +13,10 @@ function readPref(): ThemePref {
   } catch {
     // localStorage unavailable — fall through
   }
+  // Operator-configured tenant default takes the next slot — falls
+  // back to 'system' if config didn't load or set this key.
+  const cfg = getConfig().default_theme
+  if (cfg === 'light' || cfg === 'dark' || cfg === 'system') return cfg
   return 'system'
 }
 

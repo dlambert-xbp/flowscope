@@ -24,6 +24,7 @@ import (
 
 	"github.com/dlambert-xbp/flowscope/internal/alerteng"
 	"github.com/dlambert-xbp/flowscope/internal/obs"
+	"github.com/dlambert-xbp/flowscope/internal/settings"
 	"github.com/dlambert-xbp/flowscope/internal/store"
 )
 
@@ -47,6 +48,11 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("invalid FLOWSCOPE_ALERT_TICK %q: %w", tickStr, err)
 	}
+	stabilityStr := envOr("FLOWSCOPE_ALERT_STABILITY", "60s")
+	stability, err := time.ParseDuration(stabilityStr)
+	if err != nil {
+		return fmt.Errorf("invalid FLOWSCOPE_ALERT_STABILITY %q: %w", stabilityStr, err)
+	}
 	metricsAddr := envOr("FLOWSCOPE_METRICS_ADDR", ":9101")
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -68,14 +74,24 @@ func run() error {
 		}
 	}()
 
-	rules := alerteng.DefaultRules()
+	settingsStore := settings.New(conn, nil)
+	rules, version, err := alerteng.LoadRules(ctx, settingsStore.AlertRules)
+	if err != nil {
+		slog.Warn("alert: initial rule load failed, using defaults", "err", err)
+		rules = alerteng.DefaultRules()
+		version = time.Time{}
+	}
 	slog.Info("alert engine starting",
 		"rules", len(rules),
 		"tick", tick.String(),
+		"stability", stability.String(),
 		"metrics", metricsAddr,
+		"settings_version", version,
 	)
 
-	engine := alerteng.New(conn, rules, tick)
+	engine := alerteng.New(conn, rules, tick).
+		WithSettingsSource(settingsStore.AlertRules, version).
+		WithStabilityWindow(stability)
 	return engine.Run(ctx)
 }
 

@@ -63,32 +63,66 @@ type Rule interface {
 
 // Engine evaluates Rules on a tick and writes alert_events rows.
 type Engine struct {
-	conn  driver.Conn
-	rules []Rule
-	tick  time.Duration
+	conn            driver.Conn
+	tick            time.Duration
+	refreshTick     time.Duration
+	stabilityWindow time.Duration
+	src             RuleSettingsSource
 
-	mu   sync.Mutex
-	open map[string]openAlert // key = rule_id|scope|group_key
+	mu      sync.Mutex
+	rules   []Rule    // guarded by mu
+	version time.Time // max(updated_at) at the time `rules` was last loaded
+	open    map[string]openAlert // key = rule_id|scope|group_key
 }
 
 type openAlert struct {
 	severity   string
 	openedAt   time.Time
 	lastActive time.Time
+	clearedAt  time.Time // zero while violating; set to now() on first clear tick
 }
 
 // New returns an Engine ready to Run. tick controls evaluation
 // cadence; production setting is 5–10 seconds.
+//
+// src is optional. When non-nil the engine reloads rules from
+// alert_rule_settings every refreshTick (default 60s) and swaps the
+// in-flight rule slice when a newer max(updated_at) is observed —
+// edits in the Settings UI propagate without a process restart.
 func New(conn driver.Conn, rules []Rule, tick time.Duration) *Engine {
 	if tick <= 0 {
 		tick = 10 * time.Second
 	}
 	return &Engine{
-		conn:  conn,
-		rules: rules,
-		tick:  tick,
-		open:  make(map[string]openAlert),
+		conn:            conn,
+		rules:           rules,
+		tick:            tick,
+		refreshTick:     60 * time.Second,
+		stabilityWindow: 60 * time.Second,
+		open:            make(map[string]openAlert),
 	}
+}
+
+// WithStabilityWindow sets the dwell time the condition must stay
+// cleared before the engine fires a close event. 0 closes immediately
+// on the first clear tick (legacy behavior). Production rules
+// typically want 60s to absorb flapping.
+func (e *Engine) WithStabilityWindow(d time.Duration) *Engine {
+	if d < 0 {
+		d = 0
+	}
+	e.stabilityWindow = d
+	return e
+}
+
+// WithSettingsSource wires a live-edit source for rule overrides.
+// Calling this before Run captures the initial version stamp so the
+// next refresh tick only fires when an operator has actually changed
+// something.
+func (e *Engine) WithSettingsSource(src RuleSettingsSource, version time.Time) *Engine {
+	e.src = src
+	e.version = version
+	return e
 }
 
 // Run blocks until ctx is cancelled. On the first tick it reconciles
@@ -100,14 +134,46 @@ func (e *Engine) Run(ctx context.Context) error {
 	}
 	t := time.NewTicker(e.tick)
 	defer t.Stop()
+
+	var refreshC <-chan time.Time
+	if e.src != nil {
+		rt := time.NewTicker(e.refreshTick)
+		defer rt.Stop()
+		refreshC = rt.C
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-t.C:
 			e.evaluate(ctx)
+		case <-refreshC:
+			e.refreshRules(ctx)
 		}
 	}
+}
+
+// refreshRules reloads from the settings source and swaps the active
+// rule slice when max(updated_at) has advanced. Called on the refresh
+// ticker; cheap when nothing has changed (one small SELECT).
+func (e *Engine) refreshRules(ctx context.Context) {
+	if e.src == nil {
+		return
+	}
+	rules, version, err := LoadRules(ctx, e.src)
+	if err != nil {
+		slog.Warn("alerteng: refresh load failed", "err", err)
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if !version.After(e.version) {
+		return
+	}
+	e.rules = rules
+	e.version = version
+	slog.Info("alerteng: rules reloaded", "rules", len(rules), "version", version)
 }
 
 // evaluate runs every Rule once and reconciles open state.
@@ -129,8 +195,14 @@ func (e *Engine) evaluate(ctx context.Context) {
 			currentlyViolating[key] = true
 
 			if existing, ok := e.open[key]; ok {
-				// Heartbeat — already open.
-				e.open[key] = openAlert{severity: existing.severity, openedAt: existing.openedAt, lastActive: now}
+				// Heartbeat — already open. clearedAt resets to zero so
+				// a brief clear tick followed by a re-fire doesn't count
+				// against the stability window.
+				e.open[key] = openAlert{
+					severity:   existing.severity,
+					openedAt:   existing.openedAt,
+					lastActive: now,
+				}
 				e.write(ctx, alertRow{
 					ts: now, ruleID: r.ID(), severity: existing.severity, state: StateHeartbeat,
 					scope: v.Scope, groupKey: v.GroupKey, title: v.Title, body: v.Body, runbook: r.Runbook(),
@@ -155,9 +227,19 @@ func (e *Engine) evaluate(ctx context.Context) {
 		}
 	}
 
-	// Close anything that was open last tick but isn't now.
+	// Close anything that was open last tick but isn't now — except
+	// require stabilityWindow of continuous clearance before firing
+	// the close event so a single missed eval tick doesn't dupe-fire
+	// open/close on a flapping condition.
 	for key, oa := range e.open {
 		if currentlyViolating[key] {
+			continue
+		}
+		if oa.clearedAt.IsZero() {
+			oa.clearedAt = now
+			e.open[key] = oa
+		}
+		if now.Sub(oa.clearedAt) < e.stabilityWindow {
 			continue
 		}
 		ruleID, scope, groupKey := splitAlertKey(key)
@@ -167,7 +249,7 @@ func (e *Engine) evaluate(ctx context.Context) {
 			title: "auto-closed: condition cleared",
 			body:  "condition cleared at evaluation tick",
 		})
-		slog.Info("alerteng: closed", "rule", ruleID, "scope", scope)
+		slog.Info("alerteng: closed", "rule", ruleID, "scope", scope, "stable_for", now.Sub(oa.clearedAt))
 		delete(e.open, key)
 	}
 }
