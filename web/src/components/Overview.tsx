@@ -3,24 +3,39 @@ import { api, fmt } from '../api'
 import type { Summary } from '../api'
 import { Interfaces } from './Interfaces'
 import { LiveTail } from './LiveTail'
+import { useTimeRange, rangeLabel, toApi, type TimeRange } from '../timeRange'
+import { TimeRangeSelector } from './TimeRangeSelector'
 
 export function Overview() {
+  const tr = useTimeRange('ov')
+  const apiRange = toApi(tr.range)
   const summary = useQuery({
-    queryKey: ['summary'],
-    queryFn: () => api.summary(300),
-    refetchInterval: 2000,
+    queryKey: ['summary', tr.queryKey],
+    queryFn: () => api.summary(apiRange),
+    refetchInterval: tr.range.kind === 'preset' ? 2000 : false,
   })
   const ifaces = useQuery({
-    queryKey: ['interfaces'],
-    queryFn: () => api.interfaces(300),
-    refetchInterval: 5000,
+    queryKey: ['interfaces', tr.queryKey],
+    queryFn: () => api.interfaces(apiRange),
+    refetchInterval: tr.range.kind === 'preset' ? 5000 : false,
   })
 
   return (
     <div>
-      <Banner summary={summary.data} loading={summary.isLoading} error={summary.error as Error | undefined} />
-      <KpiGrid summary={summary.data} interfaceCount={ifaces.data?.count ?? 0} hasIfaces={!!ifaces.data} />
-      <Interfaces rows={ifaces.data?.interfaces ?? []} loading={ifaces.isLoading} />
+      <Banner
+        summary={summary.data}
+        loading={summary.isLoading}
+        error={summary.error as Error | undefined}
+        range={tr.range}
+        onRangeChange={tr.set}
+      />
+      <KpiGrid
+        summary={summary.data}
+        interfaceCount={ifaces.data?.count ?? 0}
+        hasIfaces={!!ifaces.data}
+        range={tr.range}
+      />
+      <Interfaces rows={ifaces.data?.interfaces ?? []} loading={ifaces.isLoading} range={tr.range} />
       <LiveTail />
     </div>
   )
@@ -32,24 +47,34 @@ function Banner({
   summary,
   loading,
   error,
+  range,
+  onRangeChange,
 }: {
   summary?: Summary
   loading: boolean
   error?: Error
+  range: TimeRange
+  onRangeChange: (r: TimeRange) => void
 }) {
+  const winLabel = rangeLabel(range)
+  const standfirstKind = range.kind === 'preset' ? `trailing ${winLabel}` : winLabel
+  const refreshLabel = range.kind === 'preset' ? 'refresh · 2s' : 'absolute · static'
   return (
     <div className="flex items-stretch border-b border-line bg-surface">
       <div className="flex-1 p-4 border-r border-line flex flex-col gap-1">
         <div className="flex items-center gap-3 text-[10.5px] uppercase tracking-[0.1em] font-semibold text-dim">
-          <span>standfirst · trailing 5 min</span>
+          <span>standfirst · {standfirstKind}</span>
           <span className="font-mono text-[10px] text-faint normal-case tracking-[0.02em]">
-            refresh · 2s
+            {refreshLabel}
+          </span>
+          <span className="ml-auto normal-case">
+            <TimeRangeSelector range={range} onChange={onRangeChange} />
           </span>
         </div>
-        <Standfirst summary={summary} loading={loading} error={error} />
+        <Standfirst summary={summary} loading={loading} error={error} range={range} />
       </div>
       <div className="flex">
-        <BannerCol label="window" value="5 min" mono />
+        <BannerCol label="window" value={winLabel} mono />
         <BannerCol label="newest" value={summary ? fmt.time(summary.newest).slice(11, 19) + 'Z' : '—'} mono />
         <BannerCol label="oldest" value={summary ? fmt.time(summary.oldest).slice(11, 19) + 'Z' : '—'} mono />
       </div>
@@ -61,10 +86,12 @@ function Standfirst({
   summary,
   loading,
   error,
+  range,
 }: {
   summary?: Summary
   loading: boolean
   error?: Error
+  range: TimeRange
 }) {
   if (loading) return <p className="text-[14px] text-dim">Connecting…</p>
   if (error) {
@@ -75,6 +102,7 @@ function Standfirst({
       </p>
     )
   }
+  const lead = range.kind === 'preset' ? `Trailing ${rangeLabel(range)}` : rangeLabel(range)
   if (!summary || summary.flows === 0) {
     return (
       <p className="text-[14px] text-text leading-[1.5] max-w-[78ch]">
@@ -84,15 +112,12 @@ function Standfirst({
           go run ./cmd/synth -- --target localhost:2055 --rate 5000
         </code>
         {' '}to populate it.
-        <span className="block mt-1 text-faint font-mono text-[11px] tracking-[0.02em]">
-          waiting · 2s refresh
-        </span>
       </p>
     )
   }
   return (
     <p className="text-[14px] text-text leading-[1.5] max-w-[78ch]">
-      Trailing 5 min: <span className="text-accent font-semibold tabular">{fmt.num(summary.flows)}</span> flows from{' '}
+      {lead}: <span className="text-accent font-semibold tabular">{fmt.num(summary.flows)}</span> flows from{' '}
       <span className="text-accent font-semibold tabular">{summary.exporters}</span> exporters carrying{' '}
       <span className="text-accent font-semibold">{fmt.bytes(summary.bytes)}</span> across{' '}
       <span className="text-accent font-semibold tabular">{fmt.num(summary.packets)}</span> packets.{' '}
@@ -149,27 +174,30 @@ function KpiGrid({
   summary,
   interfaceCount,
   hasIfaces,
+  range,
 }: {
   summary?: Summary
   interfaceCount: number
   hasIfaces: boolean
+  range: TimeRange
 }) {
   // Exception bias: tiles that represent abnormal state get a tinted
   // wash + colored numeric. Healthy tiles stay neutral. Operator's eye
   // lands on the exception in <300ms.
   const empty = !summary || summary.flows === 0
+  const winLabel = rangeLabel(range)
   const tiles: Tile[] = [
     {
       label: 'flow rate',
       value: summary ? fmt.num(summary.flows) : '—',
-      unit: 'flows · 5m',
+      unit: `flows · ${winLabel}`,
       state: empty ? undefined : 'accent',
       status: empty ? { text: 'idle', tone: 'dim' } : { text: 'live', tone: 'ok' },
     },
     {
       label: 'volume',
       value: summary ? fmt.bytes(summary.bytes) : '—',
-      unit: 'bytes · 5m',
+      unit: `bytes · ${winLabel}`,
       micro: summary ? [`${fmt.num(summary.packets)} packets`] : [],
     },
     {

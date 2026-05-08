@@ -65,10 +65,13 @@ function readFromURL(): Filter[] {
 
 // Push the current filter list back into the URL without reloading.
 // Uses replaceState so chips coming and going don't pollute the back
-// stack — a hard refresh still reads the current set.
+// stack — a hard refresh still reads the current set. Preserves all
+// non-filter params (time range, etc.) so other URL-backed state isn't
+// trampled.
 function writeToURL(filters: Filter[]) {
   if (typeof window === 'undefined') return
-  const sp = new URLSearchParams()
+  const sp = new URLSearchParams(window.location.search)
+  for (const k of ALLOWED) sp.delete(k)
   for (const f of filters) sp.set(f.key, f.value)
   const qs = sp.toString()
   const next = qs ? `${window.location.pathname}?${qs}` : window.location.pathname

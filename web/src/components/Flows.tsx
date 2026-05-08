@@ -6,8 +6,16 @@ import type {
   TopService,
   TopProtocol,
   TopConversation,
+  TimeRangeArg,
 } from '../api'
 import { useFilters, toQuery, keyLabelFor, type Filter, type FilterKey } from '../filters'
+import {
+  rangeLabel,
+  toApi,
+  useTimeRange,
+  type TimeRange,
+} from '../timeRange'
+import { TimeRangeSelector } from './TimeRangeSelector'
 
 // Flows tab — top-N panels narrowed by a composable filter set. Click
 // any value (talker src, talker dst, service port, protocol, full
@@ -15,22 +23,30 @@ import { useFilters, toQuery, keyLabelFor, type Filter, type FilterKey } from '.
 // panel's query and persist in the URL.
 export function Flows() {
   const f = useFilters()
+  const tr = useTimeRange('fl')
   const qs = toQuery(f.filters)
+  const apiRange = toApi(tr.range)
   return (
     <div>
-      <FilterBar filters={f.filters} onRemove={f.remove} onClear={f.clear} />
+      <FilterBar
+        filters={f.filters}
+        onRemove={f.remove}
+        onClear={f.clear}
+        range={tr.range}
+        onRangeChange={tr.set}
+      />
       <div className="grid grid-cols-1 lg:grid-cols-2 border-b border-line">
         <Panel title="Top talkers" sub="src → dst · by bytes" right="SOURCE · FLOWS">
-          <TalkersList qs={qs} onAdd={f.add} />
+          <TalkersList qs={qs} onAdd={f.add} range={apiRange} rangeKey={tr.queryKey} />
         </Panel>
         <Panel title="Top services" sub="dst port · by bytes" right="SOURCE · FLOWS">
-          <ServicesList qs={qs} onAdd={f.add} />
+          <ServicesList qs={qs} onAdd={f.add} range={apiRange} rangeKey={tr.queryKey} />
         </Panel>
         <Panel title="Top protocols" sub="share of total" right="SOURCE · FLOWS">
-          <ProtocolsList qs={qs} onAdd={f.add} />
+          <ProtocolsList qs={qs} onAdd={f.add} range={apiRange} rangeKey={tr.queryKey} />
         </Panel>
         <Panel title="Top conversations" sub="5-tuple · by bytes" right="SOURCE · FLOWS">
-          <ConversationsList qs={qs} onAdd={f.add} />
+          <ConversationsList qs={qs} onAdd={f.add} range={apiRange} rangeKey={tr.queryKey} />
         </Panel>
       </div>
     </div>
@@ -43,10 +59,14 @@ function FilterBar({
   filters,
   onRemove,
   onClear,
+  range,
+  onRangeChange,
 }: {
   filters: Filter[]
   onRemove: (key: FilterKey, value?: string) => void
   onClear: () => void
+  range: TimeRange
+  onRangeChange: (r: TimeRange) => void
 }) {
   const has = filters.length > 0
   return (
@@ -54,24 +74,27 @@ function FilterBar({
       <span className="text-[10.5px] uppercase tracking-[0.1em] text-faint font-semibold mr-1">
         Filters
       </span>
-      <Chip neutral>window · 5 min</Chip>
+      <Chip neutral>window · {rangeLabel(range)}</Chip>
       {filters.map((f) => (
         <Chip key={`${f.key}_${f.value}`} onRemove={() => onRemove(f.key, f.value)}>
           <span className="text-faint">{f.keyLabel ?? keyLabelFor(f.key)} ·</span> {f.label ?? f.value}
         </Chip>
       ))}
-      {has ? (
-        <button
-          className="ml-auto font-mono text-[11px] text-dim hover:text-text px-2 py-1 border border-line"
-          onClick={onClear}
-        >
-          clear all
-        </button>
-      ) : (
-        <span className="ml-auto font-mono text-[11px] text-faint italic">
-          click any row to add a filter
-        </span>
-      )}
+      <span className="ml-auto flex items-center gap-3">
+        {has ? (
+          <button
+            className="font-mono text-[11px] text-dim hover:text-text px-2 py-1 border border-line"
+            onClick={onClear}
+          >
+            clear all
+          </button>
+        ) : (
+          <span className="font-mono text-[11px] text-faint italic">
+            click any row to add a filter
+          </span>
+        )}
+        <TimeRangeSelector range={range} onChange={onRangeChange} />
+      </span>
     </div>
   )
 }
@@ -137,10 +160,20 @@ function Panel({
 
 /* ----------------------------- Per-panel lists ----------------------------- */
 
-function TalkersList({ qs, onAdd }: { qs: URLSearchParams; onAdd: (f: Filter) => void }) {
+function TalkersList({
+  qs,
+  onAdd,
+  range,
+  rangeKey,
+}: {
+  qs: URLSearchParams
+  onAdd: (f: Filter) => void
+  range: TimeRangeArg
+  rangeKey: unknown
+}) {
   const q = useQuery({
-    queryKey: ['top-talkers', qs.toString()],
-    queryFn: () => api.topTalkers(qs, 300, 12),
+    queryKey: ['top-talkers', qs.toString(), rangeKey],
+    queryFn: () => api.topTalkers(qs, range, 12),
   })
   return (
     <ListShell loading={q.isLoading} empty={!q.data?.rows.length} error={q.error as Error | undefined}>
@@ -166,10 +199,20 @@ function TalkersList({ qs, onAdd }: { qs: URLSearchParams; onAdd: (f: Filter) =>
   )
 }
 
-function ServicesList({ qs, onAdd }: { qs: URLSearchParams; onAdd: (f: Filter) => void }) {
+function ServicesList({
+  qs,
+  onAdd,
+  range,
+  rangeKey,
+}: {
+  qs: URLSearchParams
+  onAdd: (f: Filter) => void
+  range: TimeRangeArg
+  rangeKey: unknown
+}) {
   const q = useQuery({
-    queryKey: ['top-services', qs.toString()],
-    queryFn: () => api.topServices(qs, 300, 12),
+    queryKey: ['top-services', qs.toString(), rangeKey],
+    queryFn: () => api.topServices(qs, range, 12),
   })
   return (
     <ListShell loading={q.isLoading} empty={!q.data?.rows.length} error={q.error as Error | undefined}>
@@ -207,10 +250,20 @@ function ServicesList({ qs, onAdd }: { qs: URLSearchParams; onAdd: (f: Filter) =
   )
 }
 
-function ProtocolsList({ qs, onAdd }: { qs: URLSearchParams; onAdd: (f: Filter) => void }) {
+function ProtocolsList({
+  qs,
+  onAdd,
+  range,
+  rangeKey,
+}: {
+  qs: URLSearchParams
+  onAdd: (f: Filter) => void
+  range: TimeRangeArg
+  rangeKey: unknown
+}) {
   const q = useQuery({
-    queryKey: ['top-protocols', qs.toString()],
-    queryFn: () => api.topProtocols(qs, 300),
+    queryKey: ['top-protocols', qs.toString(), rangeKey],
+    queryFn: () => api.topProtocols(qs, range),
   })
   const total = q.data?.rows.reduce((a, r) => a + r.bytes, 0) ?? 0
   return (
@@ -239,13 +292,17 @@ function ProtocolsList({ qs, onAdd }: { qs: URLSearchParams; onAdd: (f: Filter) 
 function ConversationsList({
   qs,
   onAdd,
+  range,
+  rangeKey,
 }: {
   qs: URLSearchParams
   onAdd: (f: Filter) => void
+  range: TimeRangeArg
+  rangeKey: unknown
 }) {
   const q = useQuery({
-    queryKey: ['top-conversations', qs.toString()],
-    queryFn: () => api.topConversations(qs, 300, 12),
+    queryKey: ['top-conversations', qs.toString(), rangeKey],
+    queryFn: () => api.topConversations(qs, range, 12),
   })
   return (
     <ListShell loading={q.isLoading} empty={!q.data?.rows.length} error={q.error as Error | undefined}>

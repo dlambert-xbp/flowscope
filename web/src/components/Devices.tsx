@@ -3,6 +3,14 @@ import { Fragment, useState, type ReactNode } from 'react'
 import { api, fmt, labelExporter, labelInterface } from '../api'
 import type { Device, DeviceInventory, InterfaceRow, RecentFlow } from '../api'
 import { InterfaceChart } from './InterfaceChart'
+import {
+  rangeLabel,
+  rangeSeconds,
+  toApi,
+  useTimeRange,
+  type TimeRange,
+} from '../timeRange'
+import { TimeRangeSelector } from './TimeRangeSelector'
 
 // TwoLine renders a primary value with a smaller, faint secondary
 // underneath. Used everywhere the SNMP enrichment exposes a
@@ -36,10 +44,12 @@ function TwoLine({
 // (model, OS, uptime, location) lands in a later slice; for now the
 // view shows what we know from observed flows + counter samples.
 export function Devices() {
+  const tr = useTimeRange('dv')
+  const apiRange = toApi(tr.range)
   const list = useQuery({
-    queryKey: ['devices'],
-    queryFn: () => api.devices(300),
-    refetchInterval: 5000,
+    queryKey: ['devices', tr.queryKey],
+    queryFn: () => api.devices(apiRange),
+    refetchInterval: tr.range.kind === 'preset' ? 5000 : false,
   })
   const devices = list.data?.devices ?? []
   const [selected, setSelected] = useState<string | null>(null)
@@ -56,8 +66,14 @@ export function Devices() {
         selected={selected}
         onSelect={setSelected}
         loading={list.isLoading}
+        range={tr.range}
       />
-      <Feature exporter={selected} />
+      <Feature
+        exporter={selected}
+        range={tr.range}
+        onRangeChange={tr.set}
+        rangeKey={tr.queryKey}
+      />
     </div>
   )
 }
@@ -69,11 +85,13 @@ function Directory({
   selected,
   onSelect,
   loading,
+  range,
 }: {
   devices: Device[]
   selected: string | null
   onSelect: (e: string) => void
   loading: boolean
+  range: TimeRange
 }) {
   const [filter, setFilter] = useState('')
   const filtered = devices.filter((d) =>
@@ -107,6 +125,7 @@ function Directory({
             d={d}
             active={d.exporter === selected}
             onSelect={() => onSelect(d.exporter)}
+            seconds={rangeSeconds(range)}
           />
         ))}
       </div>
@@ -118,10 +137,12 @@ function DirectoryRow({
   d,
   active,
   onSelect,
+  seconds,
 }: {
   d: Device
   active: boolean
   onSelect: () => void
+  seconds: number
 }) {
   const since = secondsSince(d.last_seen)
   const dot =
@@ -142,7 +163,7 @@ function DirectoryRow({
         )}
       </div>
       <span className="ml-auto font-mono text-[10.5px] text-faint shrink-0 tabular">
-        {fmt.bps((d.bytes * 8) / 300)}
+        {fmt.bps((d.bytes * 8) / Math.max(1, seconds))}
       </span>
     </button>
   )
@@ -152,7 +173,17 @@ function DirectoryRow({
 
 type SubTab = 'summary' | 'interfaces' | 'flows'
 
-function Feature({ exporter }: { exporter: string | null }) {
+function Feature({
+  exporter,
+  range,
+  onRangeChange,
+  rangeKey,
+}: {
+  exporter: string | null
+  range: TimeRange
+  onRangeChange: (r: TimeRange) => void
+  rangeKey: unknown
+}) {
   const [sub, setSub] = useState<SubTab>('summary')
   if (!exporter) {
     return (
@@ -163,22 +194,38 @@ function Feature({ exporter }: { exporter: string | null }) {
   }
   return (
     <article className="overflow-auto">
-      <FeatureHeader exporter={exporter} />
+      <FeatureHeader
+        exporter={exporter}
+        range={range}
+        onRangeChange={onRangeChange}
+        rangeKey={rangeKey}
+      />
       <SubTabs active={sub} onChange={setSub} />
       <div>
-        {sub === 'summary' && <SummaryTab exporter={exporter} />}
-        {sub === 'interfaces' && <InterfacesTab exporter={exporter} />}
+        {sub === 'summary' && <SummaryTab exporter={exporter} range={range} rangeKey={rangeKey} />}
+        {sub === 'interfaces' && <InterfacesTab exporter={exporter} range={range} rangeKey={rangeKey} />}
         {sub === 'flows' && <FlowsTab exporter={exporter} />}
       </div>
     </article>
   )
 }
 
-function FeatureHeader({ exporter }: { exporter: string }) {
+function FeatureHeader({
+  exporter,
+  range,
+  onRangeChange,
+  rangeKey,
+}: {
+  exporter: string
+  range: TimeRange
+  onRangeChange: (r: TimeRange) => void
+  rangeKey: unknown
+}) {
+  const apiRange = toApi(range)
   const q = useQuery({
-    queryKey: ['device', exporter],
-    queryFn: () => api.device(exporter, 300),
-    refetchInterval: 5000,
+    queryKey: ['device', exporter, rangeKey],
+    queryFn: () => api.device(exporter, apiRange),
+    refetchInterval: range.kind === 'preset' ? 5000 : false,
   })
   const inv = useQuery({
     queryKey: ['device-inventory', exporter],
@@ -214,6 +261,9 @@ function FeatureHeader({ exporter }: { exporter: string }) {
             snmp {fmt.time(i.polled_at).slice(11, 19)}Z
           </span>
         )}
+        <span className="ml-auto normal-case">
+          <TimeRangeSelector range={range} onChange={onRangeChange} />
+        </span>
       </div>
       <h1 className="font-mono text-[26px] font-semibold tracking-tight text-text leading-[1.1]">
         {headline}
@@ -254,19 +304,21 @@ function FeatureHeader({ exporter }: { exporter: string }) {
           </>
         )}
       </p>
-      <SpecRow d={d} i={i} />
+      <SpecRow d={d} i={i} range={range} />
     </header>
   )
 }
 
-function SpecRow({ d, i }: { d?: Device; i?: DeviceInventory }) {
+function SpecRow({ d, i, range }: { d?: Device; i?: DeviceInventory; range: TimeRange }) {
+  const seconds = Math.max(1, rangeSeconds(range))
+  const winLabel = rangeLabel(range)
   const cells: { k: string; v: string; mono?: boolean }[] = [
     { k: 'address', v: d?.exporter ?? '—', mono: true },
     { k: 'model', v: i ? vendorOID(i.sys_object_id) : '—' },
     { k: 'snmp ifaces', v: i ? fmt.num(i.iface_count) : '—', mono: true },
     { k: 'flow ifaces', v: d ? fmt.num(d.iface_count) : '—', mono: true },
-    { k: 'volume · 5m', v: d ? fmt.bytes(d.bytes) : '—' },
-    { k: 'avg rate', v: d ? fmt.bps((d.bytes * 8) / 300) : '—' },
+    { k: `volume · ${winLabel}`, v: d ? fmt.bytes(d.bytes) : '—' },
+    { k: 'avg rate', v: d ? fmt.bps((d.bytes * 8) / seconds) : '—' },
   ]
   return (
     <div className="grid grid-cols-3 md:grid-cols-6 mt-4 border-t border-l border-line">
@@ -324,7 +376,16 @@ function Tab({
 
 /* ----------------------------- Summary tab ----------------------------- */
 
-function SummaryTab({ exporter }: { exporter: string }) {
+function SummaryTab({
+  exporter,
+  range,
+  rangeKey,
+}: {
+  exporter: string
+  range: TimeRange
+  rangeKey: unknown
+}) {
+  const winLabel = rangeLabel(range)
   return (
     <div className="px-6 py-5 space-y-5">
       <Section title="Inventory" sub="snmp · v2c" right="SOURCE · SNMP">
@@ -333,8 +394,8 @@ function SummaryTab({ exporter }: { exporter: string }) {
       <Section title="Recent activity" sub="last 60s of flows">
         <RecentFlowsMini exporter={exporter} limit={6} />
       </Section>
-      <Section title="Top interfaces" sub="counter samples · 5 min" right="SOURCE · COUNTERS">
-        <InterfacesMini exporter={exporter} />
+      <Section title="Top interfaces" sub={`counter samples · ${winLabel}`} right="SOURCE · COUNTERS">
+        <InterfacesMini exporter={exporter} range={range} rangeKey={rangeKey} />
       </Section>
     </div>
   )
@@ -439,11 +500,20 @@ function RecentFlowsMini({ exporter, limit }: { exporter: string; limit: number 
   )
 }
 
-function InterfacesMini({ exporter }: { exporter: string }) {
+function InterfacesMini({
+  exporter,
+  range,
+  rangeKey,
+}: {
+  exporter: string
+  range: TimeRange
+  rangeKey: unknown
+}) {
+  const apiRange = toApi(range)
   const q = useQuery({
-    queryKey: ['device-ifaces', exporter],
-    queryFn: () => api.interfaces(300, exporter),
-    refetchInterval: 5000,
+    queryKey: ['device-ifaces', exporter, rangeKey],
+    queryFn: () => api.interfaces(apiRange, exporter),
+    refetchInterval: range.kind === 'preset' ? 5000 : false,
   })
   const ifaces = q.data?.interfaces ?? []
   if (q.isLoading) return <p className="text-dim font-mono text-[12px]">loading…</p>
@@ -497,12 +567,22 @@ function InterfacesMini({ exporter }: { exporter: string }) {
 
 /* ----------------------------- Interfaces tab ----------------------------- */
 
-function InterfacesTab({ exporter }: { exporter: string }) {
+function InterfacesTab({
+  exporter,
+  range,
+  rangeKey,
+}: {
+  exporter: string
+  range: TimeRange
+  rangeKey: unknown
+}) {
   const [activeIfindex, setActiveIfindex] = useState<number | null>(null)
+  const apiRange = toApi(range)
+  const winLabel = rangeLabel(range)
   const q = useQuery({
-    queryKey: ['device-ifaces-full', exporter],
-    queryFn: () => api.interfaces(300, exporter),
-    refetchInterval: 5000,
+    queryKey: ['device-ifaces-full', exporter, rangeKey],
+    queryFn: () => api.interfaces(apiRange, exporter),
+    refetchInterval: range.kind === 'preset' ? 5000 : false,
   })
   const ifaces = q.data?.interfaces ?? []
   return (
@@ -512,7 +592,7 @@ function InterfacesTab({ exporter }: { exporter: string }) {
           All interfaces
         </span>
         <span className="font-mono text-[11px] text-faint">
-          {q.isLoading ? 'loading…' : `${ifaces.length} active · 5 min`}
+          {q.isLoading ? 'loading…' : `${ifaces.length} active · ${winLabel}`}
         </span>
         <span className="ml-auto font-mono text-[10px] tracking-[0.06em] text-accent">
           SOURCE · COUNTERS
@@ -571,7 +651,7 @@ function InterfacesTab({ exporter }: { exporter: string }) {
                   {isActive && (
                     <tr>
                       <td colSpan={7} style={{ padding: 0, borderBottom: 'none' }}>
-                        <InterfaceChart exporter={exporter} ifindex={i.ifindex} />
+                        <InterfaceChart exporter={exporter} ifindex={i.ifindex} range={range} />
                       </td>
                     </tr>
                   )}
