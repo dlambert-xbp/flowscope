@@ -873,7 +873,45 @@ type TopService struct {
 	DstPort uint16 `json:"dst_port"`
 	Proto   uint8  `json:"proto"`
 	Bytes   uint64 `json:"bytes"`
+	Packets uint64 `json:"packets"`
 	Flows   uint64 `json:"flows"`
+}
+
+// TopNSort is the sort dimension for top-N panels: bytes (default),
+// packets, or flows. Whitelisted server-side so the column can be
+// inlined into the SQL ORDER BY safely.
+type TopNSort string
+
+const (
+	TopNSortBytes   TopNSort = "bytes"
+	TopNSortPackets TopNSort = "packets"
+	TopNSortFlows   TopNSort = "flows"
+)
+
+// ParseTopNSort accepts the raw query-string value and returns a
+// whitelisted TopNSort. Empty or unknown values fall back to bytes.
+func ParseTopNSort(s string) TopNSort {
+	switch s {
+	case string(TopNSortPackets):
+		return TopNSortPackets
+	case string(TopNSortFlows):
+		return TopNSortFlows
+	default:
+		return TopNSortBytes
+	}
+}
+
+// orderColumn turns a whitelisted sort enum into the SQL aggregate
+// expression. Always returns a safe column name — never user input.
+func (s TopNSort) orderColumn() string {
+	switch s {
+	case TopNSortPackets:
+		return "packets"
+	case TopNSortFlows:
+		return "flows"
+	default:
+		return "bytes"
+	}
 }
 
 // TopProtocol is one row per IP protocol number with share-of-total.
@@ -899,9 +937,10 @@ type TopConversation struct {
 	LastSeen time.Time `json:"last_seen"`
 }
 
-// QueryTopTalkers returns the N largest src→dst byte aggregates over
-// the trailing window, narrowed by the supplied FlowFilter.
-func QueryTopTalkers(ctx context.Context, conn driver.Conn, tr TimeRange, limit int, f FlowFilter) ([]TopTalker, error) {
+// QueryTopTalkers returns the N largest src→dst aggregates over the
+// trailing window, narrowed by the supplied FlowFilter. The sort
+// dimension (bytes / packets / flows) is whitelisted by the caller.
+func QueryTopTalkers(ctx context.Context, conn driver.Conn, tr TimeRange, limit int, sort TopNSort, f FlowFilter) ([]TopTalker, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 20
 	}
@@ -917,7 +956,7 @@ SELECT src_addr, dst_addr,
 FROM flows
 WHERE ` + whereSQL + `
 GROUP BY src_addr, dst_addr
-ORDER BY bytes DESC
+ORDER BY ` + sort.orderColumn() + ` DESC
 LIMIT ?`
 	args = append(args, uint64(limit))
 	rows, err := conn.Query(ctx, q, args...)
@@ -942,9 +981,10 @@ LIMIT ?`
 	return out, rows.Err()
 }
 
-// QueryTopServices returns the N largest (dst_port, proto) byte
-// aggregates over the trailing window, narrowed by the FlowFilter.
-func QueryTopServices(ctx context.Context, conn driver.Conn, tr TimeRange, limit int, f FlowFilter) ([]TopService, error) {
+// QueryTopServices returns the N largest (dst_port, proto) aggregates
+// over the trailing window, narrowed by the FlowFilter. The sort
+// dimension (bytes / packets / flows) is whitelisted by the caller.
+func QueryTopServices(ctx context.Context, conn driver.Conn, tr TimeRange, limit int, sort TopNSort, f FlowFilter) ([]TopService, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 20
 	}
@@ -954,12 +994,13 @@ func QueryTopServices(ctx context.Context, conn driver.Conn, tr TimeRange, limit
 	}
 	q := `
 SELECT dst_port, proto,
-       sum(bytes) AS bytes,
-       count()    AS flows
+       sum(bytes)   AS bytes,
+       sum(packets) AS packets,
+       count()      AS flows
 FROM flows
 WHERE ` + whereSQL + `
 GROUP BY dst_port, proto
-ORDER BY bytes DESC
+ORDER BY ` + sort.orderColumn() + ` DESC
 LIMIT ?`
 	args = append(args, uint64(limit))
 	rows, err := conn.Query(ctx, q, args...)
@@ -970,7 +1011,7 @@ LIMIT ?`
 	out := make([]TopService, 0, limit)
 	for rows.Next() {
 		var s TopService
-		if err := rows.Scan(&s.DstPort, &s.Proto, &s.Bytes, &s.Flows); err != nil {
+		if err := rows.Scan(&s.DstPort, &s.Proto, &s.Bytes, &s.Packets, &s.Flows); err != nil {
 			return nil, fmt.Errorf("store: scan top service: %w", err)
 		}
 		out = append(out, s)
@@ -979,8 +1020,8 @@ LIMIT ?`
 }
 
 // QueryTopProtocols returns one row per IP protocol number, ordered by
-// total bytes desc, narrowed by the FlowFilter.
-func QueryTopProtocols(ctx context.Context, conn driver.Conn, tr TimeRange, f FlowFilter) ([]TopProtocol, error) {
+// the chosen sort dimension desc, narrowed by the FlowFilter.
+func QueryTopProtocols(ctx context.Context, conn driver.Conn, tr TimeRange, sort TopNSort, f FlowFilter) ([]TopProtocol, error) {
 	whereSQL, args, err := buildWhere(tr, f)
 	if err != nil {
 		return nil, err
@@ -993,7 +1034,7 @@ SELECT proto,
 FROM flows
 WHERE ` + whereSQL + `
 GROUP BY proto
-ORDER BY bytes DESC`
+ORDER BY ` + sort.orderColumn() + ` DESC`
 	rows, err := conn.Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("store: query top protocols: %w", err)
@@ -1011,8 +1052,9 @@ ORDER BY bytes DESC`
 }
 
 // QueryTopConversations returns the N largest 5-tuple aggregates over
-// the trailing window, narrowed by the FlowFilter.
-func QueryTopConversations(ctx context.Context, conn driver.Conn, tr TimeRange, limit int, f FlowFilter) ([]TopConversation, error) {
+// the trailing window, narrowed by the FlowFilter. The sort dimension
+// (bytes / packets / flows) is whitelisted by the caller.
+func QueryTopConversations(ctx context.Context, conn driver.Conn, tr TimeRange, limit int, sort TopNSort, f FlowFilter) ([]TopConversation, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 20
 	}
@@ -1029,7 +1071,7 @@ SELECT src_addr, dst_addr, src_port, dst_port, proto,
 FROM flows
 WHERE ` + whereSQL + `
 GROUP BY src_addr, dst_addr, src_port, dst_port, proto
-ORDER BY bytes DESC
+ORDER BY ` + sort.orderColumn() + ` DESC
 LIMIT ?`
 	args = append(args, uint64(limit))
 	rows, err := conn.Query(ctx, q, args...)

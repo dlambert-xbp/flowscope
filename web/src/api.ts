@@ -165,8 +165,11 @@ export type TopService = {
   dst_port: number
   proto: number
   bytes: number
+  packets: number
   flows: number
 }
+
+export type TopNSort = 'bytes' | 'packets' | 'flows'
 
 export type TopProtocol = {
   proto: number
@@ -191,6 +194,7 @@ export type TopResponse<T> = {
   count: number
   rows: T[]
   source: string
+  sort?: TopNSort
   window: string
 }
 
@@ -493,21 +497,52 @@ export const api = {
     if (!r.ok) throw new Error(`test ${exporter} → ${r.status}`)
     return r.json()
   },
-  topTalkers: (filters: URLSearchParams, range?: TimeRangeArg, limit = 20) =>
+  topTalkers: (
+    filters: URLSearchParams,
+    range?: TimeRangeArg,
+    limit = 20,
+    sort: TopNSort = 'bytes',
+  ) =>
     getJSON<TopResponse<TopTalker>>(
-      withFilters(`/api/top/talkers?${timeQuery(range)}&limit=${limit}`, filters),
+      withFilters(
+        `/api/top/talkers?${timeQuery(range)}&limit=${limit}&sort=${sort}`,
+        filters,
+      ),
     ),
-  topServices: (filters: URLSearchParams, range?: TimeRangeArg, limit = 20) =>
+  topServices: (
+    filters: URLSearchParams,
+    range?: TimeRangeArg,
+    limit = 20,
+    sort: TopNSort = 'bytes',
+  ) =>
     getJSON<TopResponse<TopService>>(
-      withFilters(`/api/top/services?${timeQuery(range)}&limit=${limit}`, filters),
+      withFilters(
+        `/api/top/services?${timeQuery(range)}&limit=${limit}&sort=${sort}`,
+        filters,
+      ),
     ),
-  topProtocols: (filters: URLSearchParams, range?: TimeRangeArg) =>
+  topProtocols: (
+    filters: URLSearchParams,
+    range?: TimeRangeArg,
+    sort: TopNSort = 'bytes',
+  ) =>
     getJSON<TopResponse<TopProtocol>>(
-      withFilters(`/api/top/protocols?${timeQuery(range)}`, filters),
+      withFilters(
+        `/api/top/protocols?${timeQuery(range)}&sort=${sort}`,
+        filters,
+      ),
     ),
-  topConversations: (filters: URLSearchParams, range?: TimeRangeArg, limit = 20) =>
+  topConversations: (
+    filters: URLSearchParams,
+    range?: TimeRangeArg,
+    limit = 20,
+    sort: TopNSort = 'bytes',
+  ) =>
     getJSON<TopResponse<TopConversation>>(
-      withFilters(`/api/top/conversations?${timeQuery(range)}&limit=${limit}`, filters),
+      withFilters(
+        `/api/top/conversations?${timeQuery(range)}&limit=${limit}&sort=${sort}`,
+        filters,
+      ),
     ),
 
   /* --------------------- Services --------------------- */
