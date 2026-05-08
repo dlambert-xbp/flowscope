@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { Fragment, useState, type ReactNode } from 'react'
+import { Fragment, useEffect, useState, type ReactNode } from 'react'
 import { api, fmt, labelExporter, labelInterface } from '../api'
 import type { Device, DeviceInventory, InterfaceRow, RecentFlow } from '../api'
 import { InterfaceChart } from './InterfaceChart'
@@ -9,6 +9,70 @@ import {
   toApi,
   type TimeRange,
 } from '../timeRange'
+import { Th, useTableSort, type SortColumns } from './sortable'
+import { formatModel } from '../lib/oidModels'
+
+const DEVICE_IFACE_COLS: SortColumns<InterfaceRow> = {
+  interface: (r) => labelInterface(r).primary,
+  in_latest: (r) => r.in_bps_latest,
+  out_latest: (r) => r.out_bps_latest,
+  in_peak: (r) => r.in_bps_peak,
+  out_peak: (r) => r.out_bps_peak,
+  last_seen: (r) => r.last_seen,
+}
+
+const DEVICE_FLOW_COLS: SortColumns<RecentFlow> = {
+  observed: (r) => r.observed,
+  source: (r) => r.source,
+  src_dst: (r) => `${r.src_addr}:${r.src_port} ${r.dst_addr}:${r.dst_port}`,
+  proto: (r) => r.proto,
+  packets: (r) => r.packets,
+  bytes: (r) => r.bytes,
+}
+
+const RAIL_WIDTH_KEY = 'flowscope.devices.railWidth'
+const RAIL_WIDTH_DEFAULT = 280
+const RAIL_WIDTH_MIN = 220
+const RAIL_WIDTH_MAX = 480
+
+function useResizableWidth(key: string, def: number, min: number, max: number) {
+  const [width, setWidth] = useState<number>(() => {
+    try {
+      const saved = Number(localStorage.getItem(key))
+      if (Number.isFinite(saved) && saved >= min && saved <= max) return saved
+    } catch {
+      // localStorage unavailable (private mode, SSR) — fall through to default
+    }
+    return def
+  })
+  useEffect(() => {
+    try {
+      localStorage.setItem(key, String(width))
+    } catch {
+      // ignore
+    }
+  }, [key, width])
+  const onMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault()
+    const startX = e.clientX
+    const startW = width
+    const onMove = (ev: MouseEvent) => {
+      const next = Math.max(min, Math.min(max, startW + (ev.clientX - startX)))
+      setWidth(next)
+    }
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove)
+      document.removeEventListener('mouseup', onUp)
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+    }
+    document.addEventListener('mousemove', onMove)
+    document.addEventListener('mouseup', onUp)
+    document.body.style.cursor = 'col-resize'
+    document.body.style.userSelect = 'none'
+  }
+  return { width, onMouseDown }
+}
 
 // TwoLine renders a primary value with a smaller, faint secondary
 // underneath. Used everywhere the SNMP enrichment exposes a
@@ -62,14 +126,22 @@ export function Devices({
     setSelected(devices[0].exporter)
   }
 
+  const rail = useResizableWidth(
+    RAIL_WIDTH_KEY,
+    RAIL_WIDTH_DEFAULT,
+    RAIL_WIDTH_MIN,
+    RAIL_WIDTH_MAX,
+  )
+
   return (
-    <div className="grid h-full" style={{ gridTemplateColumns: '280px 1fr' }}>
+    <div className="grid h-full" style={{ gridTemplateColumns: `${rail.width}px 1fr` }}>
       <Directory
         devices={devices}
         selected={selected}
         onSelect={setSelected}
         loading={list.isLoading}
         range={range}
+        onResizeStart={rail.onMouseDown}
       />
       <Feature
         exporter={selected}
@@ -88,19 +160,21 @@ function Directory({
   onSelect,
   loading,
   range,
+  onResizeStart,
 }: {
   devices: Device[]
   selected: string | null
   onSelect: (e: string) => void
   loading: boolean
   range: TimeRange
+  onResizeStart: (e: React.MouseEvent) => void
 }) {
   const [filter, setFilter] = useState('')
   const filtered = devices.filter((d) =>
     filter === '' ? true : d.exporter.includes(filter),
   )
   return (
-    <aside className="border-r border-line bg-surface flex flex-col overflow-hidden">
+    <aside className="relative border-r border-line bg-surface flex flex-col overflow-hidden">
       <div className="p-3 border-b border-line">
         <input
           placeholder="filter exporters…"
@@ -130,6 +204,15 @@ function Directory({
             seconds={rangeSeconds(range)}
           />
         ))}
+      </div>
+      <div
+        role="separator"
+        aria-label="Resize directory"
+        aria-orientation="vertical"
+        onMouseDown={onResizeStart}
+        className="absolute top-0 right-0 h-full w-1.5 -mr-[3px] cursor-col-resize z-10 group"
+      >
+        <div className="h-full w-px ml-auto bg-line group-hover:bg-accent group-active:bg-accent transition-colors" />
       </div>
     </aside>
   )
@@ -304,7 +387,7 @@ function SpecRow({ d, i, range }: { d?: Device; i?: DeviceInventory; range: Time
   const winLabel = rangeLabel(range)
   const cells: { k: string; v: string; mono?: boolean }[] = [
     { k: 'address', v: d?.exporter ?? '—', mono: true },
-    { k: 'model', v: i ? vendorOID(i.sys_object_id) : '—' },
+    { k: 'model', v: i ? formatModel(i.sys_object_id) : '—' },
     { k: 'snmp ifaces', v: i ? fmt.num(i.iface_count) : '—', mono: true },
     { k: 'flow ifaces', v: d ? fmt.num(d.iface_count) : '—', mono: true },
     { k: `volume · ${winLabel}`, v: d ? fmt.bytes(d.bytes) : '—' },
@@ -315,12 +398,15 @@ function SpecRow({ d, i, range }: { d?: Device; i?: DeviceInventory; range: Time
       {cells.map((c, i) => (
         <div
           key={i}
-          className="px-3 py-2.5 border-r border-b border-line"
+          className="px-3 py-2.5 border-r border-b border-line min-w-0 overflow-hidden"
         >
           <div className="text-[10px] uppercase tracking-[0.1em] text-faint font-semibold mb-0.5">
             {c.k}
           </div>
-          <div className={`text-[14px] tabular text-text ${c.mono ? 'font-mono' : ''}`}>
+          <div
+            title={c.v}
+            className={`text-[14px] tabular text-text truncate ${c.mono ? 'font-mono' : ''}`}
+          >
             {c.v}
           </div>
         </div>
@@ -381,7 +467,10 @@ function SummaryTab({
       <Section title="Inventory" sub="snmp · v2c" right="SOURCE · SNMP">
         <InventoryPanel exporter={exporter} />
       </Section>
-      <Section title="Recent activity" sub="last 60s of flows">
+      <Section
+        title="Recent flows reported by this exporter"
+        sub="last 60s · forwarded traffic, not addressed to this device"
+      >
         <RecentFlowsMini exporter={exporter} limit={6} />
       </Section>
       <Section title="Top interfaces" sub={`counter samples · ${winLabel}`} right="SOURCE · COUNTERS">
@@ -424,11 +513,17 @@ function InventoryPanel({ exporter }: { exporter: string }) {
   return (
     <div className="grid grid-cols-2 md:grid-cols-4 border-l border-t border-line">
       {cells.map((c, idx) => (
-        <div key={idx} className="px-3 py-2.5 border-r border-b border-line">
+        <div
+          key={idx}
+          className="px-3 py-2.5 border-r border-b border-line min-w-0 overflow-hidden"
+        >
           <div className="text-[10px] uppercase tracking-[0.1em] text-faint font-semibold mb-0.5">
             {c.k}
           </div>
-          <div className={`text-[13px] text-text leading-[1.3] ${c.mono ? 'font-mono' : ''}`}>
+          <div
+            title={c.v}
+            className={`text-[13px] text-text leading-[1.3] truncate ${c.mono ? 'font-mono' : ''}`}
+          >
             {c.v}
           </div>
         </div>
@@ -506,6 +601,12 @@ function InterfacesMini({
     refetchInterval: range.kind === 'preset' ? 5000 : false,
   })
   const ifaces = q.data?.interfaces ?? []
+  // Mini view shows top 10 by current ingress rate so the user sees
+  // the busy interfaces; the full sortable table lives on the
+  // Interfaces sub-tab.
+  const top = [...ifaces]
+    .sort((a, b) => b.in_bps_latest - a.in_bps_latest)
+    .slice(0, 10)
   if (q.isLoading) return <p className="text-dim font-mono text-[12px]">loading…</p>
   if (ifaces.length === 0) {
     return (
@@ -535,7 +636,7 @@ function InterfacesMini({
         </tr>
       </thead>
       <tbody>
-        {ifaces.slice(0, 10).map((i: InterfaceRow) => {
+        {top.map((i: InterfaceRow) => {
           const lbl = labelInterface(i)
           return (
             <tr key={i.ifindex} className="hover:bg-surface">
@@ -575,6 +676,19 @@ function InterfacesTab({
     refetchInterval: range.kind === 'preset' ? 5000 : false,
   })
   const ifaces = q.data?.interfaces ?? []
+  // Default: sort by interface name asc — gives natural ABC order
+  // (Ethernet1 < Ethernet2 < … < Ethernet10 < Port-Channel1 < …)
+  // because useTableSort uses localeCompare(numeric: true).
+  const { sortedRows, sortKey, sortDir, toggle } = useTableSort(ifaces, DEVICE_IFACE_COLS, {
+    key: 'interface',
+    dir: 'asc',
+  })
+  const thProps = (k: string) => ({
+    sortKey: k,
+    active: sortKey === k,
+    dir: sortDir,
+    onToggle: toggle,
+  })
   return (
     <div>
       <div className="flex items-baseline gap-3 px-4 py-3 border-b border-line">
@@ -605,17 +719,17 @@ function InterfacesTab({
           </colgroup>
           <thead>
             <tr>
-              <th>interface</th>
-              <th className="r">in (latest)</th>
-              <th className="r">out (latest)</th>
-              <th className="r">in peak</th>
-              <th className="r">out peak</th>
-              <th className="r">last seen</th>
+              <Th {...thProps('interface')}>interface</Th>
+              <Th {...thProps('in_latest')} align="r">in (latest)</Th>
+              <Th {...thProps('out_latest')} align="r">out (latest)</Th>
+              <Th {...thProps('in_peak')} align="r">in peak</Th>
+              <Th {...thProps('out_peak')} align="r">out peak</Th>
+              <Th {...thProps('last_seen')} align="r">last seen</Th>
               <th />
             </tr>
           </thead>
           <tbody>
-            {ifaces.map((i: InterfaceRow) => {
+            {sortedRows.map((i: InterfaceRow) => {
               const lbl = labelInterface(i)
               const isActive = activeIfindex === i.ifindex
               return (
@@ -664,11 +778,21 @@ function FlowsTab({ exporter }: { exporter: string }) {
     refetchInterval: 2000,
   })
   const flows = q.data?.flows ?? []
+  const { sortedRows, sortKey, sortDir, toggle } = useTableSort(flows, DEVICE_FLOW_COLS, {
+    key: 'observed',
+    dir: 'desc',
+  })
+  const thProps = (k: string) => ({
+    sortKey: k,
+    active: sortKey === k,
+    dir: sortDir,
+    onToggle: toggle,
+  })
   return (
     <div>
       <div className="flex items-baseline gap-3 px-4 py-3 border-b border-line">
         <span className="text-[11px] uppercase tracking-[0.1em] text-dim font-semibold">
-          Recent flows
+          Recent flows reported by this exporter
         </span>
         <span className="font-mono text-[11px] text-faint">
           {q.isLoading ? 'loading…' : `${flows.length} most recent`}
@@ -677,6 +801,11 @@ function FlowsTab({ exporter }: { exporter: string }) {
           REFRESH · 2s
         </span>
       </div>
+      <p className="px-4 py-2 text-[11.5px] text-dim border-b border-line bg-surface leading-[1.5]">
+        Switches export flows for traffic they <span className="text-text">forward</span>, not just
+        traffic addressed to themselves. Source and destination IPs here are endpoints elsewhere on
+        the network — this device just observed the conversation.
+      </p>
       {flows.length === 0 ? (
         <div className="px-4 py-8 text-center text-[12px] font-mono text-dim">
           no flows yet for this exporter
@@ -693,16 +822,16 @@ function FlowsTab({ exporter }: { exporter: string }) {
           </colgroup>
           <thead>
             <tr>
-              <th>time</th>
-              <th>source</th>
-              <th>src → dst</th>
-              <th>proto</th>
-              <th className="r">packets</th>
-              <th className="r">bytes</th>
+              <Th {...thProps('observed')}>time</Th>
+              <Th {...thProps('source')}>source</Th>
+              <Th {...thProps('src_dst')}>src → dst</Th>
+              <Th {...thProps('proto')}>proto</Th>
+              <Th {...thProps('packets')} align="r">packets</Th>
+              <Th {...thProps('bytes')} align="r">bytes</Th>
             </tr>
           </thead>
           <tbody>
-            {flows.map((f: RecentFlow, i: number) => (
+            {sortedRows.map((f: RecentFlow, i: number) => (
               <tr key={i} className="hover:bg-surface">
                 <td className="n text-faint">{fmt.time(f.observed).slice(11, 23)}</td>
                 <td className="n text-dim">{f.source}</td>
@@ -753,17 +882,3 @@ function formatUptime(ms: number): string {
   return `${m}m`
 }
 
-// vendorOID maps the vendor-prefix portion of sysObjectID to a human
-// label. Falls back to the raw OID. The full IETF / IANA enterprise
-// registry is huge; a tiny lookup covers the common cases.
-function vendorOID(oid: string): string {
-  if (!oid) return '—'
-  if (oid.startsWith('1.3.6.1.4.1.9.')) return 'Cisco · ' + oid
-  if (oid.startsWith('1.3.6.1.4.1.2636.')) return 'Juniper · ' + oid
-  if (oid.startsWith('1.3.6.1.4.1.30065.')) return 'Arista · ' + oid
-  if (oid.startsWith('1.3.6.1.4.1.4526.')) return 'Netgear · ' + oid
-  if (oid.startsWith('1.3.6.1.4.1.890.')) return 'Zyxel · ' + oid
-  if (oid.startsWith('1.3.6.1.4.1.6027.')) return 'Force10/Dell · ' + oid
-  if (oid.startsWith('1.3.6.1.4.1.674.')) return 'Dell · ' + oid
-  return oid
-}
