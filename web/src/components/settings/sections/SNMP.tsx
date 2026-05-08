@@ -4,6 +4,26 @@ import { api, fmt, type SNMPCredential, type SNMPTestResult } from '../../../api
 import { useAppConfirm } from '../../ui/appConfirm'
 import { SectionHeader } from '../Shell'
 import { Banner, Btn, Empty, Field, Section, StyleScope, Tag } from '../shared'
+import { useTableSort, type SortColumns, type SortDir } from '../../sortable'
+
+const CRED_COLS: SortColumns<SNMPCredential> = {
+  exporter: (r) => r.exporter,
+  version: (r) => r.version,
+  identity: (r) => (r.version === 'v3' ? r.v3_username || '' : 'community'),
+  secrets: (r) => {
+    if (r.version === 'v3') {
+      const parts = [
+        r.has_auth_pass ? 'auth' : null,
+        r.has_priv_pass ? 'priv' : null,
+      ].filter(Boolean)
+      return parts.length ? parts.join(' + ') : 'noAuthNoPriv'
+    }
+    return r.has_community ? 1 : 0
+  },
+  port: (r) => r.port,
+  interval: (r) => r.interval_sec,
+  updated: (r) => r.updated_at || '',
+}
 
 // SNMP: per-exporter v2c / v3 credential bindings. Lifted from the
 // previous single-page Settings.tsx; same backend endpoints, new
@@ -72,27 +92,10 @@ export function SNMP() {
             </Empty>
           )}
           {list.data && list.data.credentials.length > 0 && (
-            <div className="border border-line">
-              <table className="w-full">
-                <thead>
-                  <tr className="border-b border-line bg-raise">
-                    <Th>exporter</Th>
-                    <Th>version</Th>
-                    <Th>identity</Th>
-                    <Th>secrets</Th>
-                    <Th className="r">port</Th>
-                    <Th className="r">interval</Th>
-                    <Th>updated</Th>
-                    <Th />
-                  </tr>
-                </thead>
-                <tbody>
-                  {list.data.credentials.map((c) => (
-                    <CredentialRow key={c.exporter} c={c} onEdit={() => setEditing(c)} />
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            <CredentialList
+              rows={list.data.credentials}
+              onEdit={(c) => setEditing(c)}
+            />
           )}
         </Section>
       )}
@@ -107,6 +110,86 @@ function Th({ children, className }: { children?: React.ReactNode; className?: s
     >
       {children}
     </th>
+  )
+}
+
+function SortTh({
+  sortKey,
+  active,
+  dir,
+  onToggle,
+  align,
+  children,
+}: {
+  sortKey: string
+  active: string | null
+  dir: SortDir
+  onToggle: (k: string) => void
+  align?: 'r'
+  children?: React.ReactNode
+}) {
+  const isActive = active === sortKey
+  const arrow = isActive ? (dir === 'asc' ? '▲' : '▼') : '↕'
+  return (
+    <th
+      className={`text-left text-[10.5px] uppercase tracking-[0.1em] text-faint font-mono font-semibold px-3 py-2 ${align === 'r' ? 'text-right' : ''}`}
+    >
+      <button
+        type="button"
+        onClick={() => onToggle(sortKey)}
+        className={`inline-flex items-center gap-1.5 ${align === 'r' ? 'flex-row-reverse' : ''} hover:text-text ${isActive ? 'text-text' : ''}`}
+      >
+        <span>{children}</span>
+        <span
+          aria-hidden
+          className={`text-[9px] ${isActive ? 'text-accent' : 'text-line'}`}
+        >
+          {arrow}
+        </span>
+      </button>
+    </th>
+  )
+}
+
+function CredentialList({
+  rows,
+  onEdit,
+}: {
+  rows: SNMPCredential[]
+  onEdit: (c: SNMPCredential) => void
+}) {
+  const { sortedRows, sortKey, sortDir, toggle } = useTableSort(rows, CRED_COLS, {
+    key: 'exporter',
+    dir: 'asc',
+  })
+  const props = (k: string) => ({
+    sortKey: k,
+    active: sortKey,
+    dir: sortDir,
+    onToggle: toggle,
+  })
+  return (
+    <div className="border border-line">
+      <table className="w-full">
+        <thead>
+          <tr className="border-b border-line bg-raise">
+            <SortTh {...props('exporter')}>exporter</SortTh>
+            <SortTh {...props('version')}>version</SortTh>
+            <SortTh {...props('identity')}>identity</SortTh>
+            <SortTh {...props('secrets')}>secrets</SortTh>
+            <SortTh {...props('port')} align="r">port</SortTh>
+            <SortTh {...props('interval')} align="r">interval</SortTh>
+            <SortTh {...props('updated')}>updated</SortTh>
+            <Th />
+          </tr>
+        </thead>
+        <tbody>
+          {sortedRows.map((c) => (
+            <CredentialRow key={c.exporter} c={c} onEdit={() => onEdit(c)} />
+          ))}
+        </tbody>
+      </table>
+    </div>
   )
 }
 
