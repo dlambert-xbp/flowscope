@@ -6,6 +6,7 @@ import { Flows } from './components/Flows'
 import { Devices } from './components/Devices'
 import { Alerts } from './components/Alerts'
 import { Settings } from './components/Settings'
+import { ThemeToggle } from './theme'
 
 type Tab = 'overview' | 'flows' | 'devices' | 'alerts' | 'settings'
 
@@ -122,7 +123,7 @@ function Bar({ tab, onTab }: { tab: Tab; onTab: (t: Tab) => void }) {
   return (
     <div
       className="grid items-center bg-ink border-b border-line"
-      style={{ gridTemplateColumns: '200px 1fr 320px 220px' }}
+      style={{ gridTemplateColumns: '200px 1fr 320px 320px' }}
     >
       <div className="flex items-center gap-3 px-4 h-full border-r border-line">
         <span className="relative w-4 h-4 border-[1.5px] border-accent">
@@ -151,6 +152,7 @@ function Bar({ tab, onTab }: { tab: Tab; onTab: (t: Tab) => void }) {
         </div>
       </div>
       <div className="flex items-center justify-end gap-3 px-4 h-full border-l border-line">
+        <ThemeToggle />
         <a className="text-faint text-[11px] hover:text-text" href="/metrics">/metrics</a>
         <span className="flex items-center gap-2 px-2 py-1 border border-line text-[12px]">
           <span className="font-medium">DL</span>
