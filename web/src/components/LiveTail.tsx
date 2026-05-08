@@ -1,6 +1,19 @@
 import { useQuery } from '@tanstack/react-query'
 import { api, fmt } from '../api'
+import type { RecentFlow } from '../api'
 import { ServiceLabel } from './ServiceLabel'
+import { Th, useTableSort, type SortColumns } from './sortable'
+
+const FLOW_COLS: SortColumns<RecentFlow> = {
+  observed: (r) => r.observed,
+  exporter: (r) => r.exporter_name || r.exporter,
+  source: (r) => r.source,
+  src_dst: (r) => `${r.src_addr}:${r.src_port} ${r.dst_addr}:${r.dst_port}`,
+  proto: (r) => r.proto,
+  service: (r) => r.dst_port,
+  packets: (r) => r.packets,
+  bytes: (r) => r.bytes,
+}
 
 export function LiveTail() {
   const recent = useQuery({
@@ -9,6 +22,16 @@ export function LiveTail() {
     refetchInterval: 2000,
   })
   const flows = recent.data?.flows ?? []
+  const { sortedRows, sortKey, sortDir, toggle } = useTableSort(flows, FLOW_COLS, {
+    key: 'observed',
+    dir: 'desc',
+  })
+  const thProps = (k: string) => ({
+    sortKey: k,
+    active: sortKey === k,
+    dir: sortDir,
+    onToggle: toggle,
+  })
   return (
     <section>
       <div className="flex items-baseline gap-3 px-4 py-3 border-b border-line">
@@ -40,18 +63,18 @@ export function LiveTail() {
           </colgroup>
           <thead>
             <tr>
-              <th>time</th>
-              <th>exporter</th>
-              <th>source</th>
-              <th>src → dst</th>
-              <th>proto</th>
-              <th>service</th>
-              <th className="r">packets</th>
-              <th className="r">bytes</th>
+              <Th {...thProps('observed')}>time</Th>
+              <Th {...thProps('exporter')}>exporter</Th>
+              <Th {...thProps('source')}>source</Th>
+              <Th {...thProps('src_dst')}>src → dst</Th>
+              <Th {...thProps('proto')}>proto</Th>
+              <Th {...thProps('service')}>service</Th>
+              <Th {...thProps('packets')} align="r">packets</Th>
+              <Th {...thProps('bytes')} align="r">bytes</Th>
             </tr>
           </thead>
           <tbody>
-            {flows.map((f, i) => (
+            {sortedRows.map((f, i) => (
               <tr key={i} className="hover:bg-surface">
                 <td className="n text-faint">{fmt.time(f.observed).slice(11, 23)}</td>
                 <td>
@@ -85,4 +108,3 @@ export function LiveTail() {
     </section>
   )
 }
-

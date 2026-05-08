@@ -3,6 +3,7 @@ import { fmt, labelExporter, labelInterface } from '../api'
 import type { InterfaceRow } from '../api'
 import { InterfaceChart } from './InterfaceChart'
 import { rangeLabel, type TimeRange, DEFAULT_TIME_RANGE } from '../timeRange'
+import { Th, useTableSort, type SortColumns } from './sortable'
 
 function TwoLine({
   primary,
@@ -23,6 +24,16 @@ function TwoLine({
   )
 }
 
+const IFACE_COLS: SortColumns<InterfaceRow> = {
+  exporter: (r) => labelExporter(r).primary,
+  interface: (r) => labelInterface(r).primary,
+  in_latest: (r) => r.in_bps_latest,
+  out_latest: (r) => r.out_bps_latest,
+  in_peak: (r) => r.in_bps_peak,
+  out_peak: (r) => r.out_bps_peak,
+  last_seen: (r) => r.last_seen,
+}
+
 export function Interfaces({
   rows,
   loading,
@@ -34,6 +45,16 @@ export function Interfaces({
 }) {
   const [active, setActive] = useState<{ exporter: string; ifindex: number } | null>(null)
   const winLabel = rangeLabel(range)
+  const { sortedRows, sortKey, sortDir, toggle } = useTableSort(rows, IFACE_COLS, {
+    key: 'in_latest',
+    dir: 'desc',
+  })
+  const thProps = (k: string) => ({
+    sortKey: k,
+    active: sortKey === k,
+    dir: sortDir,
+    onToggle: toggle,
+  })
 
   return (
     <section>
@@ -61,18 +82,18 @@ export function Interfaces({
           </colgroup>
           <thead>
             <tr>
-              <th>exporter</th>
-              <th>interface</th>
-              <th className="r">in latest</th>
-              <th className="r">out latest</th>
-              <th className="r">in peak</th>
-              <th className="r">out peak</th>
-              <th className="r">last seen</th>
+              <Th {...thProps('exporter')}>exporter</Th>
+              <Th {...thProps('interface')}>interface</Th>
+              <Th {...thProps('in_latest')} align="r">in latest</Th>
+              <Th {...thProps('out_latest')} align="r">out latest</Th>
+              <Th {...thProps('in_peak')} align="r">in peak</Th>
+              <Th {...thProps('out_peak')} align="r">out peak</Th>
+              <Th {...thProps('last_seen')} align="r">last seen</Th>
               <th />
             </tr>
           </thead>
           <tbody>
-            {rows.map((r) => {
+            {sortedRows.map((r) => {
               const isActive = active?.exporter === r.exporter && active?.ifindex === r.ifindex
               const eLbl = labelExporter(r)
               const iLbl = labelInterface(r)
@@ -143,4 +164,3 @@ function SourceBadge({ children }: { children: ReactNode }) {
     <span className="font-mono text-[10px] tracking-[0.06em] text-accent">{children}</span>
   )
 }
-
