@@ -1138,6 +1138,125 @@ LIMIT ?`
 	return out, rows.Err()
 }
 
+// FlowsListSort is the sort dimension for the paginated flows-list
+// endpoint that powers the Flows-tab Investigate panel. Whitelisted
+// server-side so the column can be inlined into ORDER BY safely.
+type FlowsListSort string
+
+const (
+	FlowsListSortObserved FlowsListSort = "observed"
+	FlowsListSortBytes    FlowsListSort = "bytes"
+	FlowsListSortPackets  FlowsListSort = "packets"
+)
+
+func ParseFlowsListSort(s string) FlowsListSort {
+	switch s {
+	case string(FlowsListSortBytes):
+		return FlowsListSortBytes
+	case string(FlowsListSortPackets):
+		return FlowsListSortPackets
+	default:
+		return FlowsListSortObserved
+	}
+}
+
+// FlowsListDir is the sort direction for QueryFlowsList. Whitelisted
+// like FlowsListSort.
+type FlowsListDir string
+
+const (
+	FlowsListDirAsc  FlowsListDir = "asc"
+	FlowsListDirDesc FlowsListDir = "desc"
+)
+
+func ParseFlowsListDir(s string) FlowsListDir {
+	if s == string(FlowsListDirAsc) {
+		return FlowsListDirAsc
+	}
+	return FlowsListDirDesc
+}
+
+// QueryFlowsList returns a paginated, filterable, sortable view of
+// rows from the flows table. Powers the Investigate panel on the
+// Flows tab — distinct from the live tail (QueryRecentFlows) which
+// is fixed-size, time-only, and tail-only.
+//
+// limit is clamped to [1, 500]; offset to [0, 100000]. The caller is
+// responsible for tracking pagination state — this function returns
+// raw rows without a total count (the cost of computing a total over
+// large windows is high on ClickHouse and the caller can infer
+// "more pages exist" from len(rows) == limit).
+func QueryFlowsList(
+	ctx context.Context,
+	conn driver.Conn,
+	tr TimeRange,
+	limit, offset int,
+	sort FlowsListSort,
+	dir FlowsListDir,
+	f FlowFilter,
+) ([]RecentFlow, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > 100_000 {
+		offset = 100_000
+	}
+	whereSQL, args, err := buildWhere(tr, f)
+	if err != nil {
+		return nil, err
+	}
+	q := `
+WITH inv AS (` + sqlLatestInventory + `)
+SELECT
+    f.observed, f.exporter, ifNull(inv.sys_name, '') AS exporter_name,
+    f.src_addr, f.dst_addr,
+    f.src_port, f.dst_port, f.proto, f.bytes, f.packets,
+    f.input_ifindex, f.output_ifindex, f.source
+FROM flows AS f
+LEFT JOIN inv ON f.exporter = inv.exporter
+WHERE ` + whereSQL + `
+ORDER BY f.` + string(sort) + ` ` + string(dir) + `
+LIMIT ? OFFSET ?`
+	args = append(args, uint64(limit), uint64(offset))
+	rows, err := conn.Query(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("store: query flows list: %w", err)
+	}
+	defer rows.Close()
+	out := make([]RecentFlow, 0, limit)
+	for rows.Next() {
+		var (
+			rf       RecentFlow
+			exporter netip.Addr
+			src      netip.Addr
+			dst      netip.Addr
+		)
+		if err := rows.Scan(
+			&rf.Observed, &exporter, &rf.ExporterName, &src, &dst,
+			&rf.SrcPort, &rf.DstPort, &rf.Proto,
+			&rf.Bytes, &rf.Packets,
+			&rf.InputIfIndex, &rf.OutputIfIndex,
+			&rf.Source,
+		); err != nil {
+			return nil, fmt.Errorf("store: scan flows list row: %w", err)
+		}
+		rf.Exporter = exporter.Unmap().String()
+		rf.SrcAddr = src.Unmap().String()
+		rf.DstAddr = dst.Unmap().String()
+		out = append(out, rf)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // QueryRecentFlows returns the most recent N rows from the flows table,
 // newest first. If exporter is non-empty, results are filtered to that
 // single exporter. Limit is clamped to [1, 1000].

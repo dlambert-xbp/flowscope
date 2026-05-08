@@ -74,6 +74,41 @@ func (h *handlers) healthStreams(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// flowsList returns a paginated, filterable, sortable list of flow
+// records. Powers the Investigate panel on the Flows tab.
+//
+//	GET /api/flows/list?window=300s&limit=50&offset=0&sort=observed&dir=desc
+//	     &exporter=...&src_addr=...&dst_addr=...&src_port=...&dst_port=...&proto=...
+//
+// Limit defaults to 50 (max 500); offset defaults to 0 (max 100,000).
+// sort ∈ {observed, bytes, packets}, dir ∈ {asc, desc}. All filter
+// keys mirror /api/top/* exactly, so the same filter chip set narrows
+// both surfaces.
+func (h *handlers) flowsList(w http.ResponseWriter, r *http.Request) {
+	tr := parseTimeRange(r, 5*time.Minute)
+	q := r.URL.Query()
+	limit := parseInt(q.Get("limit"), 50)
+	offset := parseInt(q.Get("offset"), 0)
+	sort := store.ParseFlowsListSort(q.Get("sort"))
+	dir := store.ParseFlowsListDir(q.Get("dir"))
+	rows, err := store.QueryFlowsList(
+		r.Context(), h.conn, tr, limit, offset, sort, dir, parseFilter(r),
+	)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"count":  len(rows),
+		"flows":  rows,
+		"limit":  limit,
+		"offset": offset,
+		"sort":   string(sort),
+		"dir":    string(dir),
+		"window": tr.WindowDuration().String(),
+	})
+}
+
 // recentFlows returns the most recent flows, newest first.
 //
 //	GET /api/flows/recent?limit=100&exporter=10.2.0.11
