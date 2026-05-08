@@ -7,26 +7,85 @@ import { Devices } from './components/Devices'
 import { Alerts } from './components/Alerts'
 import { Settings } from './components/Settings'
 import { ThemeToggle } from './theme'
+import { useTimeRange, type TimeRange } from './timeRange'
+import { TimeRangeSelector } from './components/TimeRangeSelector'
 
 type Tab = 'overview' | 'flows' | 'devices' | 'alerts' | 'settings'
 
+// scopeForTab maps the active tab to the URL-namespace key used by
+// useTimeRange. Each tab keeps its own range under its own params.
+function scopeForTab(t: Tab): string {
+  switch (t) {
+    case 'overview': return 'ov'
+    case 'flows': return 'fl'
+    case 'devices': return 'dv'
+    default: return 'ov' // unused for non-time tabs
+  }
+}
+
+const TAB_LABELS: Record<Tab, string> = {
+  overview: 'Overview',
+  flows: 'Flows',
+  devices: 'Devices',
+  alerts: 'Alerts',
+  settings: 'Settings',
+}
+
+const TIME_TABS: ReadonlySet<Tab> = new Set<Tab>(['overview', 'flows', 'devices'])
+
 export function App() {
   const [tab, setTab] = useState<Tab>('overview')
+  const tr = useTimeRange(scopeForTab(tab))
+  const showRange = TIME_TABS.has(tab)
   return (
     <div
       className="grid bg-ink text-text overflow-hidden h-screen"
-      style={{ gridTemplateRows: '32px 44px 1fr 24px' }}
+      style={{ gridTemplateRows: '32px 44px 32px 1fr 24px' }}
     >
       <Strip />
       <Bar tab={tab} onTab={setTab} />
+      <PageContext tab={tab} showRange={showRange} range={tr.range} onRangeChange={tr.set} />
       <main className="overflow-auto">
-        {tab === 'overview' && <Overview />}
-        {tab === 'flows' && <Flows />}
-        {tab === 'devices' && <Devices />}
+        {tab === 'overview' && (
+          <Overview range={tr.range} rangeKey={tr.queryKey} />
+        )}
+        {tab === 'flows' && (
+          <Flows range={tr.range} rangeKey={tr.queryKey} />
+        )}
+        {tab === 'devices' && (
+          <Devices range={tr.range} rangeKey={tr.queryKey} />
+        )}
         {tab === 'alerts' && <Alerts />}
         {tab === 'settings' && <Settings />}
       </main>
       <Cmd />
+    </div>
+  )
+}
+
+/* ----------------------------- Page context row ----------------------------- */
+
+function PageContext({
+  tab,
+  showRange,
+  range,
+  onRangeChange,
+}: {
+  tab: Tab
+  showRange: boolean
+  range: TimeRange
+  onRangeChange: (r: TimeRange) => void
+}) {
+  return (
+    <div className="flex items-center gap-3 px-4 bg-surface border-b border-line">
+      <span className="text-[10.5px] uppercase tracking-[0.1em] text-faint font-semibold">
+        {TAB_LABELS[tab]}
+      </span>
+      {showRange && (
+        <span className="ml-auto">
+          <TimeRangeSelector range={range} onChange={onRangeChange} />
+        </span>
+      )}
     </div>
   )
 }
