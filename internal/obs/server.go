@@ -21,6 +21,7 @@ import (
 func ServeMetrics(ctx context.Context, addr string) error {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", Handler())
+	mux.Handle("/health/ingest", ServeHealth())
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok\n"))

@@ -540,6 +540,8 @@ function RawRecord({ flow }: { flow: RecentFlow }) {
     { k: 'packets', v: fmt.num(flow.packets), mono: true },
     { k: 'input_ifindex', v: String(flow.input_ifindex), mono: true },
     { k: 'output_ifindex', v: String(flow.output_ifindex), mono: true },
+    { k: 'src_as', v: flow.src_as ? `AS${flow.src_as}` : '—', mono: true },
+    { k: 'dst_as', v: flow.dst_as ? `AS${flow.dst_as}` : '—', mono: true },
     { k: 'source', v: flow.source, mono: true },
   ]
   return (

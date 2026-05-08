@@ -6,6 +6,7 @@ import type {
   AlertSummary,
   Device,
   ExporterHealthRow,
+  IngestHealth,
   StorageHealth,
   StreamRow,
   Summary,
@@ -68,6 +69,17 @@ export function Overview({
     queryFn: () => api.healthExporters(apiRange),
     refetchInterval: range.kind === 'preset' ? 10000 : false,
   })
+  // The ingest health endpoint returns 503 when the api service
+  // isn't configured with FLOWSCOPE_INGEST_HEALTH_URL. Catch the
+  // error so the panel can render a "not configured" empty state
+  // instead of erroring at the page level.
+  const ingestHealth = useQuery({
+    queryKey: ['health-ingest'],
+    queryFn: () =>
+      api.healthIngest().catch((e: Error) => Promise.reject(e)),
+    refetchInterval: 5000,
+    retry: false,
+  })
 
   const deviceList = devices.data?.devices ?? []
   const exporterStatus = classifyExporters(deviceList)
@@ -103,6 +115,13 @@ export function Overview({
           rows={exporterHealth.data?.rows ?? []}
           loading={exporterHealth.isLoading}
           range={range}
+        />
+      </div>
+      <div className="border-b border-line">
+        <IngestPanel
+          health={ingestHealth.data}
+          loading={ingestHealth.isLoading}
+          error={ingestHealth.error as Error | undefined}
         />
       </div>
       <div className="grid grid-cols-1 lg:grid-cols-2 border-b border-line">
@@ -707,6 +726,161 @@ function SeverityBadge({ sev }: { sev: Alert['severity'] }) {
 }
 
 /* ----------------------------- Storage panel ---------------------------- */
+
+/* ----------------------------- Ingest panel ----------------------------- */
+
+// IngestPanel surfaces ingest-side counters fetched from the
+// ingest service via /api/health/ingest. Five tiles + two row
+// stacks (parse records by source, parse errors by reason). The
+// 503 case (api not configured to reach ingest) renders a tight
+// empty state with the env-var hint.
+function IngestPanel({
+  health,
+  loading,
+  error,
+}: {
+  health?: IngestHealth
+  loading: boolean
+  error?: Error
+}) {
+  const notConfigured = error?.message.includes('503') ?? false
+  const totalErrors = health
+    ? health.parse_errors_total.reduce((a, p) => a + p.value, 0)
+    : 0
+  const totalRecords = health
+    ? health.parse_records_total.reduce((a, p) => a + p.value, 0)
+    : 0
+  const errRate = totalRecords > 0 ? (totalErrors / (totalErrors + totalRecords)) * 100 : 0
+  const errTone =
+    errRate >= 5 ? 'text-crit' : errRate >= 0.5 ? 'text-warn' : 'text-ok'
+  const tcMissRate =
+    health && health.template_cache.hits + health.template_cache.misses > 0
+      ? (health.template_cache.misses /
+          (health.template_cache.hits + health.template_cache.misses)) *
+        100
+      : 0
+  const tcTone =
+    tcMissRate >= 5 ? 'text-crit' : tcMissRate >= 0.5 ? 'text-warn' : 'text-ok'
+  return (
+    <PanelShell
+      title="Ingest pipeline"
+      sub="UDP receive, parse, template cache · since process start"
+      right={
+        notConfigured ? (
+          <span className="font-mono text-[10px] tracking-[0.06em] text-faint">
+            NOT CONFIGURED
+          </span>
+        ) : error ? (
+          <span className="font-mono text-[10px] tracking-[0.06em] text-crit">
+            FETCH ERROR
+          </span>
+        ) : (
+          <span className={`font-mono text-[10px] tracking-[0.06em] ${errTone}`}>
+            {errRate < 0.5 ? 'PARSE OK' : errRate < 5 ? 'PARSE LAGGING' : 'PARSE ERRORS'}
+          </span>
+        )
+      }
+    >
+      {loading && !health ? (
+        <Loading />
+      ) : notConfigured ? (
+        <div className="px-4 py-5 text-[12px] font-mono text-dim leading-[1.6]">
+          Set{' '}
+          <code className="bg-raise px-1 text-text">FLOWSCOPE_INGEST_HEALTH_URL</code> on
+          the api service to the ingest service's health URL (typical:{' '}
+          <code className="bg-raise px-1 text-text">
+            http://flowscope-ingest:9100/health/ingest
+          </code>
+          ) and restart. Until then this panel shows the placeholder you're reading.
+        </div>
+      ) : error ? (
+        <div className="px-4 py-5 text-[12px] font-mono text-crit leading-[1.5]">
+          ingest health: {error.message}
+        </div>
+      ) : health ? (
+        <>
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 border-l border-t border-line-soft">
+            <Cell
+              k="udp v9/v5/v10"
+              v={fmt.num(
+                (health.udp_received_total['netflow'] ?? 0),
+              )}
+            />
+            <Cell
+              k="udp sflow"
+              v={fmt.num(health.udp_received_total['sflow'] ?? 0)}
+            />
+            <Cell k="records" v={fmt.num(totalRecords)} />
+            <Cell
+              k="parse errors"
+              v={fmt.num(totalErrors)}
+              tone={errTone}
+            />
+            <Cell
+              k="template miss"
+              v={
+                health.template_cache.hits + health.template_cache.misses > 0
+                  ? `${tcMissRate.toFixed(2)}%`
+                  : '—'
+              }
+              tone={tcTone}
+            />
+            <Cell k="ring size" v={fmt.num(Math.round(health.ring_size))} />
+          </div>
+          <div className="grid grid-cols-1 lg:grid-cols-2 border-t border-line-soft">
+            <PairList
+              title="Records by source"
+              rows={health.parse_records_total}
+              borderRight
+            />
+            <PairList title="Parse errors" rows={health.parse_errors_total} />
+          </div>
+        </>
+      ) : null}
+    </PanelShell>
+  )
+}
+
+function PairList({
+  title,
+  rows,
+  borderRight,
+}: {
+  title: string
+  rows: { protocol: string; label: string; value: number }[]
+  borderRight?: boolean
+}) {
+  const hasRows = rows.some((r) => r.value > 0)
+  return (
+    <div className={borderRight ? 'lg:border-r lg:border-line-soft' : ''}>
+      <div className="px-4 py-2 text-[10.5px] uppercase tracking-[0.1em] text-faint font-semibold border-b border-line-soft">
+        {title}
+      </div>
+      {!hasRows ? (
+        <div className="px-4 py-3 text-[12px] font-mono text-dim">
+          {title === 'Parse errors' ? 'no errors' : 'no records'}
+        </div>
+      ) : (
+        <ul>
+          {rows
+            .filter((r) => r.value > 0)
+            .map((r, i) => (
+              <li
+                key={`${r.protocol}_${r.label}_${i}`}
+                className="flex items-baseline gap-3 px-4 py-1.5 border-b border-line-soft last:border-b-0"
+              >
+                <span className="font-mono text-[11.5px] text-text">{r.protocol}</span>
+                <span className="font-mono text-[11px] text-dim">{r.label}</span>
+                <span className="ml-auto font-mono text-[11.5px] tabular text-text">
+                  {fmt.num(r.value)}
+                </span>
+              </li>
+            ))}
+        </ul>
+      )}
+    </div>
+  )
+}
 
 /* ---------------------- Exporter accuracy panel ---------------------- */
 

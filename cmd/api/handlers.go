@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/netip"
 	"strconv"
@@ -23,9 +24,11 @@ import (
 // 000005 settings slice — store, audit writer, audit reader, and
 // the in-process service-name resolver.
 type handlers struct {
-	conn     driver.Conn
-	creds    snmpx.CredentialStore
-	settings settingsDeps
+	conn             driver.Conn
+	creds            snmpx.CredentialStore
+	settings         settingsDeps
+	ingestHealthURL  string
+	ingestHealthHTTP *http.Client
 }
 
 // health is a minimal liveness probe used by Kubernetes / Container
@@ -54,6 +57,37 @@ func (h *handlers) summary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, s)
+}
+
+// healthIngest proxies the ingest service's /health/ingest JSON
+// snapshot. The URL is configured via FLOWSCOPE_INGEST_HEALTH_URL
+// (typical: http://flowscope-ingest:9100/health/ingest); when
+// unset this returns a 503 with a clear hint so the Overview
+// IngestPanel can show "ingest health not configured" instead of
+// hard-erroring.
+//
+//	GET /api/health/ingest
+func (h *handlers) healthIngest(w http.ResponseWriter, r *http.Request) {
+	if h.ingestHealthURL == "" {
+		writeError(w, http.StatusServiceUnavailable,
+			"FLOWSCOPE_INGEST_HEALTH_URL not set on the api service; ingest health not exposed",
+		)
+		return
+	}
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, h.ingestHealthURL, nil)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	resp, err := h.ingestHealthHTTP.Do(req)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "ingest health fetch: "+err.Error())
+		return
+	}
+	defer resp.Body.Close()
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, resp.Body)
 }
 
 // healthExporters returns per-exporter loss aggregated over the
@@ -235,6 +269,8 @@ func parseFilter(r *http.Request) store.FlowFilter {
 		Proto:         parseUint16(q.Get("proto")),
 		InputIfIndex:  parseUint32(q.Get("input_ifindex")),
 		OutputIfIndex: parseUint32(q.Get("output_ifindex")),
+		SrcAS:         parseUint32(q.Get("src_as")),
+		DstAS:         parseUint32(q.Get("dst_as")),
 	}
 }
 
