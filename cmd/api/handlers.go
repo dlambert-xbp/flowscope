@@ -13,6 +13,7 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/go-chi/chi/v5"
 
+	"github.com/dlambert-xbp/flowscope/internal/rdns"
 	"github.com/dlambert-xbp/flowscope/internal/snmpx"
 	"github.com/dlambert-xbp/flowscope/internal/store"
 )
@@ -29,6 +30,7 @@ type handlers struct {
 	settings         settingsDeps
 	ingestHealthURL  string
 	ingestHealthHTTP *http.Client
+	rdns             *rdns.Cache
 }
 
 // health is a minimal liveness probe used by Kubernetes / Container
@@ -57,6 +59,34 @@ func (h *handlers) summary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, s)
+}
+
+// dnsLookup performs reverse DNS for one or more IPs and returns
+// a map keyed by the input IP. Private IPs (RFC 1918, etc.) are
+// returned as skipped=true with no hostname. Public IPs are looked
+// up against the api service's local resolver with a 200ms timeout
+// per lookup, cached in-memory for an hour on success, 5min on
+// no-PTR, 30s on resolver error.
+//
+//	GET /api/dns/lookup?ip=8.8.8.8
+//	GET /api/dns/lookup?ip=8.8.8.8&ip=1.1.1.1
+func (h *handlers) dnsLookup(w http.ResponseWriter, r *http.Request) {
+	ips := r.URL.Query()["ip"]
+	if len(ips) == 0 {
+		writeError(w, http.StatusBadRequest, "ip query param is required (one or more)")
+		return
+	}
+	// Cap input to keep one bad request from spawning thousands of
+	// concurrent lookups. The Flows tab batches at most ~50 IPs
+	// per visible page; 100 here is comfortable headroom.
+	if len(ips) > 100 {
+		ips = ips[:100]
+	}
+	results := h.rdns.LookupBatch(r.Context(), ips)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"count":   len(results),
+		"results": results,
+	})
 }
 
 // healthIngest proxies the ingest service's /health/ingest JSON

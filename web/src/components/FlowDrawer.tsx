@@ -10,6 +10,7 @@ import type {
 } from '../api'
 import { useTheme } from '../theme'
 import { ServiceLabel } from './ServiceLabel'
+import { Hostname } from './Hostname'
 import { type Filter } from '../filters'
 
 // FlowDrillDown describes the thing the operator clicked. The drawer
@@ -187,10 +188,13 @@ function ChartTab({
   filters: URLSearchParams
   range: TimeRangeArg
 }) {
+  // Drawer is for studying a snapshot — explicit refresh via reopen
+  // or filter change, never auto. Keeps the chart still while the
+  // operator reads it.
   const q = useQuery({
     queryKey: ['flows-timeseries', filters.toString(), JSON.stringify(range)],
     queryFn: () => api.flowsTimeseries(filters, range),
-    refetchInterval: 5000,
+    refetchOnWindowFocus: false,
   })
   const points = q.data?.points ?? []
   const bucket = q.data?.bucket_seconds ?? 0
@@ -459,7 +463,7 @@ function RecordsTab({
   const q = useQuery({
     queryKey: ['drawer-records', filters.toString(), JSON.stringify(range)],
     queryFn: () => api.flowsList(filters, range, { limit: 50, sort: 'observed', dir: 'desc' }),
-    refetchInterval: 5000,
+    refetchOnWindowFocus: false,
   })
   const flows = q.data?.flows ?? []
   return (
@@ -524,16 +528,38 @@ function RecordCard({ flow }: { flow: RecentFlow }) {
 }
 
 function RawRecord({ flow }: { flow: RecentFlow }) {
-  const fields: { k: string; v: string; mono?: boolean }[] = [
-    { k: 'observed', v: flow.observed, mono: true },
+  type Field = { k: string; v: ReactNode; mono?: boolean; title?: string }
+  const fields: Field[] = [
+    { k: 'observed', v: flow.observed, mono: true, title: flow.observed },
     {
       k: 'exporter',
       v: flow.exporter_name ? `${flow.exporter_name} (${flow.exporter})` : flow.exporter,
       mono: true,
+      title: flow.exporter,
     },
-    { k: 'src_addr', v: flow.src_addr, mono: true },
+    {
+      k: 'src_addr',
+      v: (
+        <>
+          {flow.src_addr}
+          <Hostname ip={flow.src_addr} />
+        </>
+      ),
+      mono: true,
+      title: flow.src_addr,
+    },
     { k: 'src_port', v: String(flow.src_port), mono: true },
-    { k: 'dst_addr', v: flow.dst_addr, mono: true },
+    {
+      k: 'dst_addr',
+      v: (
+        <>
+          {flow.dst_addr}
+          <Hostname ip={flow.dst_addr} />
+        </>
+      ),
+      mono: true,
+      title: flow.dst_addr,
+    },
     { k: 'dst_port', v: String(flow.dst_port), mono: true },
     { k: 'proto', v: `${fmt.proto(flow.proto)} (${flow.proto})`, mono: true },
     { k: 'bytes', v: `${fmt.bytes(flow.bytes)} (${flow.bytes})`, mono: true },
@@ -565,7 +591,7 @@ function RawRecord({ flow }: { flow: RecentFlow }) {
               {f.k}
             </dt>
             <dd
-              title={f.v}
+              title={f.title}
               className={`text-[12px] text-text truncate ${f.mono ? 'font-mono' : ''}`}
             >
               {f.v}

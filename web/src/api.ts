@@ -135,6 +135,19 @@ export type StreamRow = {
   exporters: number
 }
 
+export type DNSLookupResult = {
+  ip: string
+  hostname: string
+  err?: string
+  skipped: boolean
+  at: string
+}
+
+export type DNSLookupResponse = {
+  count: number
+  results: Record<string, DNSLookupResult>
+}
+
 export type IngestHealth = {
   started_at: string
   uptime_seconds: number
@@ -499,6 +512,11 @@ export const api = {
     ),
   healthStorage: () => getJSON<StorageHealth>(`/api/health/storage`),
   healthIngest: () => getJSON<IngestHealth>(`/api/health/ingest`),
+  dnsLookup: (ips: string[]) => {
+    const sp = new URLSearchParams()
+    for (const ip of ips) sp.append('ip', ip)
+    return getJSON<DNSLookupResponse>(`/api/dns/lookup?${sp.toString()}`)
+  },
   healthExporters: (range?: TimeRangeArg) =>
     getJSON<{ count: number; rows: ExporterHealthRow[]; window: string }>(
       `/api/health/exporters?${timeQuery(range)}`,

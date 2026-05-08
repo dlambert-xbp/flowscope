@@ -4,6 +4,7 @@ import { api, fmt } from '../api'
 import type { RecentFlow } from '../api'
 import { ServiceLabel } from './ServiceLabel'
 import { Th, useTableSort, type SortColumns } from './sortable'
+import { Hostname } from './Hostname'
 
 const FLOW_COLS: SortColumns<RecentFlow> = {
   observed: (r) => r.observed,
@@ -127,8 +128,11 @@ export function LiveTail({
                     </td>
                     <td className="n text-dim">{f.source}</td>
                     <td className="n truncate">
-                      {f.src_addr}:{f.src_port} <span className="text-faint">→</span>{' '}
+                      {f.src_addr}:{f.src_port}
+                      <Hostname ip={f.src_addr} />{' '}
+                      <span className="text-faint">→</span>{' '}
                       {f.dst_addr}:{f.dst_port}
+                      <Hostname ip={f.dst_addr} />
                     </td>
                     <td>
                       <span className="font-mono text-accent">{fmt.proto(f.proto)}</span>
