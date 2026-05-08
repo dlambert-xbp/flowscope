@@ -15,17 +15,17 @@ Last updated: 2026-05-08.
 
 ## Bugs & papercuts (should fix soon)
 
-- [ ] `/api/top/*` filter chips show raw keys (`dst_port · 443`) instead of
+- [x] `/api/top/*` filter chips show raw keys (`dst_port · 443`) instead of
       human labels (`service · https`). The `label` field on `Filter` is
       plumbed but only set in some triggers. Cosmetic.
-- [ ] Brand bar tab counts are stubbed (`—`, `—`, `0`). Should read live
+- [x] Brand bar tab counts are stubbed (`—`, `—`, `0`). Should read live
       from `/api/summary`, `/api/devices`, `/api/alerts/summary`.
-- [ ] Per-binding SNMP interval is stored but ignored — scheduler still
+- [x] Per-binding SNMP interval is stored but ignored — scheduler still
       uses cluster-wide `FLOWSCOPE_SNMP_INTERVAL`. Trivial fix in
       `Scheduler.dispatch`.
-- [ ] No "walk now" button on the Settings → SNMP page. Operator waits up
+- [x] No "walk now" button on the Settings → SNMP page. Operator waits up
       to 15 min for results from a new credential.
-- [ ] Flow-independent SNMP discovery. `Scheduler.discoverExporters` only
+- [x] Flow-independent SNMP discovery. `Scheduler.discoverExporters` only
       walks devices that have produced flows. Devices in the credentials
       table without flow history are silently ignored. Fix: union
       flow-observed exporters with credential-bound exporters.
@@ -69,7 +69,7 @@ Last updated: 2026-05-08.
 - [ ] LLDP/CDP topology + Devices → Neighbors sub-tab. SNMP
       `lldpRemTable` walk + `react-flow` graph.
 - [ ] BGP via SNMP `bgpPeerTable` + Devices → BGP sub-tab.
-- [ ] On-demand triggered walks. `POST /api/devices/{e}/snmp/walk`
+- [x] On-demand triggered walks. `POST /api/devices/{e}/snmp/walk`
       that fires an immediate walk regardless of cadence.
 
 ## Alert engine follow-ups
@@ -125,12 +125,12 @@ Last updated: 2026-05-08.
 
 ## UI / UX gaps
 
-- [ ] Light theme toggle. Tokens defined for light mode (used by the
+- [x] Light theme toggle. Tokens defined for light mode (used by the
       mock); needs a runtime switch.
 - [ ] ⌘K command palette. Brand bar shows the kbd hint; not wired.
-- [ ] j/k keyboard navigation on tables.
-- [ ] Filter chips with human labels (see Bugs section).
-- [ ] Deep-linking on Devices. Selecting a device updates `useState`
+- [x] j/k keyboard navigation on tables.
+- [x] Filter chips with human labels (see Bugs section).
+- [x] Deep-linking on Devices. Selecting a device updates `useState`
       not URL — refresh loses selection.
 
 ## Docs / ops

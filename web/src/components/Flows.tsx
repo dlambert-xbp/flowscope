@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { api, fmt } from '../api'
 import type {
   FlowsListDir,
@@ -19,7 +19,7 @@ import { rangeLabel, toApi, type TimeRange } from '../timeRange'
 import { ServiceLabel, useServiceName } from './ServiceLabel'
 import { LiveTail } from './LiveTail'
 import { FlowDrawer, type FlowDrillDown } from './FlowDrawer'
-import { Hostname } from './Hostname'
+import { Hostname, useReverseDNS } from './Hostname'
 
 // Flows tab — page chrome:
 //   Live tail (collapsible, expanded by default)
@@ -606,19 +606,7 @@ function TalkersList({ qs, onAdd, onDrill, range, rangeKey, sortBy, topN }: List
       <Rows
         rows={q.data?.rows ?? []}
         keyOf={(r) => `${r.src_addr}>${r.dst_addr}`}
-        renderLeft={(r: TopTalker) => (
-          <span className="font-mono text-[12px]">
-            <FilterTrigger value={r.src_addr} onAdd={onAdd} k="src_addr">
-              {r.src_addr}
-            </FilterTrigger>
-            <Hostname ip={r.src_addr} />{' '}
-            <span className="text-faint">→</span>{' '}
-            <FilterTrigger value={r.dst_addr} onAdd={onAdd} k="dst_addr">
-              {r.dst_addr}
-            </FilterTrigger>
-            <Hostname ip={r.dst_addr} />
-          </span>
-        )}
+        renderLeft={(r: TopTalker) => <TalkerLeft r={r} onAdd={onAdd} />}
         valueOf={(r) => valueOfRow(sortBy, r)}
         renderRight={(r) => formatValue(sortBy, valueOfRow(sortBy, r))}
         drillFor={(r) => ({
@@ -633,6 +621,29 @@ function TalkersList({ qs, onAdd, onDrill, range, rangeKey, sortBy, topN }: List
         sortBy={sortBy}
       />
     </ListShell>
+  )
+}
+
+// TalkerLeft renders one row of the Top talkers panel. Lifted out of
+// renderLeft so it can call useReverseDNS — the same query <Hostname>
+// already fires for these IPs, so TanStack dedupes and we get the
+// rDNS string for free to use as the chip label. Falls back to the
+// IP when no PTR resolves so the chip never flashes empty on click.
+function TalkerLeft({ r, onAdd }: { r: TopTalker; onAdd: (f: Filter) => void }) {
+  const srcRDNS = useReverseDNS(r.src_addr)?.hostname
+  const dstRDNS = useReverseDNS(r.dst_addr)?.hostname
+  return (
+    <span className="font-mono text-[12px]">
+      <FilterTrigger value={r.src_addr} onAdd={onAdd} k="src_addr" label={srcRDNS || undefined}>
+        {r.src_addr}
+      </FilterTrigger>
+      <Hostname ip={r.src_addr} />{' '}
+      <span className="text-faint">→</span>{' '}
+      <FilterTrigger value={r.dst_addr} onAdd={onAdd} k="dst_addr" label={dstRDNS || undefined}>
+        {r.dst_addr}
+      </FilterTrigger>
+      <Hostname ip={r.dst_addr} />
+    </span>
   )
 }
 
@@ -800,24 +811,7 @@ function ConversationsList({ qs, onAdd, onDrill, range, rangeKey, sortBy, topN }
       <Rows
         rows={q.data?.rows ?? []}
         keyOf={(r) => `${r.src_addr}_${r.src_port}_${r.dst_addr}_${r.dst_port}_${r.proto}`}
-        renderLeft={(r: TopConversation) => (
-          <span className="font-mono text-[12px] text-text">
-            <FilterTrigger k="src_addr" value={r.src_addr} onAdd={onAdd}>
-              {r.src_addr}
-            </FilterTrigger>
-            :{r.src_port}
-            <Hostname ip={r.src_addr} />{' '}
-            <span className="text-faint">→</span>{' '}
-            <FilterTrigger k="dst_addr" value={r.dst_addr} onAdd={onAdd}>
-              {r.dst_addr}
-            </FilterTrigger>
-            :{r.dst_port}
-            <Hostname ip={r.dst_addr} />{' '}
-            <FilterTrigger k="proto" value={String(r.proto)} onAdd={onAdd} label={fmt.proto(r.proto)}>
-              <span className="text-faint">· {fmt.proto(r.proto)}</span>
-            </FilterTrigger>
-          </span>
-        )}
+        renderLeft={(r: TopConversation) => <ConversationLeft r={r} onAdd={onAdd} />}
         valueOf={(r) => valueOfRow(sortBy, r)}
         renderRight={(r) => formatValue(sortBy, valueOfRow(sortBy, r))}
         drillFor={(r) => ({
@@ -835,6 +829,33 @@ function ConversationsList({ qs, onAdd, onDrill, range, rangeKey, sortBy, topN }
         sortBy={sortBy}
       />
     </ListShell>
+  )
+}
+
+// ConversationLeft renders one row of the Top conversations panel.
+// Same rationale as TalkerLeft — useReverseDNS dedupes against the
+// <Hostname> queries already in flight, so we get rDNS strings to
+// label src/dst chips for free.
+function ConversationLeft({ r, onAdd }: { r: TopConversation; onAdd: (f: Filter) => void }) {
+  const srcRDNS = useReverseDNS(r.src_addr)?.hostname
+  const dstRDNS = useReverseDNS(r.dst_addr)?.hostname
+  return (
+    <span className="font-mono text-[12px] text-text">
+      <FilterTrigger k="src_addr" value={r.src_addr} onAdd={onAdd} label={srcRDNS || undefined}>
+        {r.src_addr}
+      </FilterTrigger>
+      :{r.src_port}
+      <Hostname ip={r.src_addr} />{' '}
+      <span className="text-faint">→</span>{' '}
+      <FilterTrigger k="dst_addr" value={r.dst_addr} onAdd={onAdd} label={dstRDNS || undefined}>
+        {r.dst_addr}
+      </FilterTrigger>
+      :{r.dst_port}
+      <Hostname ip={r.dst_addr} />{' '}
+      <FilterTrigger k="proto" value={String(r.proto)} onAdd={onAdd} label={fmt.proto(r.proto)}>
+        <span className="text-faint">· {fmt.proto(r.proto)}</span>
+      </FilterTrigger>
+    </span>
   )
 }
 
@@ -1098,6 +1119,74 @@ function Investigate({
     }
   }
 
+  // j/k row navigation. The highlighted index is reset whenever the
+  // result set changes shape (filters, page, sort) so we don't carry
+  // a stale row pointer past results that no longer exist. Refs to
+  // each <tr> let us call scrollIntoView when the highlight moves
+  // off-screen — keyboard users shouldn't have to mouse to follow
+  // their own cursor.
+  const [highlight, setHighlight] = useState(0)
+  const rowRefs = useRef<Array<HTMLTableRowElement | null>>([])
+  useEffect(() => {
+    setHighlight(0)
+    rowRefs.current = []
+  }, [filterKey, rangeKey, pageSize, offset, sort, dir])
+  // Clamp if flow count shrinks under the highlighted index between
+  // refetches with the same shape — defensive, normally a no-op.
+  useEffect(() => {
+    if (flows.length === 0) {
+      if (highlight !== 0) setHighlight(0)
+    } else if (highlight >= flows.length) {
+      setHighlight(flows.length - 1)
+    }
+  }, [flows.length, highlight])
+  useEffect(() => {
+    if (collapsed) return
+    const onKey = (e: KeyboardEvent) => {
+      // Don't hijack typing in inputs/textareas/contenteditable. The
+      // filter builder, page-size selector, and search all live above
+      // this table and the operator hits j/k constantly while typing.
+      const ae = document.activeElement as HTMLElement | null
+      if (ae) {
+        const tag = ae.tagName
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
+        if (ae.isContentEditable) return
+      }
+      // Bare j/k/Enter only — let modifiers (Cmd-Enter etc.) pass
+      // through to the browser / other handlers.
+      if (e.metaKey || e.ctrlKey || e.altKey) return
+      if (flows.length === 0) return
+      if (e.key === 'j') {
+        e.preventDefault()
+        setHighlight((h) => (h + 1) % flows.length)
+      } else if (e.key === 'k') {
+        e.preventDefault()
+        setHighlight((h) => (h - 1 + flows.length) % flows.length)
+      } else if (e.key === 'Enter') {
+        const f = flows[highlight]
+        if (!f) return
+        e.preventDefault()
+        onDrill({
+          title: `${f.src_addr}:${f.src_port} → ${f.dst_addr}:${f.dst_port}`,
+          subtitle: `5-tuple · ${fmt.proto(f.proto)}`,
+          filters: [
+            { key: 'src_addr', value: f.src_addr },
+            { key: 'src_port', value: String(f.src_port) },
+            { key: 'dst_addr', value: f.dst_addr },
+            { key: 'dst_port', value: String(f.dst_port) },
+            { key: 'proto', value: String(f.proto), label: fmt.proto(f.proto) },
+          ],
+        })
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [collapsed, flows, highlight, onDrill])
+  useEffect(() => {
+    const row = rowRefs.current[highlight]
+    if (row) row.scrollIntoView({ block: 'nearest' })
+  }, [highlight])
+
   return (
     <section className="border-t border-line">
       <div className="flex items-center gap-3 px-4 py-3 border-b border-line bg-surface">
@@ -1194,89 +1283,16 @@ function Investigate({
               </thead>
               <tbody>
                 {flows.map((f, i) => (
-                  <tr key={i} className="hover:bg-surface group">
-                    <td className="n text-faint">{fmt.time(f.observed).slice(11, 23)}</td>
-                    <td>
-                      <FilterTrigger
-                        k="exporter"
-                        value={f.exporter}
-                        onAdd={onAdd}
-                        label={f.exporter_name || f.exporter}
-                      >
-                        <div className="font-mono truncate">
-                          {f.exporter_name || f.exporter}
-                        </div>
-                      </FilterTrigger>
-                      {f.exporter_name && (
-                        <div className="font-mono italic text-faint text-[10.5px] truncate">
-                          {f.exporter}
-                        </div>
-                      )}
-                    </td>
-                    <td className="n truncate">
-                      <FilterTrigger k="src_addr" value={f.src_addr} onAdd={onAdd}>
-                        {f.src_addr}
-                      </FilterTrigger>
-                      :
-                      <FilterTrigger
-                        k="src_port"
-                        value={String(f.src_port)}
-                        onAdd={onAdd}
-                      >
-                        {f.src_port}
-                      </FilterTrigger>
-                      <Hostname ip={f.src_addr} />{' '}
-                      <span className="text-faint">→</span>{' '}
-                      <FilterTrigger k="dst_addr" value={f.dst_addr} onAdd={onAdd}>
-                        {f.dst_addr}
-                      </FilterTrigger>
-                      :
-                      <FilterTrigger
-                        k="dst_port"
-                        value={String(f.dst_port)}
-                        onAdd={onAdd}
-                      >
-                        {f.dst_port}
-                      </FilterTrigger>
-                      <Hostname ip={f.dst_addr} />
-                    </td>
-                    <td>
-                      <FilterTrigger
-                        k="proto"
-                        value={String(f.proto)}
-                        onAdd={onAdd}
-                        label={fmt.proto(f.proto)}
-                      >
-                        <span className="font-mono text-accent">{fmt.proto(f.proto)}</span>
-                      </FilterTrigger>
-                    </td>
-                    <td className="n text-dim">
-                      <ServiceLabel proto={f.proto} port={f.dst_port} fallback="—" />
-                    </td>
-                    <td className="r n">{fmt.num(f.packets)}</td>
-                    <td className="r n">{fmt.bytes(f.bytes)}</td>
-                    <td className="r">
-                      <button
-                        type="button"
-                        onClick={() =>
-                          onDrill({
-                            title: `${f.src_addr}:${f.src_port} → ${f.dst_addr}:${f.dst_port}`,
-                            subtitle: `5-tuple · ${fmt.proto(f.proto)}`,
-                            filters: [
-                              { key: 'src_addr', value: f.src_addr },
-                              { key: 'src_port', value: String(f.src_port) },
-                              { key: 'dst_addr', value: f.dst_addr },
-                              { key: 'dst_port', value: String(f.dst_port) },
-                              { key: 'proto', value: String(f.proto), label: fmt.proto(f.proto) },
-                            ],
-                          })
-                        }
-                        className="font-mono text-[10.5px] tracking-[0.06em] text-accent opacity-0 group-hover:opacity-100 hover:underline"
-                      >
-                        inspect →
-                      </button>
-                    </td>
-                  </tr>
+                  <InvestigateRow
+                    key={i}
+                    f={f}
+                    onAdd={onAdd}
+                    onDrill={onDrill}
+                    highlighted={i === highlight}
+                    rowRef={(el) => {
+                      rowRefs.current[i] = el
+                    }}
+                  />
                 ))}
               </tbody>
             </table>
@@ -1302,6 +1318,121 @@ function Investigate({
         </div>
       )}
     </section>
+  )
+}
+
+// InvestigateRow renders one row of the Investigate flow list.
+// Lifted from Investigate.tbody.map so it can call useReverseDNS for
+// src/dst (dedupes against the <Hostname> queries already firing in
+// the same row) and useServiceName for the dst_port chip — populating
+// the human label ("service · https") for the chip the trigger emits.
+// Renders the full row markup unchanged from the previous inline JSX.
+function InvestigateRow({
+  f,
+  onAdd,
+  onDrill,
+  highlighted,
+  rowRef,
+}: {
+  f: RecentFlow
+  onAdd: (filter: Filter) => void
+  onDrill: (d: FlowDrillDown) => void
+  highlighted: boolean
+  rowRef: (el: HTMLTableRowElement | null) => void
+}) {
+  const srcRDNS = useReverseDNS(f.src_addr)?.hostname
+  const dstRDNS = useReverseDNS(f.dst_addr)?.hostname
+  const dstService = useServiceName(f.proto, f.dst_port)
+  const dstPortLabel = dstService.data?.found ? dstService.data.primary.name : undefined
+  return (
+    <tr
+      ref={rowRef}
+      className={`hover:bg-surface group ${highlighted ? 'bg-accent-wash' : ''}`}
+    >
+      <td className="n text-faint">{fmt.time(f.observed).slice(11, 23)}</td>
+      <td>
+        <FilterTrigger
+          k="exporter"
+          value={f.exporter}
+          onAdd={onAdd}
+          label={f.exporter_name || f.exporter}
+        >
+          <div className="font-mono truncate">
+            {f.exporter_name || f.exporter}
+          </div>
+        </FilterTrigger>
+        {f.exporter_name && (
+          <div className="font-mono italic text-faint text-[10.5px] truncate">
+            {f.exporter}
+          </div>
+        )}
+      </td>
+      <td className="n truncate">
+        <FilterTrigger k="src_addr" value={f.src_addr} onAdd={onAdd} label={srcRDNS || undefined}>
+          {f.src_addr}
+        </FilterTrigger>
+        :
+        <FilterTrigger
+          k="src_port"
+          value={String(f.src_port)}
+          onAdd={onAdd}
+        >
+          {f.src_port}
+        </FilterTrigger>
+        <Hostname ip={f.src_addr} />{' '}
+        <span className="text-faint">→</span>{' '}
+        <FilterTrigger k="dst_addr" value={f.dst_addr} onAdd={onAdd} label={dstRDNS || undefined}>
+          {f.dst_addr}
+        </FilterTrigger>
+        :
+        <FilterTrigger
+          k="dst_port"
+          value={String(f.dst_port)}
+          onAdd={onAdd}
+          label={dstPortLabel}
+          keyLabel={dstPortLabel ? 'service' : undefined}
+        >
+          {f.dst_port}
+        </FilterTrigger>
+        <Hostname ip={f.dst_addr} />
+      </td>
+      <td>
+        <FilterTrigger
+          k="proto"
+          value={String(f.proto)}
+          onAdd={onAdd}
+          label={fmt.proto(f.proto)}
+        >
+          <span className="font-mono text-accent">{fmt.proto(f.proto)}</span>
+        </FilterTrigger>
+      </td>
+      <td className="n text-dim">
+        <ServiceLabel proto={f.proto} port={f.dst_port} fallback="—" />
+      </td>
+      <td className="r n">{fmt.num(f.packets)}</td>
+      <td className="r n">{fmt.bytes(f.bytes)}</td>
+      <td className="r">
+        <button
+          type="button"
+          onClick={() =>
+            onDrill({
+              title: `${f.src_addr}:${f.src_port} → ${f.dst_addr}:${f.dst_port}`,
+              subtitle: `5-tuple · ${fmt.proto(f.proto)}`,
+              filters: [
+                { key: 'src_addr', value: f.src_addr },
+                { key: 'src_port', value: String(f.src_port) },
+                { key: 'dst_addr', value: f.dst_addr },
+                { key: 'dst_port', value: String(f.dst_port) },
+                { key: 'proto', value: String(f.proto), label: fmt.proto(f.proto) },
+              ],
+            })
+          }
+          className="font-mono text-[10.5px] tracking-[0.06em] text-accent opacity-0 group-hover:opacity-100 hover:underline"
+        >
+          inspect →
+        </button>
+      </td>
+    </tr>
   )
 }
 

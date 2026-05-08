@@ -99,8 +99,23 @@ func (s *Scheduler) Run(ctx context.Context) error {
 }
 
 // dispatch enqueues every exporter that's overdue for a walk.
+//
+// Cadence selection: per-binding interval (from snmp_credentials) wins
+// when configured; the cluster-wide default is the fallback. The
+// per-binding snapshot is taken once per dispatch pass via the
+// redacted List query so the lookup is constant per pass and does not
+// decrypt secrets. Note that the dispatch tick (configured in Run)
+// floors how often we re-evaluate staleness — a per-binding interval
+// shorter than that tick will be evaluated only as often as the tick
+// fires.
+//
+// Operator-triggered walks: any exporter with a row in
+// snmp_walk_requests whose requested_at post-dates lastWalked bypasses
+// the staleness check entirely.
 func (s *Scheduler) dispatch(ctx context.Context, jobs chan<- string) {
-	exporters, err := s.discoverExporters(ctx)
+	intervals := s.snapshotIntervals(ctx)
+	forced := s.snapshotForceRequests(ctx)
+	exporters, err := s.discoverExporters(ctx, forced)
 	if err != nil {
 		slog.Warn("snmp: discover exporters", "err", err)
 		return
@@ -113,9 +128,12 @@ func (s *Scheduler) dispatch(ctx context.Context, jobs chan<- string) {
 			continue
 		}
 		last := s.lastWalked[exp]
-		if !last.IsZero() && now.Sub(last) < s.interval {
-			s.mu.Unlock()
-			continue
+		if !s.isForced(exp, last, forced) {
+			eff := s.effectiveInterval(exp, intervals)
+			if !last.IsZero() && now.Sub(last) < eff {
+				s.mu.Unlock()
+				continue
+			}
 		}
 		s.inFlight[exp] = true
 		s.mu.Unlock()
@@ -129,6 +147,67 @@ func (s *Scheduler) dispatch(ctx context.Context, jobs chan<- string) {
 			s.mu.Unlock()
 		}
 	}
+}
+
+// snapshotForceRequests returns max(requested_at) per exporter from
+// the operator-triggered walk queue. Returns nil when no credential
+// store is wired or the listing fails — callers must treat a nil map
+// as "no forced walks".
+func (s *Scheduler) snapshotForceRequests(ctx context.Context) map[string]time.Time {
+	if s.creds == nil {
+		return nil
+	}
+	listCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	reqs, err := s.creds.WalkRequests(listCtx)
+	if err != nil {
+		slog.Warn("snmp: list walk requests", "err", err)
+		return nil
+	}
+	return reqs
+}
+
+// isForced returns true if exporter has a pending walk request that
+// post-dates its last completed walk.
+func (s *Scheduler) isForced(exp string, last time.Time, forced map[string]time.Time) bool {
+	req, ok := forced[exp]
+	if !ok {
+		return false
+	}
+	return req.After(last)
+}
+
+// snapshotIntervals returns a map of exporter → configured walk
+// cadence, populated only for exporters that have a binding row with
+// interval_sec > 0. Returns nil when no credential store is wired or
+// the listing fails — callers must treat a nil map as "no overrides".
+func (s *Scheduler) snapshotIntervals(ctx context.Context) map[string]time.Duration {
+	if s.creds == nil {
+		return nil
+	}
+	listCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	creds, err := s.creds.List(listCtx)
+	if err != nil {
+		slog.Warn("snmp: list credential intervals", "err", err)
+		return nil
+	}
+	out := make(map[string]time.Duration, len(creds))
+	for _, c := range creds {
+		if c.Interval > 0 {
+			out[c.Exporter] = c.Interval
+		}
+	}
+	return out
+}
+
+// effectiveInterval returns the walk cadence for exp: the per-binding
+// override when present, otherwise the cluster-wide default.
+func (s *Scheduler) effectiveInterval(exp string, overrides map[string]time.Duration) time.Duration {
+	if d, ok := overrides[exp]; ok && d > 0 {
+		return d
+	}
+	return s.interval
 }
 
 func (s *Scheduler) walkOne(ctx context.Context, target string) {
@@ -186,12 +265,16 @@ func (s *Scheduler) clientFor(ctx context.Context, target string) (Client, error
 	return nil, fmt.Errorf("no credential and no fallback")
 }
 
-// discoverExporters reads the distinct set of exporters from the
-// flows table over the last 24 hours. SNMP doesn't poll exporters
-// that haven't shown up in flow data yet — they're either offline
-// or not configured to send flows, and either way SNMP-only inventory
-// is out of scope for v0.
-func (s *Scheduler) discoverExporters(ctx context.Context) ([]string, error) {
+// discoverExporters returns the union of:
+//   - exporters seen in the flows table over the last 24 hours
+//   - exporters configured in the credential store (so a brand-new
+//     binding gets walked on the next tick rather than waiting for
+//     the device to also start sending flows)
+//   - exporters with an outstanding operator walk-request
+//
+// Order is not meaningful; duplicates are collapsed via a set.
+func (s *Scheduler) discoverExporters(ctx context.Context, forced map[string]time.Time) ([]string, error) {
+	seen := make(map[string]struct{}, 32)
 	const q = `
 SELECT DISTINCT IPv6NumToString(exporter)
 FROM flows
@@ -201,15 +284,38 @@ WHERE observed >= now() - INTERVAL 1 DAY`
 		return nil, fmt.Errorf("snmp: discover query: %w", err)
 	}
 	defer rows.Close()
-	out := make([]string, 0, 16)
 	for rows.Next() {
 		var raw string
 		if err := rows.Scan(&raw); err != nil {
 			return nil, err
 		}
-		out = append(out, unmap4in6(raw))
+		seen[unmap4in6(raw)] = struct{}{}
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	if s.creds != nil {
+		listCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		creds, err := s.creds.List(listCtx)
+		cancel()
+		if err != nil {
+			slog.Warn("snmp: list credentials for discovery", "err", err)
+		} else {
+			for _, c := range creds {
+				seen[c.Exporter] = struct{}{}
+			}
+		}
+	}
+	for exp := range forced {
+		seen[exp] = struct{}{}
+	}
+
+	out := make([]string, 0, len(seen))
+	for exp := range seen {
+		out = append(out, exp)
+	}
+	return out, nil
 }
 
 // persist writes one inventory row + one snmp-interfaces row per

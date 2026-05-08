@@ -669,6 +669,14 @@ export const api = {
     if (!r.ok) throw new Error(`test ${exporter} → ${r.status}`)
     return r.json()
   },
+  requestSnmpWalk: async (exporter: string) => {
+    const r = await fetch(
+      `/api/devices/${encodeURIComponent(exporter)}/snmp/walk`,
+      { method: 'POST' },
+    )
+    if (!r.ok) throw new Error(`walk ${exporter} → ${r.status}`)
+    return r.json()
+  },
   topTalkers: (
     filters: URLSearchParams,
     range?: TimeRangeArg,

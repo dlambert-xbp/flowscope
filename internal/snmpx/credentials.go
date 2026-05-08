@@ -54,6 +54,17 @@ type CredentialStore interface {
 	List(ctx context.Context) ([]Credential, error)
 	Set(ctx context.Context, c Credential, actor string) error
 	Delete(ctx context.Context, exporter string) error
+
+	// RequestWalk enqueues an immediate-walk request for exporter.
+	// The snmp scheduler picks it up on its next dispatch tick and
+	// walks regardless of cadence. Idempotent — duplicate requests
+	// are harmless.
+	RequestWalk(ctx context.Context, exporter string, actor string) error
+
+	// WalkRequests returns max(requested_at) per exporter from the
+	// outstanding-request queue. Cheap — a small aggregate query.
+	// The scheduler calls this every dispatch pass.
+	WalkRequests(ctx context.Context) (map[string]time.Time, error)
 }
 
 // NewClickHouseCredentialStore returns a store backed by the
@@ -226,6 +237,40 @@ func (s *chCredStore) Delete(ctx context.Context, exporter string) error {
 	expIP := toIPv6(addr)
 	const q = `ALTER TABLE snmp_credentials DELETE WHERE exporter = ?`
 	return s.conn.Exec(ctx, q, expIP)
+}
+
+// RequestWalk enqueues an immediate-walk request. Append-only — the
+// scheduler decides what to do via max(requested_at) > lastWalked.
+func (s *chCredStore) RequestWalk(ctx context.Context, exporter string, actor string) error {
+	addr, err := netip.ParseAddr(exporter)
+	if err != nil {
+		return fmt.Errorf("snmpx.creds: parse %q: %w", exporter, err)
+	}
+	const ins = `INSERT INTO snmp_walk_requests (exporter, requested_at, requested_by) VALUES (?, ?, ?)`
+	return s.conn.Exec(ctx, ins, toIPv6(addr), time.Now().UTC(), actorOr(actor))
+}
+
+// WalkRequests returns the latest request time per exporter. Bounded
+// by the table's 1-day TTL so the result set stays small.
+func (s *chCredStore) WalkRequests(ctx context.Context) (map[string]time.Time, error) {
+	const q = `SELECT IPv6NumToString(exporter), max(requested_at) FROM snmp_walk_requests GROUP BY exporter`
+	rows, err := s.conn.Query(ctx, q)
+	if err != nil {
+		return nil, fmt.Errorf("snmpx.creds: walk requests: %w", err)
+	}
+	defer rows.Close()
+	out := make(map[string]time.Time, 16)
+	for rows.Next() {
+		var (
+			raw string
+			ts  time.Time
+		)
+		if err := rows.Scan(&raw, &ts); err != nil {
+			return nil, fmt.Errorf("snmpx.creds: scan walk request: %w", err)
+		}
+		out[unmap4in6(raw)] = ts
+	}
+	return out, rows.Err()
 }
 
 // toIPv6 returns the 16-byte big-endian net.IP form for the IPv6

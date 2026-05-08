@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { Fragment, useEffect, useState, type ReactNode } from 'react'
+import { Fragment, useCallback, useEffect, useState, type ReactNode } from 'react'
 import { api, fmt, labelExporter, labelInterface } from '../api'
 import type {
   Device,
@@ -48,6 +48,33 @@ const RAIL_WIDTH_KEY = 'flowscope.devices.railWidth'
 const RAIL_WIDTH_DEFAULT = 280
 const RAIL_WIDTH_MIN = 220
 const RAIL_WIDTH_MAX = 480
+
+// URL param holding the currently selected exporter on the Devices
+// tab. Named "device" rather than "exporter" so it doesn't collide
+// with the Flows-tab filter chip (which is also "exporter") — they
+// can both live in the URL without trampling each other when the
+// operator deep-links across tabs.
+const DEVICE_PARAM = 'device'
+
+function readDeviceFromURL(): string | null {
+  if (typeof window === 'undefined') return null
+  return new URLSearchParams(window.location.search).get(DEVICE_PARAM)
+}
+
+function writeDeviceToURL(exporter: string | null) {
+  if (typeof window === 'undefined') return
+  const sp = new URLSearchParams(window.location.search)
+  if (exporter) {
+    sp.set(DEVICE_PARAM, exporter)
+  } else {
+    sp.delete(DEVICE_PARAM)
+  }
+  const qs = sp.toString()
+  const next = qs ? `${window.location.pathname}?${qs}` : window.location.pathname
+  if (window.location.pathname + window.location.search !== next) {
+    window.history.replaceState({}, '', next)
+  }
+}
 
 function useResizableWidth(key: string, def: number, min: number, max: number) {
   const [width, setWidth] = useState<number>(() => {
@@ -135,7 +162,21 @@ export function Devices({
     refetchInterval: range.kind === 'preset' ? 5000 : false,
   })
   const devices = list.data?.devices ?? []
-  const [selected, setSelected] = useState<string | null>(null)
+  // Selected exporter lives in the URL (?device=<ip>) so a refresh or
+  // a shared link restores the same detail view. The local mirror is
+  // kept in sync via popstate (back/forward) and via the click handler
+  // below, which writes the URL synchronously before any fetch fires
+  // — render-on-state-change rule.
+  const [selected, setSelectedState] = useState<string | null>(() => readDeviceFromURL())
+  useEffect(() => {
+    const onPop = () => setSelectedState(readDeviceFromURL())
+    window.addEventListener('popstate', onPop)
+    return () => window.removeEventListener('popstate', onPop)
+  }, [])
+  const setSelected = useCallback((exporter: string) => {
+    writeDeviceToURL(exporter)
+    setSelectedState(exporter)
+  }, [])
 
   // Auto-select the first device on first load if nothing is selected.
   if (selected === null && devices.length > 0) {
@@ -287,6 +328,18 @@ function Feature({
   onNavigateToFlows: NavigateToFlows
 }) {
   const [sub, setSub] = useState<SubTab>('summary')
+  // Reuse the same query key FeatureHeader uses so TanStack dedupes —
+  // we just want the SNMP sys_name, if it's been walked, to label the
+  // exporter chip when the operator deep-links into Flows.
+  const inv = useQuery({
+    queryKey: ['device-inventory', exporter ?? ''],
+    queryFn: () =>
+      api
+        .deviceInventory(exporter as string)
+        .catch(() => undefined as DeviceInventory | undefined),
+    enabled: !!exporter,
+    refetchInterval: 30_000,
+  })
   if (!exporter) {
     return (
       <div className="p-8 text-dim font-mono text-[13px]">
@@ -294,6 +347,9 @@ function Feature({
       </div>
     )
   }
+  // Always non-empty: falls back to the IP, so the chip never flashes
+  // an empty label on click while the inventory query is in flight.
+  const exporterLabel = inv.data?.sys_name || exporter
   return (
     <article className="overflow-auto">
       <FeatureHeader exporter={exporter} range={range} rangeKey={rangeKey} />
@@ -302,7 +358,11 @@ function Feature({
         {sub === 'summary' && <SummaryTab exporter={exporter} range={range} rangeKey={rangeKey} />}
         {sub === 'interfaces' && <InterfacesTab exporter={exporter} range={range} rangeKey={rangeKey} />}
         {sub === 'flows' && (
-          <FlowsTab exporter={exporter} onNavigateToFlows={onNavigateToFlows} />
+          <FlowsTab
+            exporter={exporter}
+            exporterLabel={exporterLabel}
+            onNavigateToFlows={onNavigateToFlows}
+          />
         )}
       </div>
     </article>
@@ -815,9 +875,11 @@ function InterfacesTab({
 
 function FlowsTab({
   exporter,
+  exporterLabel,
   onNavigateToFlows,
 }: {
   exporter: string
+  exporterLabel: string
   onNavigateToFlows: NavigateToFlows
 }) {
   const q = useQuery({
@@ -837,7 +899,7 @@ function FlowsTab({
     onToggle: toggle,
   })
   const investigateExporter = () =>
-    onNavigateToFlows([{ key: 'exporter', value: exporter }])
+    onNavigateToFlows([{ key: 'exporter', value: exporter, label: exporterLabel }])
   return (
     <div>
       <div className="flex items-baseline gap-3 px-4 py-3 border-b border-line">
@@ -902,8 +964,16 @@ function FlowsTab({
         </table>
       )}
       <div className="grid grid-cols-1 lg:grid-cols-2 border-t border-line">
-        <MiniTalkers exporter={exporter} onNavigateToFlows={onNavigateToFlows} />
-        <MiniServices exporter={exporter} onNavigateToFlows={onNavigateToFlows} />
+        <MiniTalkers
+          exporter={exporter}
+          exporterLabel={exporterLabel}
+          onNavigateToFlows={onNavigateToFlows}
+        />
+        <MiniServices
+          exporter={exporter}
+          exporterLabel={exporterLabel}
+          onNavigateToFlows={onNavigateToFlows}
+        />
       </div>
     </div>
   )
@@ -997,9 +1067,11 @@ function MiniBars<T>({
 
 function MiniTalkers({
   exporter,
+  exporterLabel,
   onNavigateToFlows,
 }: {
   exporter: string
+  exporterLabel: string
   onNavigateToFlows: NavigateToFlows
 }) {
   const qs = new URLSearchParams({ exporter })
@@ -1014,7 +1086,7 @@ function MiniTalkers({
         title="Top talkers"
         sub="this exporter · 5min · by bytes"
         onInvestigate={() =>
-          onNavigateToFlows([{ key: 'exporter', value: exporter }])
+          onNavigateToFlows([{ key: 'exporter', value: exporter, label: exporterLabel }])
         }
       />
       <MiniBars
@@ -1038,9 +1110,11 @@ function MiniTalkers({
 
 function MiniServices({
   exporter,
+  exporterLabel,
   onNavigateToFlows,
 }: {
   exporter: string
+  exporterLabel: string
   onNavigateToFlows: NavigateToFlows
 }) {
   const qs = new URLSearchParams({ exporter })
@@ -1055,7 +1129,7 @@ function MiniServices({
         title="Top services"
         sub="this exporter · 5min · by bytes"
         onInvestigate={() =>
-          onNavigateToFlows([{ key: 'exporter', value: exporter }])
+          onNavigateToFlows([{ key: 'exporter', value: exporter, label: exporterLabel }])
         }
       />
       <MiniBars

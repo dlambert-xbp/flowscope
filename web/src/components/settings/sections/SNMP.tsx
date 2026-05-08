@@ -202,6 +202,7 @@ function CredentialRow({ c, onEdit }: { c: SNMPCredential; onEdit: () => void })
   })
   const [test, setTest] = useState<SNMPTestResult | null>(null)
   const [testing, setTesting] = useState(false)
+  const [walkState, setWalkState] = useState<'idle' | 'queued' | 'error'>('idle')
   const runTest = async () => {
     setTesting(true)
     try {
@@ -212,6 +213,16 @@ function CredentialRow({ c, onEdit }: { c: SNMPCredential; onEdit: () => void })
     } finally {
       setTesting(false)
     }
+  }
+  const runWalk = async () => {
+    setWalkState('queued')
+    try {
+      await api.requestSnmpWalk(c.exporter)
+    } catch {
+      setWalkState('error')
+      return
+    }
+    setTimeout(() => setWalkState('idle'), 4000)
   }
   const identity = c.version === 'v3' ? c.v3_username || '—' : 'community'
   const secrets =
@@ -242,6 +253,13 @@ function CredentialRow({ c, onEdit }: { c: SNMPCredential; onEdit: () => void })
           <div className="flex justify-end gap-2">
             <Btn onClick={runTest} disabled={testing}>
               {testing ? 'testing…' : 'test'}
+            </Btn>
+            <Btn onClick={runWalk} disabled={walkState === 'queued'}>
+              {walkState === 'queued'
+                ? 'queued · walks ≤30s'
+                : walkState === 'error'
+                  ? 'walk failed'
+                  : 'walk now'}
             </Btn>
             <Btn onClick={onEdit}>edit</Btn>
             <Btn

@@ -606,6 +606,31 @@ func (h *handlers) testCredential(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// requestSnmpWalk enqueues an immediate SNMP walk for exporter. The
+// snmp scheduler picks the request up on its next dispatch tick (≤ 30s)
+// and walks regardless of the configured cadence. Returns 202 Accepted
+// once the request is durably queued — the actual walk completes
+// asynchronously and the result lands in device_inventory /
+// device_snmp_interfaces the way scheduled walks do.
+//
+//	POST /api/devices/{exporter}/snmp/walk
+func (h *handlers) requestSnmpWalk(w http.ResponseWriter, r *http.Request) {
+	if h.creds == nil {
+		writeError(w, http.StatusServiceUnavailable, "credential management disabled")
+		return
+	}
+	exporter := chi.URLParam(r, "exporter")
+	if _, err := netip.ParseAddr(exporter); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid exporter address")
+		return
+	}
+	if err := h.creds.RequestWalk(r.Context(), exporter, actorFromRequest(r)); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "exporter": exporter})
+}
+
 // alerts lists alerts in the supplied state bucket.
 //
 //	GET /api/alerts?state=open|acknowledged|closed
