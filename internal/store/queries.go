@@ -235,6 +235,60 @@ WHERE database = currentDatabase()
 	return h, rows.Err()
 }
 
+// ExporterHealthRow is one (exporter, source) aggregate over the
+// trailing window. LossPct = seq_gaps / (seq_gaps + datagrams) when
+// datagrams > 0; 0 when there's been no traffic.
+type ExporterHealthRow struct {
+	Exporter   string  `json:"exporter"`
+	SysName    string  `json:"sys_name"`
+	Source     string  `json:"source"`
+	Datagrams  uint64  `json:"datagrams"`
+	SeqGaps    uint64  `json:"seq_gaps"`
+	LossPct    float64 `json:"loss_pct"`
+	LastSeen   time.Time `json:"last_seen"`
+}
+
+// QueryExporterHealth aggregates per-(exporter, source) datagram +
+// gap counts from the exporter_health table over the time range.
+// LEFT JOINs SNMP inventory for the human sys_name.
+func QueryExporterHealth(ctx context.Context, conn driver.Conn, tr TimeRange) ([]ExporterHealthRow, error) {
+	pred, args := tr.Predicate("ts")
+	q := `
+WITH inv AS (` + sqlLatestInventory + `)
+SELECT
+    e.exporter,
+    ifNull(inv.sys_name, '') AS sys_name,
+    e.source,
+    sum(e.datagrams) AS datagrams,
+    sum(e.seq_gaps)  AS seq_gaps,
+    max(e.ts)        AS last_seen
+FROM exporter_health AS e
+LEFT JOIN inv ON e.exporter = inv.exporter
+WHERE ` + pred + `
+GROUP BY e.exporter, sys_name, e.source
+ORDER BY seq_gaps DESC, datagrams DESC`
+	rows, err := conn.Query(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("store: query exporter health: %w", err)
+	}
+	defer rows.Close()
+	out := make([]ExporterHealthRow, 0, 16)
+	for rows.Next() {
+		var r ExporterHealthRow
+		var exp netip.Addr
+		if err := rows.Scan(&exp, &r.SysName, &r.Source, &r.Datagrams, &r.SeqGaps, &r.LastSeen); err != nil {
+			return nil, fmt.Errorf("store: scan exporter health row: %w", err)
+		}
+		r.Exporter = exp.Unmap().String()
+		denom := r.Datagrams + r.SeqGaps
+		if denom > 0 {
+			r.LossPct = float64(r.SeqGaps) / float64(denom) * 100
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 // SourceBreakdown is one row per ingest source label observed in the
 // flows table over the window — typically "netflow_v5", "netflow_v9",
 // "ipfix", "sflow", "gnmi". The Overview tab uses this to show stream

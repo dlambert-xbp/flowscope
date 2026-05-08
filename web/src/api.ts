@@ -133,6 +133,16 @@ export type StreamRow = {
   exporters: number
 }
 
+export type ExporterHealthRow = {
+  exporter: string
+  sys_name: string
+  source: string
+  datagrams: number
+  seq_gaps: number
+  loss_pct: number
+  last_seen: string
+}
+
 export type StorageHealth = {
   insert_lag_seconds: number
   rows_per_sec_recent: number
@@ -467,6 +477,10 @@ export const api = {
       `/api/health/streams?${timeQuery(range)}`,
     ),
   healthStorage: () => getJSON<StorageHealth>(`/api/health/storage`),
+  healthExporters: (range?: TimeRangeArg) =>
+    getJSON<{ count: number; rows: ExporterHealthRow[]; window: string }>(
+      `/api/health/exporters?${timeQuery(range)}`,
+    ),
   recentFlows: (limit = 20, exporter?: string) =>
     getJSON<{ count: number; flows: RecentFlow[] }>(
       exporter

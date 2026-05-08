@@ -56,6 +56,24 @@ func (h *handlers) summary(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s)
 }
 
+// healthExporters returns per-exporter loss aggregated over the
+// time range. Powers the Overview "Exporter accuracy" panel.
+//
+//	GET /api/health/exporters?window=300s
+func (h *handlers) healthExporters(w http.ResponseWriter, r *http.Request) {
+	tr := parseTimeRange(r, 5*time.Minute)
+	rows, err := store.QueryExporterHealth(r.Context(), h.conn, tr)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"count":  len(rows),
+		"rows":   rows,
+		"window": tr.WindowDuration().String(),
+	})
+}
+
 // healthStorage returns ClickHouse-side write health: insert lag,
 // recent rows/sec, table row-count estimates. Powers the Overview
 // Storage panel.

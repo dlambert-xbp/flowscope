@@ -5,6 +5,7 @@ import type {
   Alert,
   AlertSummary,
   Device,
+  ExporterHealthRow,
   StorageHealth,
   StreamRow,
   Summary,
@@ -62,6 +63,11 @@ export function Overview({
     queryFn: () => api.healthStorage(),
     refetchInterval: 5000,
   })
+  const exporterHealth = useQuery({
+    queryKey: ['health-exporters', rangeKey],
+    queryFn: () => api.healthExporters(apiRange),
+    refetchInterval: range.kind === 'preset' ? 10000 : false,
+  })
 
   const deviceList = devices.data?.devices ?? []
   const exporterStatus = classifyExporters(deviceList)
@@ -90,6 +96,13 @@ export function Overview({
           devices={deviceList}
           loading={devices.isLoading}
           status={exporterStatus}
+        />
+      </div>
+      <div className="border-b border-line">
+        <ExporterAccuracyPanel
+          rows={exporterHealth.data?.rows ?? []}
+          loading={exporterHealth.isLoading}
+          range={range}
         />
       </div>
       <div className="grid grid-cols-1 lg:grid-cols-2 border-b border-line">
@@ -694,6 +707,99 @@ function SeverityBadge({ sev }: { sev: Alert['severity'] }) {
 }
 
 /* ----------------------------- Storage panel ---------------------------- */
+
+/* ---------------------- Exporter accuracy panel ---------------------- */
+
+// ExporterAccuracyPanel surfaces per-(exporter, source) loss rate
+// derived from datagram sequence-number gaps in the ingest tracker.
+// 0% loss is healthy; >0.5% paints warn, >5% paints crit. The panel
+// hides the row count when there's been zero traffic in the window
+// — a common state during dev / quiet periods.
+function ExporterAccuracyPanel({
+  rows,
+  loading,
+  range,
+}: {
+  rows: ExporterHealthRow[]
+  loading: boolean
+  range: TimeRange
+}) {
+  const winLabel = rangeLabel(range)
+  const worst = rows.reduce((m, r) => (r.loss_pct > m ? r.loss_pct : m), 0)
+  const worstTone =
+    worst >= 5 ? 'text-crit' : worst >= 0.5 ? 'text-warn' : 'text-ok'
+  const worstLabel =
+    rows.length === 0
+      ? 'no datagrams'
+      : worst >= 5
+        ? 'lossy ingest'
+        : worst >= 0.5
+          ? 'minor loss'
+          : 'no loss'
+  return (
+    <PanelShell
+      title="Exporter accuracy"
+      sub={`per-exporter datagram loss · ${winLabel}`}
+      right={
+        <span className={`font-mono text-[10px] tracking-[0.06em] ${worstTone}`}>
+          {worstLabel}
+        </span>
+      }
+    >
+      {loading ? (
+        <Loading />
+      ) : rows.length === 0 ? (
+        <Empty>
+          no exporter health snapshots yet · the ingest service flushes the seq
+          tracker every 10s after the first datagram from any exporter
+        </Empty>
+      ) : (
+        <table className="w-full">
+          <colgroup>
+            <col style={{ width: '32%' }} />
+            <col style={{ width: '110px' }} />
+            <col />
+            <col />
+            <col style={{ width: '90px' }} />
+          </colgroup>
+          <thead>
+            <tr>
+              <th>exporter</th>
+              <th>source</th>
+              <th className="r">datagrams</th>
+              <th className="r">seq gaps</th>
+              <th className="r">loss</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r, i) => {
+              const tone =
+                r.loss_pct >= 5 ? 'text-crit' : r.loss_pct >= 0.5 ? 'text-warn' : 'text-ok'
+              return (
+                <tr key={i} className="hover:bg-surface">
+                  <td>
+                    <div className="font-mono truncate">{r.sys_name || r.exporter}</div>
+                    {r.sys_name && (
+                      <div className="font-mono italic text-faint text-[10.5px] truncate">
+                        {r.exporter}
+                      </div>
+                    )}
+                  </td>
+                  <td className="font-mono text-dim">{r.source}</td>
+                  <td className="r n">{fmt.num(r.datagrams)}</td>
+                  <td className={`r n ${r.seq_gaps > 0 ? 'text-warn' : 'text-faint'}`}>
+                    {fmt.num(r.seq_gaps)}
+                  </td>
+                  <td className={`r n ${tone}`}>{r.loss_pct.toFixed(2)}%</td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      )}
+    </PanelShell>
+  )
+}
 
 function StoragePanel({
   summary,

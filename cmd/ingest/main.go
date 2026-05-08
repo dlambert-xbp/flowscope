@@ -18,15 +18,19 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 	"os"
 	"os/signal"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
+
 	"github.com/dlambert-xbp/flowscope/internal/netflow"
 	"github.com/dlambert-xbp/flowscope/internal/obs"
 	"github.com/dlambert-xbp/flowscope/internal/record"
+	"github.com/dlambert-xbp/flowscope/internal/seqtrack"
 	"github.com/dlambert-xbp/flowscope/internal/sflow"
 	"github.com/dlambert-xbp/flowscope/internal/store"
 )
@@ -61,6 +65,7 @@ func run() error {
 	var (
 		flowBatcher    *store.FlowBatcher
 		counterBatcher *store.CounterBatcher
+		chConn         driver.Conn
 	)
 	if chDSN != "" {
 		conn, err := store.Open(ctx, chDSN)
@@ -68,6 +73,7 @@ func run() error {
 			return fmt.Errorf("clickhouse open: %w", err)
 		}
 		defer conn.Close()
+		chConn = conn
 
 		if err := store.Migrate(ctx, conn); err != nil {
 			return fmt.Errorf("clickhouse migrate: %w", err)
@@ -97,18 +103,19 @@ func run() error {
 	flowEmitter := record.NewEmitter(ring, flowSinks...)
 	counterEmitter := record.NewCounterEmitter(counterSinks...)
 	templateCache := netflow.NewTemplateCache()
+	tracker := seqtrack.New()
 
 	var wg sync.WaitGroup
 	wg.Add(3)
 	go func() {
 		defer wg.Done()
-		if err := runNetFlowListener(ctx, netflowAddr, flowEmitter, templateCache); err != nil {
+		if err := runNetFlowListener(ctx, netflowAddr, flowEmitter, templateCache, tracker); err != nil {
 			slog.Error("netflow listener exited", "err", err)
 		}
 	}()
 	go func() {
 		defer wg.Done()
-		if err := runSFlowListener(ctx, sflowAddr, flowEmitter, counterEmitter); err != nil {
+		if err := runSFlowListener(ctx, sflowAddr, flowEmitter, counterEmitter, tracker); err != nil {
 			slog.Error("sflow listener exited", "err", err)
 		}
 	}()
@@ -119,6 +126,9 @@ func run() error {
 		}
 	}()
 	go ringSizeReporter(ctx, ring)
+	if chConn != nil {
+		go runExporterHealthFlusher(ctx, chConn, tracker)
+	}
 
 	slog.Info("flowscope ingest started",
 		"netflow", netflowAddr,
@@ -151,7 +161,7 @@ func run() error {
 // runNetFlowListener serves the NetFlow / IPFIX UDP port. Dispatches
 // by version word: 5 → fixed v5 parser, 9 / 10 → template-driven
 // v9 / IPFIX parser sharing the supplied TemplateCache.
-func runNetFlowListener(ctx context.Context, addr string, emitter *record.Emitter, cache *netflow.TemplateCache) error {
+func runNetFlowListener(ctx context.Context, addr string, emitter *record.Emitter, cache *netflow.TemplateCache, tracker *seqtrack.Tracker) error {
 	conn, err := openUDP(ctx, addr)
 	if err != nil {
 		return err
@@ -183,9 +193,15 @@ func runNetFlowListener(ctx context.Context, addr string, emitter *record.Emitte
 			scratch, err = netflow.ParseV5(buf[:n], exporter, scratch)
 		case 9:
 			protocol = "netflow.v9"
+			if seq, ok := netflow.ReadV9Sequence(buf[:n]); ok {
+				tracker.Note(exporter, seqtrack.SourceNetFlowV9, seq)
+			}
 			scratch, err = netflow.ParseV9OrIPFIX(cache, buf[:n], exporter, scratch)
 		case 10:
 			protocol = "ipfix"
+			if seq, ok := netflow.ReadIPFIXSequence(buf[:n]); ok {
+				tracker.Note(exporter, seqtrack.SourceIPFIX, seq)
+			}
 			scratch, err = netflow.ParseV9OrIPFIX(cache, buf[:n], exporter, scratch)
 		default:
 			obs.ParseErrorsTotal.WithLabelValues("netflow", "unknown_version").Inc()
@@ -210,7 +226,7 @@ func runNetFlowListener(ctx context.Context, addr string, emitter *record.Emitte
 // runSFlowListener serves the sFlow v5 UDP port. Each datagram can
 // contain both flow_samples and counters_samples; the parser produces
 // both in one call and the listener routes each through its emitter.
-func runSFlowListener(ctx context.Context, addr string, flowEmitter *record.Emitter, counterEmitter *record.CounterEmitter) error {
+func runSFlowListener(ctx context.Context, addr string, flowEmitter *record.Emitter, counterEmitter *record.CounterEmitter, tracker *seqtrack.Tracker) error {
 	conn, err := openUDP(ctx, addr)
 	if err != nil {
 		return err
@@ -234,6 +250,13 @@ func runSFlowListener(ctx context.Context, addr string, flowEmitter *record.Emit
 		}
 		obs.UDPPacketsReceived.WithLabelValues("sflow").Inc()
 		fallback := src.Addr().Unmap()
+		// Note datagram seq before parse; agent_address override (per
+		// VISION.md §4.1) means the post-parse exporter may differ from
+		// the UDP source. Use the UDP source for tracking — parsing-time
+		// agent address is best-effort and may be 0.0.0.0.
+		if seq, ok := sflow.ReadSequence(buf[:n]); ok {
+			tracker.Note(fallback, seqtrack.SourceSFlow, seq)
+		}
 		flowScratch = flowScratch[:0]
 		counterScratch = counterScratch[:0]
 		flowScratch, counterScratch, err = sflow.Parse(buf[:n], fallback, flowScratch, counterScratch)
@@ -278,6 +301,50 @@ func ringSizeReporter(ctx context.Context, ring *record.Ring) {
 			obs.RingSize.Set(float64(ring.Len()))
 		}
 	}
+}
+
+// runExporterHealthFlusher drains the seqtrack tracker every 10s
+// and writes accumulated per-(exporter, source) datagram and gap
+// counts to the exporter_health table. The api service queries
+// this table to render the per-exporter accuracy panel on Overview.
+//
+// Skips writes when the snapshot is empty so silent exporters
+// don't bloat the table.
+func runExporterHealthFlusher(ctx context.Context, conn driver.Conn, tracker *seqtrack.Tracker) {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			snapshots := tracker.Drain()
+			if len(snapshots) == 0 {
+				continue
+			}
+			if err := flushExporterHealth(ctx, conn, snapshots); err != nil {
+				slog.Warn("exporter health flush failed", "err", err, "rows", len(snapshots))
+			}
+		}
+	}
+}
+
+func flushExporterHealth(ctx context.Context, conn driver.Conn, snapshots []seqtrack.Snapshot) error {
+	batch, err := conn.PrepareBatch(ctx, "INSERT INTO exporter_health (ts, exporter, source, datagrams, seq_gaps, last_seq)")
+	if err != nil {
+		return fmt.Errorf("prepare batch: %w", err)
+	}
+	now := time.Now().UTC()
+	for _, s := range snapshots {
+		exp := s.Exporter
+		if !exp.Is6() {
+			exp = netip.AddrFrom16(exp.As16())
+		}
+		if err := batch.Append(now, exp.As16(), s.Source, s.Datagrams, s.SeqGaps, s.LastSeq); err != nil {
+			return fmt.Errorf("append: %w", err)
+		}
+	}
+	return batch.Send()
 }
 
 // parseErrReason classifies parse errors into stable Prometheus label
