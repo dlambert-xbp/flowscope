@@ -165,6 +165,48 @@ type RecentFlow struct {
 	Source         string    `json:"source"`
 }
 
+// SourceBreakdown is one row per ingest source label observed in the
+// flows table over the window — typically "netflow_v5", "netflow_v9",
+// "ipfix", "sflow", "gnmi". The Overview tab uses this to show stream
+// health per protocol family.
+type SourceBreakdown struct {
+	Source    string `json:"source"`
+	Flows     uint64 `json:"flows"`
+	Bytes     uint64 `json:"bytes"`
+	Packets   uint64 `json:"packets"`
+	Exporters uint64 `json:"exporters"`
+}
+
+// QuerySourceBreakdown returns one row per ingest source observed
+// over the supplied time range, ordered by flow count desc.
+func QuerySourceBreakdown(ctx context.Context, conn driver.Conn, tr TimeRange) ([]SourceBreakdown, error) {
+	pred, args := tr.Predicate("observed")
+	q := `
+SELECT source,
+       count()        AS flows,
+       sum(bytes)     AS bytes,
+       sum(packets)   AS packets,
+       uniq(exporter) AS exporters
+FROM flows
+WHERE ` + pred + `
+GROUP BY source
+ORDER BY flows DESC`
+	rows, err := conn.Query(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("store: query source breakdown: %w", err)
+	}
+	defer rows.Close()
+	out := make([]SourceBreakdown, 0, 4)
+	for rows.Next() {
+		var s SourceBreakdown
+		if err := rows.Scan(&s.Source, &s.Flows, &s.Bytes, &s.Packets, &s.Exporters); err != nil {
+			return nil, fmt.Errorf("store: scan source breakdown: %w", err)
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
 // QuerySummary returns aggregate stats over the supplied time range.
 func QuerySummary(ctx context.Context, conn driver.Conn, tr TimeRange) (Summary, error) {
 	pred, args := tr.Predicate("observed")

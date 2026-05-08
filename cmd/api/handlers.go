@@ -56,6 +56,24 @@ func (h *handlers) summary(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s)
 }
 
+// healthStreams returns one row per ingest source observed over the
+// time range. Powers the Overview "Streams" panel.
+//
+//	GET /api/health/streams?window=300s
+func (h *handlers) healthStreams(w http.ResponseWriter, r *http.Request) {
+	tr := parseTimeRange(r, 5*time.Minute)
+	rows, err := store.QuerySourceBreakdown(r.Context(), h.conn, tr)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"count":  len(rows),
+		"rows":   rows,
+		"window": tr.WindowDuration().String(),
+	})
+}
+
 // recentFlows returns the most recent flows, newest first.
 //
 //	GET /api/flows/recent?limit=100&exporter=10.2.0.11
