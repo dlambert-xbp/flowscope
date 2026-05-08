@@ -26,6 +26,7 @@ import (
 	"github.com/dlambert-xbp/flowscope/internal/audit"
 	"github.com/dlambert-xbp/flowscope/internal/authz"
 	"github.com/dlambert-xbp/flowscope/internal/obs"
+	"github.com/dlambert-xbp/flowscope/internal/rdns"
 	"github.com/dlambert-xbp/flowscope/internal/services"
 	"github.com/dlambert-xbp/flowscope/internal/settings"
 	"github.com/dlambert-xbp/flowscope/internal/snmpx"
@@ -115,6 +116,7 @@ func run() error {
 		ingestHealthHTTP: &http.Client{
 			Timeout: 3 * time.Second,
 		},
+		rdns: rdns.New(rdns.Options{}),
 	}
 	r.Get("/healthz", h.health)
 	r.Get("/api/summary", h.summary)
@@ -122,6 +124,7 @@ func run() error {
 	r.Get("/api/health/storage", h.healthStorage)
 	r.Get("/api/health/exporters", h.healthExporters)
 	r.Get("/api/health/ingest", h.healthIngest)
+	r.Get("/api/dns/lookup", h.dnsLookup)
 	r.Get("/api/flows/recent", h.recentFlows)
 	r.Get("/api/flows/list", h.flowsList)
 	r.Get("/api/flows/timeseries", h.flowsTimeseries)

@@ -688,7 +688,28 @@ function InterfacesTab({
   range: TimeRange
   rangeKey: unknown
 }) {
-  const [activeIfindex, setActiveIfindex] = useState<number | null>(null)
+  // Multiple charts can be open at once. Stored as a Set keyed by
+  // ifindex. Reset whenever the selected exporter changes — many
+  // devices share interface names / ifindexes, so a "stale" open
+  // chart from a previous device would silently show that other
+  // device's data.
+  const [activeIfindexes, setActiveIfindexes] = useState<Set<number>>(
+    () => new Set(),
+  )
+  useEffect(() => {
+    setActiveIfindexes(new Set())
+  }, [exporter])
+  const toggleChart = (ifindex: number) => {
+    setActiveIfindexes((prev) => {
+      const next = new Set(prev)
+      if (next.has(ifindex)) {
+        next.delete(ifindex)
+      } else {
+        next.add(ifindex)
+      }
+      return next
+    })
+  }
   const apiRange = toApi(range)
   const winLabel = rangeLabel(range)
   const q = useQuery({
@@ -752,7 +773,7 @@ function InterfacesTab({
           <tbody>
             {sortedRows.map((i: InterfaceRow) => {
               const lbl = labelInterface(i)
-              const isActive = activeIfindex === i.ifindex
+              const isActive = activeIfindexes.has(i.ifindex)
               return (
                 <Fragment key={i.ifindex}>
                   <tr className="hover:bg-surface">
@@ -767,7 +788,7 @@ function InterfacesTab({
                     <td className="r">
                       <button
                         className={`text-[11px] font-mono ${isActive ? 'text-text' : 'text-accent hover:underline'}`}
-                        onClick={() => setActiveIfindex(isActive ? null : i.ifindex)}
+                        onClick={() => toggleChart(i.ifindex)}
                       >
                         {isActive ? '× close' : 'chart →'}
                       </button>

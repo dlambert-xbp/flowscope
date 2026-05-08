@@ -19,6 +19,7 @@ import { rangeLabel, toApi, type TimeRange } from '../timeRange'
 import { ServiceLabel, useServiceName } from './ServiceLabel'
 import { LiveTail } from './LiveTail'
 import { FlowDrawer, type FlowDrillDown } from './FlowDrawer'
+import { Hostname } from './Hostname'
 
 // Flows tab — page chrome:
 //   Live tail (collapsible, expanded by default)
@@ -609,11 +610,13 @@ function TalkersList({ qs, onAdd, onDrill, range, rangeKey, sortBy, topN }: List
           <span className="font-mono text-[12px]">
             <FilterTrigger value={r.src_addr} onAdd={onAdd} k="src_addr">
               {r.src_addr}
-            </FilterTrigger>{' '}
+            </FilterTrigger>
+            <Hostname ip={r.src_addr} />{' '}
             <span className="text-faint">→</span>{' '}
             <FilterTrigger value={r.dst_addr} onAdd={onAdd} k="dst_addr">
               {r.dst_addr}
             </FilterTrigger>
+            <Hostname ip={r.dst_addr} />
           </span>
         )}
         valueOf={(r) => valueOfRow(sortBy, r)}
@@ -802,12 +805,14 @@ function ConversationsList({ qs, onAdd, onDrill, range, rangeKey, sortBy, topN }
             <FilterTrigger k="src_addr" value={r.src_addr} onAdd={onAdd}>
               {r.src_addr}
             </FilterTrigger>
-            :{r.src_port}{' '}
+            :{r.src_port}
+            <Hostname ip={r.src_addr} />{' '}
             <span className="text-faint">→</span>{' '}
             <FilterTrigger k="dst_addr" value={r.dst_addr} onAdd={onAdd}>
               {r.dst_addr}
             </FilterTrigger>
-            :{r.dst_port}{' '}
+            :{r.dst_port}
+            <Hostname ip={r.dst_addr} />{' '}
             <FilterTrigger k="proto" value={String(r.proto)} onAdd={onAdd} label={fmt.proto(r.proto)}>
               <span className="text-faint">· {fmt.proto(r.proto)}</span>
             </FilterTrigger>
@@ -1064,6 +1069,9 @@ function Investigate({
   }, [filterKey, pageSize, sort, dir])
 
   const offset = page * pageSize
+  // Investigate is for studying — no auto-refresh, no window-focus
+  // refetch. Operator triggers refresh by changing filters, sort,
+  // page size, or hitting next/prev.
   const q = useQuery({
     queryKey: ['flows-list', filterKey, rangeKey, pageSize, offset, sort, dir],
     queryFn: () =>
@@ -1074,6 +1082,7 @@ function Investigate({
         dir,
       }),
     enabled: !collapsed,
+    refetchOnWindowFocus: false,
   })
   const data: FlowsListResponse | undefined = q.data
   const flows: RecentFlow[] = data?.flows ?? []
@@ -1215,7 +1224,8 @@ function Investigate({
                         onAdd={onAdd}
                       >
                         {f.src_port}
-                      </FilterTrigger>{' '}
+                      </FilterTrigger>
+                      <Hostname ip={f.src_addr} />{' '}
                       <span className="text-faint">→</span>{' '}
                       <FilterTrigger k="dst_addr" value={f.dst_addr} onAdd={onAdd}>
                         {f.dst_addr}
@@ -1228,6 +1238,7 @@ function Investigate({
                       >
                         {f.dst_port}
                       </FilterTrigger>
+                      <Hostname ip={f.dst_addr} />
                     </td>
                     <td>
                       <FilterTrigger
