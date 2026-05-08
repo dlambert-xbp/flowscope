@@ -56,6 +56,20 @@ func (h *handlers) summary(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s)
 }
 
+// healthStorage returns ClickHouse-side write health: insert lag,
+// recent rows/sec, table row-count estimates. Powers the Overview
+// Storage panel.
+//
+//	GET /api/health/storage
+func (h *handlers) healthStorage(w http.ResponseWriter, r *http.Request) {
+	s, err := store.QueryStorageHealth(r.Context(), h.conn)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, s)
+}
+
 // healthStreams returns one row per ingest source observed over the
 // time range. Powers the Overview "Streams" panel.
 //

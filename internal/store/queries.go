@@ -165,6 +165,76 @@ type RecentFlow struct {
 	Source         string    `json:"source"`
 }
 
+// StorageHealth captures ClickHouse-side write health for the
+// Overview Storage panel. Insert lag is the gap between now and the
+// most recent flow row's observed timestamp — under healthy ingest
+// it stays under a second. Recent rate is rows/sec computed over
+// the last 60s.
+type StorageHealth struct {
+	InsertLagSeconds   float64   `json:"insert_lag_seconds"`
+	RowsPerSecRecent   float64   `json:"rows_per_sec_recent"`
+	RowsLast60s        uint64    `json:"rows_last_60s"`
+	NewestObserved     time.Time `json:"newest_observed"`
+	OldestObserved     time.Time `json:"oldest_observed"`
+	FlowsRows          uint64    `json:"flows_rows_estimate"`
+	IfaceCounterRows   uint64    `json:"iface_counter_samples_rows_estimate"`
+	DeviceInventoryRows uint64   `json:"device_inventory_rows_estimate"`
+}
+
+// QueryStorageHealth returns first-class write/lag indicators read
+// from ClickHouse system tables and the flows table directly.
+// Cheap — bounded scans on small system tables and an aggregate
+// over the trailing minute on flows.
+func QueryStorageHealth(ctx context.Context, conn driver.Conn) (StorageHealth, error) {
+	var h StorageHealth
+	row := conn.QueryRow(ctx, `
+SELECT
+    coalesce(toUnixTimestamp(now()) - toUnixTimestamp(max(observed)), 0) AS lag_seconds,
+    coalesce(countIf(observed >= now() - INTERVAL 60 SECOND) / 60.0, 0) AS rate_recent,
+    coalesce(countIf(observed >= now() - INTERVAL 60 SECOND), 0) AS rows_60s,
+    coalesce(max(observed), toDateTime(0)) AS newest,
+    coalesce(min(observed), toDateTime(0)) AS oldest
+FROM flows
+WHERE observed >= now() - INTERVAL 24 HOUR`)
+	if err := row.Scan(
+		&h.InsertLagSeconds,
+		&h.RowsPerSecRecent,
+		&h.RowsLast60s,
+		&h.NewestObserved,
+		&h.OldestObserved,
+	); err != nil {
+		return h, fmt.Errorf("store: query storage health flows: %w", err)
+	}
+	// Per-table row count estimates. system.tables.total_rows is an
+	// estimate (replicated/sharded clusters report partial values),
+	// fine for the Storage panel.
+	rows, err := conn.Query(ctx, `
+SELECT name, total_rows
+FROM system.tables
+WHERE database = currentDatabase()
+  AND name IN ('flows', 'iface_counter_samples', 'device_inventory')`)
+	if err != nil {
+		return h, fmt.Errorf("store: query storage tables: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		var total uint64
+		if err := rows.Scan(&name, &total); err != nil {
+			return h, fmt.Errorf("store: scan storage table: %w", err)
+		}
+		switch name {
+		case "flows":
+			h.FlowsRows = total
+		case "iface_counter_samples":
+			h.IfaceCounterRows = total
+		case "device_inventory":
+			h.DeviceInventoryRows = total
+		}
+	}
+	return h, rows.Err()
+}
+
 // SourceBreakdown is one row per ingest source label observed in the
 // flows table over the window — typically "netflow_v5", "netflow_v9",
 // "ipfix", "sflow", "gnmi". The Overview tab uses this to show stream

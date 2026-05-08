@@ -133,6 +133,17 @@ export type StreamRow = {
   exporters: number
 }
 
+export type StorageHealth = {
+  insert_lag_seconds: number
+  rows_per_sec_recent: number
+  rows_last_60s: number
+  newest_observed: string
+  oldest_observed: string
+  flows_rows_estimate: number
+  iface_counter_samples_rows_estimate: number
+  device_inventory_rows_estimate: number
+}
+
 export type FlowsListSort = 'observed' | 'bytes' | 'packets'
 export type FlowsListDir = 'asc' | 'desc'
 
@@ -455,6 +466,7 @@ export const api = {
     getJSON<{ count: number; rows: StreamRow[]; window: string }>(
       `/api/health/streams?${timeQuery(range)}`,
     ),
+  healthStorage: () => getJSON<StorageHealth>(`/api/health/storage`),
   recentFlows: (limit = 20, exporter?: string) =>
     getJSON<{ count: number; flows: RecentFlow[] }>(
       exporter

@@ -5,6 +5,7 @@ import type {
   Alert,
   AlertSummary,
   Device,
+  StorageHealth,
   StreamRow,
   Summary,
 } from '../api'
@@ -56,6 +57,11 @@ export function Overview({
     queryFn: () => api.alerts('open'),
     refetchInterval: 5000,
   })
+  const storage = useQuery({
+    queryKey: ['health-storage'],
+    queryFn: () => api.healthStorage(),
+    refetchInterval: 5000,
+  })
 
   const deviceList = devices.data?.devices ?? []
   const exporterStatus = classifyExporters(deviceList)
@@ -92,7 +98,7 @@ export function Overview({
           summary={alertSummary.data}
           loading={openAlerts.isLoading}
         />
-        <StoragePanel summary={summary.data} range={range} />
+        <StoragePanel summary={summary.data} range={range} storage={storage.data} />
       </div>
     </div>
   )
@@ -692,42 +698,106 @@ function SeverityBadge({ sev }: { sev: Alert['severity'] }) {
 function StoragePanel({
   summary,
   range,
+  storage,
 }: {
   summary?: Summary
   range: TimeRange
+  storage?: StorageHealth
 }) {
   const winLabel = rangeLabel(range)
   const newest = summary ? fmt.time(summary.newest) : '—'
   const oldest = summary ? fmt.time(summary.oldest) : '—'
   const span = summary ? rangeSpan(summary) : '—'
+  const lag = storage?.insert_lag_seconds ?? null
+  const lagTone =
+    lag === null
+      ? 'text-dim'
+      : lag < 5
+        ? 'text-ok'
+        : lag < 30
+          ? 'text-warn'
+          : 'text-crit'
+  const rightLabel =
+    lag === null
+      ? 'CLICKHOUSE …'
+      : lag < 5
+        ? 'CLICKHOUSE OK'
+        : lag < 30
+          ? 'INGEST LAGGING'
+          : 'STALE'
   return (
     <PanelShell
       title="Storage / retention"
       sub={`flow span across the ${winLabel}`}
-      right={<span className="font-mono text-[10px] tracking-[0.06em] text-ok">CLICKHOUSE OK</span>}
+      right={
+        <span
+          className={`font-mono text-[10px] tracking-[0.06em] ${lagTone}`}
+        >
+          {rightLabel}
+        </span>
+      }
     >
       <div className="grid grid-cols-3 border-l border-t border-line-soft">
+        <Cell
+          k="insert lag"
+          v={lag === null ? '—' : `${lag.toFixed(1)}s`}
+          tone={lagTone}
+        />
+        <Cell
+          k="rows / sec (60s)"
+          v={
+            storage
+              ? `${fmt.num(Math.round(storage.rows_per_sec_recent))}`
+              : '—'
+          }
+        />
+        <Cell
+          k="rows last 60s"
+          v={storage ? fmt.num(storage.rows_last_60s) : '—'}
+        />
+      </div>
+      <div className="grid grid-cols-3 border-l border-line-soft">
         <Cell k="newest" v={newest.slice(0, 19) + 'Z'} />
         <Cell k="oldest" v={oldest.slice(0, 19) + 'Z'} />
         <Cell k="span" v={span} />
       </div>
+      <div className="grid grid-cols-3 border-l border-line-soft">
+        <Cell
+          k="flows rows"
+          v={storage ? fmt.num(storage.flows_rows_estimate) : '—'}
+        />
+        <Cell
+          k="counter samples"
+          v={storage ? fmt.num(storage.iface_counter_samples_rows_estimate) : '—'}
+        />
+        <Cell
+          k="device inventory"
+          v={storage ? fmt.num(storage.device_inventory_rows_estimate) : '—'}
+        />
+      </div>
       <div className="px-4 py-3 text-[11.5px] text-faint border-t border-line-soft leading-[1.5]">
-        Insert lag, batcher queue depth, and per-shard write health are exposed via the api service's{' '}
-        <code className="bg-raise px-1 font-mono text-text">/metrics</code> endpoint. A first-class
-        storage panel here lands once <code className="bg-raise px-1 font-mono text-text">/api/health/storage</code>{' '}
-        is wired.
+        Insert lag is the gap between now and the most recent flow row's observed timestamp.
+        Rows/sec is computed over the trailing 60s. Per-table row counts come from{' '}
+        <code className="bg-raise px-1 font-mono text-text">system.tables.total_rows</code> and
+        are estimates on replicated clusters. Batcher queue depth + parser drop counters live on
+        the ingest service's <code className="bg-raise px-1 font-mono text-text">/metrics</code>{' '}
+        Prometheus endpoint — that signal needs its own ingest-side health endpoint to surface
+        here.
       </div>
     </PanelShell>
   )
 }
 
-function Cell({ k, v }: { k: string; v: string }) {
+function Cell({ k, v, tone }: { k: string; v: string; tone?: string }) {
   return (
     <div className="px-3 py-2.5 border-r border-b border-line-soft min-w-0 overflow-hidden">
       <div className="text-[10px] uppercase tracking-[0.1em] text-faint font-semibold mb-0.5">
         {k}
       </div>
-      <div title={v} className="font-mono text-[13px] text-text truncate tabular">
+      <div
+        title={v}
+        className={`font-mono text-[13px] truncate tabular ${tone ?? 'text-text'}`}
+      >
         {v}
       </div>
     </div>
