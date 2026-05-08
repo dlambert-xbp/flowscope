@@ -25,6 +25,8 @@ export type RecentFlow = {
   packets: number
   input_ifindex: number
   output_ifindex: number
+  src_as: number
+  dst_as: number
   source: string
 }
 
@@ -229,6 +231,14 @@ export type TopNSort = 'bytes' | 'packets' | 'flows'
 
 export type TopProtocol = {
   proto: number
+  bytes: number
+  packets: number
+  flows: number
+}
+
+export type TopASN = {
+  src_as: number
+  dst_as: number
   bytes: number
   packets: number
   flows: number
@@ -640,6 +650,18 @@ export const api = {
     getJSON<TopResponse<TopConversation>>(
       withFilters(
         `/api/top/conversations?${timeQuery(range)}&limit=${limit}&sort=${sort}`,
+        filters,
+      ),
+    ),
+  topASN: (
+    filters: URLSearchParams,
+    range?: TimeRangeArg,
+    limit = 20,
+    sort: TopNSort = 'bytes',
+  ) =>
+    getJSON<TopResponse<TopASN>>(
+      withFilters(
+        `/api/top/asn?${timeQuery(range)}&limit=${limit}&sort=${sort}`,
         filters,
       ),
     ),

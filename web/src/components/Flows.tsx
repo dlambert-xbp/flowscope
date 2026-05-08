@@ -6,6 +6,7 @@ import type {
   FlowsListResponse,
   FlowsListSort,
   RecentFlow,
+  TopASN,
   TopTalker,
   TopService,
   TopProtocol,
@@ -31,13 +32,14 @@ import { FlowDrawer, type FlowDrillDown } from './FlowDrawer'
 // full 5-tuple) to add or replace a filter chip; chips re-narrow
 // every panel's query and persist in the URL.
 
-type TabId = 'talkers' | 'services' | 'protocols' | 'conversations'
+type TabId = 'talkers' | 'services' | 'protocols' | 'conversations' | 'asn'
 
 const TAB_LABELS: Record<TabId, string> = {
   talkers: 'Top talkers',
   services: 'Top services',
   protocols: 'Top protocols',
   conversations: 'Top conversations',
+  asn: 'Top ASN',
 }
 
 const TOP_N_OPTIONS = [10, 25, 50] as const
@@ -508,6 +510,17 @@ function ActivePanel({
           topN={topN}
         />
       )}
+      {tab === 'asn' && (
+        <ASNList
+          qs={qs}
+          onAdd={onAdd}
+          onDrill={onDrill}
+          range={range}
+          rangeKey={rangeKey}
+          sortBy={sortBy}
+          topN={topN}
+        />
+      )}
       {tab === 'conversations' && (
         <ConversationsList
           qs={qs}
@@ -534,6 +547,8 @@ function subtitleFor(tab: TabId, sortBy: TopNSort): string {
       return `share of ${sortBy} total`
     case 'conversations':
       return `5-tuple · ${by}`
+    case 'asn':
+      return `src AS → dst AS · ${by}`
   }
 }
 
@@ -676,6 +691,46 @@ function ProtocolsList({ qs, onAdd, onDrill, range, rangeKey, sortBy, topN }: Li
           filters: [
             { key: 'proto', value: String(r.proto), label: fmt.proto(r.proto) },
           ],
+        })}
+        onDrill={onDrill}
+        sortBy={sortBy}
+      />
+    </ListShell>
+  )
+}
+
+function ASNList({ qs, onAdd: _onAdd, onDrill, range, rangeKey, sortBy, topN }: ListBase) {
+  const q = useQuery({
+    queryKey: ['top-asn', qs.toString(), rangeKey, sortBy, topN],
+    queryFn: () => api.topASN(qs, range, topN, sortBy),
+  })
+  const rows = (q.data?.rows ?? []).filter((r) => r.src_as !== 0 || r.dst_as !== 0)
+  const dropped = (q.data?.rows.length ?? 0) - rows.length
+  return (
+    <ListShell loading={q.isLoading} empty={!rows.length} error={q.error as Error | undefined}>
+      <Rows
+        rows={rows}
+        keyOf={(r: TopASN) => `${r.src_as}>${r.dst_as}`}
+        renderLeft={(r) => (
+          <span className="font-mono text-[12px] text-text">
+            AS{r.src_as || '—'} <span className="text-faint">→</span> AS{r.dst_as || '—'}
+            {dropped > 0 && r === rows[0] && (
+              <span className="ml-3 font-mono text-[10.5px] text-faint italic">
+                · {dropped} unknown AS row{dropped === 1 ? '' : 's'} hidden
+              </span>
+            )}
+          </span>
+        )}
+        valueOf={(r) => valueOfRow(sortBy, r)}
+        renderRight={(r) => formatValue(sortBy, valueOfRow(sortBy, r))}
+        drillFor={(r) => ({
+          title: `AS${r.src_as} → AS${r.dst_as}`,
+          subtitle: 'src AS → dst AS',
+          // ASN isn't a FlowFilter dimension yet — drill carries an
+          // empty filter set; the chart and records reflect the page
+          // filters only. Adding src_as / dst_as to FlowFilter is a
+          // follow-up.
+          filters: [],
         })}
         onDrill={onDrill}
         sortBy={sortBy}

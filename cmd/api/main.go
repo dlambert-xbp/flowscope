@@ -129,6 +129,7 @@ func run() error {
 	r.Get("/api/top/services", h.topServices)
 	r.Get("/api/top/protocols", h.topProtocols)
 	r.Get("/api/top/conversations", h.topConversations)
+	r.Get("/api/top/asn", h.topASN)
 	r.Get("/api/alerts", h.alerts)
 	r.Get("/api/alerts/summary", h.alertSummary)
 	r.Post("/api/alerts/{id}/ack", h.ackAlert)

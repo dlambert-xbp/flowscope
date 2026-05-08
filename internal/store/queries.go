@@ -162,6 +162,8 @@ type RecentFlow struct {
 	Packets        uint64    `json:"packets"`
 	InputIfIndex   uint32    `json:"input_ifindex"`
 	OutputIfIndex  uint32    `json:"output_ifindex"`
+	SrcAS          uint32    `json:"src_as"`
+	DstAS          uint32    `json:"dst_as"`
 	Source         string    `json:"source"`
 }
 
@@ -1099,6 +1101,57 @@ type TopProtocol struct {
 	Flows   uint64 `json:"flows"`
 }
 
+// TopASN is a (src_as, dst_as) pair aggregated over a window.
+// Returned by /api/top/asn. Either side may be 0 — common when
+// the exporter doesn't have a BGP table covering the address (the
+// IP is in a default route or the exporter wasn't configured
+// with NetFlow ASN export).
+type TopASN struct {
+	SrcAS   uint32 `json:"src_as"`
+	DstAS   uint32 `json:"dst_as"`
+	Bytes   uint64 `json:"bytes"`
+	Packets uint64 `json:"packets"`
+	Flows   uint64 `json:"flows"`
+}
+
+// QueryTopASN returns the N largest (src_as, dst_as) aggregates
+// over the trailing window, narrowed by the FlowFilter. The sort
+// dimension (bytes / packets / flows) is whitelisted by the caller.
+func QueryTopASN(ctx context.Context, conn driver.Conn, tr TimeRange, limit int, sort TopNSort, f FlowFilter) ([]TopASN, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 20
+	}
+	whereSQL, args, err := buildWhere(tr, f)
+	if err != nil {
+		return nil, err
+	}
+	q := `
+SELECT src_as, dst_as,
+       sum(bytes)   AS bytes,
+       sum(packets) AS packets,
+       count()      AS flows
+FROM flows
+WHERE ` + whereSQL + `
+GROUP BY src_as, dst_as
+ORDER BY ` + sort.orderColumn() + ` DESC
+LIMIT ?`
+	args = append(args, uint64(limit))
+	rows, err := conn.Query(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("store: query top asn: %w", err)
+	}
+	defer rows.Close()
+	out := make([]TopASN, 0, limit)
+	for rows.Next() {
+		var a TopASN
+		if err := rows.Scan(&a.SrcAS, &a.DstAS, &a.Bytes, &a.Packets, &a.Flows); err != nil {
+			return nil, fmt.Errorf("store: scan top asn: %w", err)
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
 // TopConversation is a full 5-tuple aggregate. Returned by
 // /api/top/conversations.
 type TopConversation struct {
@@ -1351,7 +1404,7 @@ SELECT
     f.observed, f.exporter, ifNull(inv.sys_name, '') AS exporter_name,
     f.src_addr, f.dst_addr,
     f.src_port, f.dst_port, f.proto, f.bytes, f.packets,
-    f.input_ifindex, f.output_ifindex, f.source
+    f.input_ifindex, f.output_ifindex, f.src_as, f.dst_as, f.source
 FROM flows AS f
 LEFT JOIN inv ON f.exporter = inv.exporter
 WHERE ` + whereSQL + `
@@ -1376,6 +1429,7 @@ LIMIT ? OFFSET ?`
 			&rf.SrcPort, &rf.DstPort, &rf.Proto,
 			&rf.Bytes, &rf.Packets,
 			&rf.InputIfIndex, &rf.OutputIfIndex,
+			&rf.SrcAS, &rf.DstAS,
 			&rf.Source,
 		); err != nil {
 			return nil, fmt.Errorf("store: scan flows list row: %w", err)
@@ -1478,7 +1532,7 @@ SELECT
     f.observed, f.exporter, ifNull(inv.sys_name, '') AS exporter_name,
     f.src_addr, f.dst_addr,
     f.src_port, f.dst_port, f.proto, f.bytes, f.packets,
-    f.input_ifindex, f.output_ifindex, f.source
+    f.input_ifindex, f.output_ifindex, f.src_as, f.dst_as, f.source
 FROM flows AS f
 LEFT JOIN inv ON f.exporter = inv.exporter` + exporterPredicate + `
 ORDER BY f.observed DESC
@@ -1502,6 +1556,7 @@ LIMIT ?`
 			&rf.SrcPort, &rf.DstPort, &rf.Proto,
 			&rf.Bytes, &rf.Packets,
 			&rf.InputIfIndex, &rf.OutputIfIndex,
+			&rf.SrcAS, &rf.DstAS,
 			&rf.Source,
 		); err != nil {
 			return nil, fmt.Errorf("store: scan recent flow: %w", err)

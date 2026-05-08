@@ -316,6 +316,24 @@ func (h *handlers) topProtocols(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (h *handlers) topASN(w http.ResponseWriter, r *http.Request) {
+	tr := parseTimeRange(r, 5*time.Minute)
+	limit := parseInt(r.URL.Query().Get("limit"), 20)
+	sort := store.ParseTopNSort(r.URL.Query().Get("sort"))
+	rows, err := store.QueryTopASN(r.Context(), h.conn, tr, limit, sort, parseFilter(r))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"count":  len(rows),
+		"rows":   rows,
+		"source": "flows",
+		"sort":   string(sort),
+		"window": tr.WindowDuration().String(),
+	})
+}
+
 func (h *handlers) topConversations(w http.ResponseWriter, r *http.Request) {
 	tr := parseTimeRange(r, 5*time.Minute)
 	limit := parseInt(r.URL.Query().Get("limit"), 20)

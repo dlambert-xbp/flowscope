@@ -85,6 +85,8 @@ const (
 	fieldFlowEndMillis  = 153 // absolute ms since epoch (IPFIX)
 	fieldOutBytes       = 23
 	fieldOutPackets     = 24
+	fieldSrcAS          = 16
+	fieldDstAS          = 17
 )
 
 // Sentinel errors for v9 / IPFIX parsing. Pre-existing errors from
@@ -500,6 +502,10 @@ func decodeOneRecord(template []TemplateField, rec []byte, exporter netip.Addr, 
 			out.OutputIfIndex = uint32(readUintBE(val))
 		case fieldVlan:
 			out.VlanID = uint16(readUintBE(val))
+		case fieldSrcAS:
+			out.SrcAS = uint32(readUintBE(val))
+		case fieldDstAS:
+			out.DstAS = uint32(readUintBE(val))
 		case fieldLastSwitched:
 			lastSwitchedMs = uint32(readUintBE(val))
 			haveLastSwitched = true
