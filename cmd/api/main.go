@@ -23,7 +23,11 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
+	"github.com/dlambert-xbp/flowscope/internal/audit"
+	"github.com/dlambert-xbp/flowscope/internal/authz"
 	"github.com/dlambert-xbp/flowscope/internal/obs"
+	"github.com/dlambert-xbp/flowscope/internal/services"
+	"github.com/dlambert-xbp/flowscope/internal/settings"
 	"github.com/dlambert-xbp/flowscope/internal/snmpx"
 	"github.com/dlambert-xbp/flowscope/internal/store"
 )
@@ -57,17 +61,39 @@ func run() error {
 	// Optional SNMP credential store for the Settings → SNMP admin
 	// endpoints. Disabled when FLOWSCOPE_SNMP_KEY is unset; the api
 	// then surfaces the management endpoints as 503 Service
-	// Unavailable so the operator can see why.
-	var creds snmpx.CredentialStore
+	// Unavailable so the operator can see why. The same crypter seals
+	// the broader Settings secrets (webhook, OIDC client) so we reuse
+	// it instead of growing a second secret root.
+	var (
+		creds   snmpx.CredentialStore
+		crypter *snmpx.Crypter
+	)
 	if mk := os.Getenv("FLOWSCOPE_SNMP_KEY"); mk != "" {
-		crypter, err := snmpx.NewCrypter(mk)
+		c, err := snmpx.NewCrypter(mk)
 		if err != nil {
 			return fmt.Errorf("snmp crypter: %w", err)
 		}
+		crypter = c
 		creds = snmpx.NewClickHouseCredentialStore(conn, crypter)
 		slog.Info("snmp credential management enabled")
 	} else {
 		slog.Warn("FLOWSCOPE_SNMP_KEY not set — snmp credential management endpoints will return 503")
+	}
+
+	settingsStore := settings.New(conn, crypter)
+	auditWriter := audit.NewClickHouseWriter(conn)
+	auditReader := audit.NewClickHouseReader(conn)
+	resolver := services.NewResolver()
+
+	// Seed the resolver with whatever's in custom_services right now,
+	// then refresh on a 30-second tick to pick up edits from peer api
+	// replicas. Per-replica writes already prime locally via
+	// h.refreshResolver; the tick is the multi-replica safety net.
+	go refreshResolverLoop(ctx, settingsStore, resolver)
+
+	authCfg := authz.Config{
+		SharedToken: os.Getenv("FLOWSCOPE_AUTH_TOKEN"),
+		Tokens:      settingsStore.APITokens,
 	}
 
 	r := chi.NewRouter()
@@ -76,7 +102,16 @@ func run() error {
 	r.Use(middleware.Recoverer)
 	r.Use(requestLogger)
 
-	h := &handlers{conn: conn, creds: creds}
+	h := &handlers{
+		conn:  conn,
+		creds: creds,
+		settings: settingsDeps{
+			store:    settingsStore,
+			resolver: resolver,
+			audit:    auditWriter,
+			reader:   auditReader,
+		},
+	}
 	r.Get("/healthz", h.health)
 	r.Get("/api/summary", h.summary)
 	r.Get("/api/flows/recent", h.recentFlows)
@@ -95,9 +130,47 @@ func run() error {
 	r.Post("/api/alerts/{id}/close", h.closeAlert)
 	r.Get("/api/snmp/credentials", h.listCredentials)
 	r.Get("/api/snmp/credentials/{exporter}", h.getCredential)
-	r.Put("/api/snmp/credentials/{exporter}", h.putCredential)
-	r.Delete("/api/snmp/credentials/{exporter}", h.deleteCredential)
-	r.Post("/api/snmp/credentials/{exporter}/test", h.testCredential)
+	r.Group(func(r chi.Router) {
+		r.Use(authCfg.RequireWrite())
+		r.Put("/api/snmp/credentials/{exporter}", h.putCredential)
+		r.Delete("/api/snmp/credentials/{exporter}", h.deleteCredential)
+		r.Post("/api/snmp/credentials/{exporter}/test", h.testCredential)
+	})
+
+	// Settings & Services. Reads are open (proxy-trust, Phase 1);
+	// writes go through the X-Auth-Token middleware. Token CRUD is
+	// admin-only because creating a token grants new auth state.
+	r.Get("/api/services/lookup", h.servicesLookup)
+	r.Get("/api/services/library", h.servicesLibrary)
+	r.Get("/api/services/custom", h.listCustomServices)
+	r.Get("/api/settings/general", h.listGeneralSettings)
+	r.Get("/api/settings/exporters/allowlist", h.listAllowlist)
+	r.Get("/api/settings/tokens", h.listTokens)
+	r.Get("/api/settings/audit", h.listAudit)
+	r.Get("/api/settings/alert-rules", h.listAlertRules)
+	r.Get("/api/settings/integrations/webhooks", h.listWebhooks)
+	r.Get("/api/settings/oidc", h.getOIDC)
+	r.Get("/api/settings/advanced", h.listAdvanced)
+	r.Group(func(r chi.Router) {
+		r.Use(authCfg.RequireWrite())
+		r.Put("/api/services/custom", h.putCustomService)
+		r.Put("/api/services/custom/{id}", h.putCustomService)
+		r.Delete("/api/services/custom/{id}", h.deleteCustomService)
+		r.Put("/api/settings/general/{name}", h.putGeneralSetting)
+		r.Put("/api/settings/exporters/allowlist/{exporter}", h.putAllowlist)
+		r.Delete("/api/settings/exporters/allowlist/{exporter}", h.deleteAllowlist)
+		r.Put("/api/settings/alert-rules/{id}", h.putAlertRule)
+		r.Put("/api/settings/integrations/webhooks", h.putWebhook)
+		r.Put("/api/settings/integrations/webhooks/{id}", h.putWebhook)
+		r.Delete("/api/settings/integrations/webhooks/{id}", h.deleteWebhook)
+		r.Put("/api/settings/oidc", h.putOIDC)
+	})
+	r.Group(func(r chi.Router) {
+		r.Use(authCfg.RequireAdmin())
+		r.Post("/api/settings/tokens", h.createToken)
+		r.Delete("/api/settings/tokens/{id}", h.revokeToken)
+	})
+
 	r.Method("GET", "/metrics", obs.Handler())
 
 	// Live HTML dashboard at /. Served from embedded assets so the
@@ -146,6 +219,46 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// refreshResolverLoop reloads the in-process service-name resolver
+// from the custom_services table every 30 seconds. Local writes
+// already prime the resolver synchronously via h.refreshResolver, so
+// this loop is the multi-replica safety net: if api-A creates a
+// custom row, api-B picks it up on the next tick. Cheap query
+// (SELECT FINAL on a small table), bounded cost.
+func refreshResolverLoop(ctx context.Context, store *settings.Store, resolver *services.Resolver) {
+	tick := time.NewTicker(30 * time.Second)
+	defer tick.Stop()
+	refresh := func() {
+		rows, err := store.CustomServices.List(ctx)
+		if err != nil {
+			return
+		}
+		entries := make([]services.CustomEntry, 0, len(rows))
+		for _, r := range rows {
+			entries = append(entries, services.CustomEntry{
+				Proto:       r.Proto,
+				PortLo:      r.PortLo,
+				PortHi:      r.PortHi,
+				Name:        r.Name,
+				Description: r.Description,
+				Group:       r.Group,
+				Owner:       r.Owner,
+				UpdatedAt:   r.UpdatedAt,
+			})
+		}
+		resolver.SetCustoms(entries)
+	}
+	refresh()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			refresh()
+		}
+	}
 }
 
 func parseLogLevel(s string) slog.Level {

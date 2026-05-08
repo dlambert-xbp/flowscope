@@ -18,10 +18,14 @@ import (
 
 // handlers groups HTTP handler methods that share a ClickHouse
 // connection. The optional creds store powers the Settings → SNMP
-// admin endpoints; when nil those endpoints return 503.
+// admin endpoints; when nil those endpoints return 503. settings
+// carries the broader Settings/Services collaborators added in the
+// 000005 settings slice — store, audit writer, audit reader, and
+// the in-process service-name resolver.
 type handlers struct {
-	conn  driver.Conn
-	creds snmpx.CredentialStore
+	conn     driver.Conn
+	creds    snmpx.CredentialStore
+	settings settingsDeps
 }
 
 // health is a minimal liveness probe used by Kubernetes / Container
