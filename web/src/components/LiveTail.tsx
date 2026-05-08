@@ -1,5 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { api, fmt } from '../api'
+import { ServiceLabel } from './ServiceLabel'
 
 export function LiveTail() {
   const recent = useQuery({
@@ -71,7 +72,9 @@ export function LiveTail() {
                 <td>
                   <span className="font-mono text-accent">{fmt.proto(f.proto)}</span>
                 </td>
-                <td className="n text-dim">{serviceFor(f.dst_port)}</td>
+                <td className="n text-dim">
+                  <ServiceLabel proto={f.proto} port={f.dst_port} fallback="—" />
+                </td>
                 <td className="r n">{fmt.num(f.packets)}</td>
                 <td className="r n">{fmt.bytes(f.bytes)}</td>
               </tr>
@@ -83,22 +86,3 @@ export function LiveTail() {
   )
 }
 
-// Tiny well-known-port lookup. The full IANA list is overkill; the
-// real thing belongs server-side once the api gains a /service-map
-// endpoint.
-function serviceFor(port: number): string {
-  return (
-    ({
-      22: 'ssh',
-      53: 'dns',
-      80: 'http',
-      443: 'https',
-      445: 'smb',
-      3389: 'rdp',
-      161: 'snmp',
-      162: 'snmp-trap',
-      2055: 'netflow',
-      6343: 'sflow',
-    } as Record<number, string>)[port] ?? '—'
-  )
-}

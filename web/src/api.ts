@@ -194,6 +194,164 @@ export type TopResponse<T> = {
   window: string
 }
 
+/* ----------------------------- Settings & Services ----------------------------- */
+
+export type ServiceSource = 'nmap' | 'iana' | 'both' | 'custom'
+
+export type ServiceEntry = {
+  name: string
+  description?: string
+  proto: string
+  port: number
+  port_lo?: number
+  port_hi?: number
+  group?: string
+  source: ServiceSource
+  frequency?: number
+}
+
+export type ServiceLookup = {
+  found: boolean
+  primary: ServiceEntry
+  alternatives?: ServiceEntry[]
+  multi: boolean
+}
+
+export type LibraryRow = {
+  name: string
+  proto: string
+  port: number
+  description?: string
+  source: ServiceSource
+  multi: boolean
+  frequency?: number
+}
+
+export type LibraryResponse = {
+  total: number
+  limit: number
+  offset: number
+  rows: LibraryRow[]
+  counts: { built_in: number }
+}
+
+export type CustomService = {
+  id: string
+  proto: string
+  port_lo: number
+  port_hi: number
+  name: string
+  description?: string
+  group?: string
+  owner?: string
+  updated_at?: string
+  updated_by?: string
+}
+
+export type APIToken = {
+  id: string
+  name: string
+  prefix: string
+  plaintext?: string
+  scope: 'read' | 'write' | 'admin'
+  created_at: string
+  created_by?: string
+  last_used_at?: string
+  expires_at?: string
+  revoked_at?: string
+}
+
+export type ExporterAllowlistEntry = {
+  exporter: string
+  label?: string
+  enabled: boolean
+  notes?: string
+  updated_at?: string
+  updated_by?: string
+}
+
+export type AppSettingValue = {
+  name: string
+  value: unknown
+  updated_at?: string
+  updated_by?: string
+}
+
+export type AlertRuleParamSpec = {
+  name: string
+  kind: 'int' | 'float' | 'string' | 'bool'
+  default: number | string | boolean
+  min?: number
+  max?: number
+}
+
+export type AlertRuleAvailable = {
+  rule_id: string
+  label: string
+  description: string
+  params: AlertRuleParamSpec[]
+  default_severity: 'critical' | 'warning' | 'info'
+}
+
+export type AlertRuleSetting = {
+  rule_id: string
+  enabled: boolean
+  severity?: string
+  params?: Record<string, unknown>
+  runbook?: string
+  channels?: string[]
+  updated_at?: string
+  updated_by?: string
+}
+
+export type Webhook = {
+  id: string
+  name: string
+  kind: 'slack' | 'teams' | 'pagerduty' | 'http'
+  url: string
+  secret?: string
+  has_secret: boolean
+  header_template?: Record<string, string>
+  enabled: boolean
+  severity_filter?: string[]
+  updated_at?: string
+  updated_by?: string
+}
+
+export type OIDCConfig = {
+  enabled: boolean
+  issuer?: string
+  client_id?: string
+  client_secret?: string
+  has_secret: boolean
+  redirect_uri?: string
+  scopes?: string
+  updated_at?: string
+  updated_by?: string
+  login_flow_status: string
+}
+
+export type AdvancedField = {
+  name: string
+  service: string
+  env_var?: string
+  description: string
+  reload: 'live' | 'restart'
+  default_text?: string
+}
+
+export type AuditEntry = {
+  ts: string
+  actor: string
+  action: string
+  resource: string
+  target: string
+  before_json?: string
+  after_json?: string
+  request_id?: string
+  source_ip?: string
+}
+
 async function getJSON<T>(url: string): Promise<T> {
   const r = await fetch(url, { cache: 'no-store' })
   if (!r.ok) throw new Error(`${url} → ${r.status} ${r.statusText}`)
@@ -351,6 +509,131 @@ export const api = {
     getJSON<TopResponse<TopConversation>>(
       withFilters(`/api/top/conversations?${timeQuery(range)}&limit=${limit}`, filters),
     ),
+
+  /* --------------------- Services --------------------- */
+  serviceLookup: (proto: string, port: number) =>
+    getJSON<ServiceLookup>(
+      `/api/services/lookup?proto=${encodeURIComponent(proto)}&port=${port}`,
+    ),
+  serviceLibrary: (q: string, proto: string, limit = 200, offset = 0) => {
+    const params = new URLSearchParams()
+    if (q) params.set('q', q)
+    if (proto) params.set('proto', proto)
+    params.set('limit', String(limit))
+    params.set('offset', String(offset))
+    return getJSON<LibraryResponse>(`/api/services/library?${params.toString()}`)
+  },
+  listCustomServices: () =>
+    getJSON<{ count: number; rows: CustomService[] }>(`/api/services/custom`),
+  putCustomService: (c: Partial<CustomService>) =>
+    settingsWrite(c.id ? `/api/services/custom/${encodeURIComponent(c.id)}` : `/api/services/custom`, 'PUT', c),
+  deleteCustomService: (id: string) =>
+    settingsWrite(`/api/services/custom/${encodeURIComponent(id)}`, 'DELETE'),
+
+  /* --------------------- General settings --------------------- */
+  listGeneralSettings: () =>
+    getJSON<{ rows: AppSettingValue[] }>(`/api/settings/general`),
+  putGeneralSetting: (name: string, value: unknown) =>
+    settingsWrite(`/api/settings/general/${encodeURIComponent(name)}`, 'PUT', { value }),
+
+  /* --------------------- Allowlist --------------------- */
+  listAllowlist: () =>
+    getJSON<{ count: number; rows: ExporterAllowlistEntry[] }>(`/api/settings/exporters/allowlist`),
+  putAllowlist: (e: ExporterAllowlistEntry) =>
+    settingsWrite(`/api/settings/exporters/allowlist/${encodeURIComponent(e.exporter)}`, 'PUT', e),
+  deleteAllowlist: (exporter: string) =>
+    settingsWrite(`/api/settings/exporters/allowlist/${encodeURIComponent(exporter)}`, 'DELETE'),
+
+  /* --------------------- API tokens --------------------- */
+  listTokens: () =>
+    getJSON<{ count: number; rows: APIToken[] }>(`/api/settings/tokens`),
+  createToken: (name: string, scope: APIToken['scope']) =>
+    settingsWrite<APIToken>(`/api/settings/tokens`, 'POST', { name, scope }),
+  revokeToken: (id: string) =>
+    settingsWrite(`/api/settings/tokens/${encodeURIComponent(id)}`, 'DELETE'),
+
+  /* --------------------- Audit --------------------- */
+  listAudit: (filters: { resource?: string; actor?: string; action?: string; limit?: number; offset?: number } = {}) => {
+    const p = new URLSearchParams()
+    if (filters.resource) p.set('resource', filters.resource)
+    if (filters.actor) p.set('actor', filters.actor)
+    if (filters.action) p.set('action', filters.action)
+    p.set('limit', String(filters.limit ?? 100))
+    p.set('offset', String(filters.offset ?? 0))
+    return getJSON<{ count: number; rows: AuditEntry[] }>(`/api/settings/audit?${p.toString()}`)
+  },
+
+  /* --------------------- Alert rule tunables --------------------- */
+  listAlertRules: () =>
+    getJSON<{ count: number; rows: AlertRuleSetting[]; available: AlertRuleAvailable[] }>(
+      `/api/settings/alert-rules`,
+    ),
+  putAlertRule: (s: AlertRuleSetting) =>
+    settingsWrite(`/api/settings/alert-rules/${encodeURIComponent(s.rule_id)}`, 'PUT', s),
+
+  /* --------------------- Webhooks --------------------- */
+  listWebhooks: () =>
+    getJSON<{ count: number; rows: Webhook[] }>(`/api/settings/integrations/webhooks`),
+  putWebhook: (w: Partial<Webhook>) =>
+    settingsWrite<Webhook>(
+      w.id
+        ? `/api/settings/integrations/webhooks/${encodeURIComponent(w.id)}`
+        : `/api/settings/integrations/webhooks`,
+      'PUT',
+      w,
+    ),
+  deleteWebhook: (id: string) =>
+    settingsWrite(`/api/settings/integrations/webhooks/${encodeURIComponent(id)}`, 'DELETE'),
+
+  /* --------------------- OIDC --------------------- */
+  getOIDC: () => getJSON<OIDCConfig>(`/api/settings/oidc`),
+  putOIDC: (c: OIDCConfig) => settingsWrite<OIDCConfig>(`/api/settings/oidc`, 'PUT', c),
+
+  /* --------------------- Advanced --------------------- */
+  listAdvanced: () => getJSON<{ fields: AdvancedField[] }>(`/api/settings/advanced`),
+}
+
+// settingsAuthToken is read once per page-load. The Settings UI keeps
+// it in localStorage so the operator only has to paste it once. The
+// "store nothing" mode is the default when no token is set: requests
+// go through, and the api treats them as unauth-bypass when no auth
+// is configured anywhere.
+function settingsAuthToken(): string {
+  try {
+    return localStorage.getItem('flowscope:auth-token') ?? ''
+  } catch {
+    return ''
+  }
+}
+
+export function setSettingsAuthToken(t: string) {
+  try {
+    if (t) localStorage.setItem('flowscope:auth-token', t)
+    else localStorage.removeItem('flowscope:auth-token')
+  } catch {
+    /* noop */
+  }
+}
+
+async function settingsWrite<T = unknown>(
+  url: string,
+  method: 'PUT' | 'POST' | 'DELETE',
+  body?: unknown,
+): Promise<T> {
+  const headers: Record<string, string> = {}
+  if (body !== undefined) headers['Content-Type'] = 'application/json'
+  const tok = settingsAuthToken()
+  if (tok) headers['X-Auth-Token'] = tok
+  const r = await fetch(url, {
+    method,
+    headers,
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  })
+  if (!r.ok) {
+    const text = await r.text()
+    throw new Error(`${method} ${url} → ${r.status}: ${text}`)
+  }
+  return (await r.json()) as T
 }
 
 function withFilters(url: string, filters: URLSearchParams): string {
