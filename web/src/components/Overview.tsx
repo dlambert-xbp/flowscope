@@ -3,21 +3,25 @@ import { api, fmt } from '../api'
 import type { Summary } from '../api'
 import { Interfaces } from './Interfaces'
 import { LiveTail } from './LiveTail'
-import { useTimeRange, rangeLabel, toApi, type TimeRange } from '../timeRange'
-import { TimeRangeSelector } from './TimeRangeSelector'
+import { rangeLabel, toApi, type TimeRange } from '../timeRange'
 
-export function Overview() {
-  const tr = useTimeRange('ov')
-  const apiRange = toApi(tr.range)
+export function Overview({
+  range,
+  rangeKey,
+}: {
+  range: TimeRange
+  rangeKey: unknown
+}) {
+  const apiRange = toApi(range)
   const summary = useQuery({
-    queryKey: ['summary', tr.queryKey],
+    queryKey: ['summary', rangeKey],
     queryFn: () => api.summary(apiRange),
-    refetchInterval: tr.range.kind === 'preset' ? 2000 : false,
+    refetchInterval: range.kind === 'preset' ? 2000 : false,
   })
   const ifaces = useQuery({
-    queryKey: ['interfaces', tr.queryKey],
+    queryKey: ['interfaces', rangeKey],
     queryFn: () => api.interfaces(apiRange),
-    refetchInterval: tr.range.kind === 'preset' ? 5000 : false,
+    refetchInterval: range.kind === 'preset' ? 5000 : false,
   })
 
   return (
@@ -26,16 +30,15 @@ export function Overview() {
         summary={summary.data}
         loading={summary.isLoading}
         error={summary.error as Error | undefined}
-        range={tr.range}
-        onRangeChange={tr.set}
+        range={range}
       />
       <KpiGrid
         summary={summary.data}
         interfaceCount={ifaces.data?.count ?? 0}
         hasIfaces={!!ifaces.data}
-        range={tr.range}
+        range={range}
       />
-      <Interfaces rows={ifaces.data?.interfaces ?? []} loading={ifaces.isLoading} range={tr.range} />
+      <Interfaces rows={ifaces.data?.interfaces ?? []} loading={ifaces.isLoading} range={range} />
       <LiveTail />
     </div>
   )
@@ -48,13 +51,11 @@ function Banner({
   loading,
   error,
   range,
-  onRangeChange,
 }: {
   summary?: Summary
   loading: boolean
   error?: Error
   range: TimeRange
-  onRangeChange: (r: TimeRange) => void
 }) {
   const winLabel = rangeLabel(range)
   const standfirstKind = range.kind === 'preset' ? `trailing ${winLabel}` : winLabel
@@ -66,9 +67,6 @@ function Banner({
           <span>standfirst · {standfirstKind}</span>
           <span className="font-mono text-[10px] text-faint normal-case tracking-[0.02em]">
             {refreshLabel}
-          </span>
-          <span className="ml-auto normal-case">
-            <TimeRangeSelector range={range} onChange={onRangeChange} />
           </span>
         </div>
         <Standfirst summary={summary} loading={loading} error={error} range={range} />

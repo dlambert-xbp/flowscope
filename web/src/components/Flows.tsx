@@ -9,44 +9,42 @@ import type {
   TimeRangeArg,
 } from '../api'
 import { useFilters, toQuery, keyLabelFor, type Filter, type FilterKey } from '../filters'
-import {
-  rangeLabel,
-  toApi,
-  useTimeRange,
-  type TimeRange,
-} from '../timeRange'
-import { TimeRangeSelector } from './TimeRangeSelector'
+import { rangeLabel, toApi, type TimeRange } from '../timeRange'
 
 // Flows tab — top-N panels narrowed by a composable filter set. Click
 // any value (talker src, talker dst, service port, protocol, full
 // 5-tuple) to add or replace a filter chip; chips re-narrow every
 // panel's query and persist in the URL.
-export function Flows() {
+export function Flows({
+  range,
+  rangeKey,
+}: {
+  range: TimeRange
+  rangeKey: unknown
+}) {
   const f = useFilters()
-  const tr = useTimeRange('fl')
   const qs = toQuery(f.filters)
-  const apiRange = toApi(tr.range)
+  const apiRange = toApi(range)
   return (
     <div>
       <FilterBar
         filters={f.filters}
         onRemove={f.remove}
         onClear={f.clear}
-        range={tr.range}
-        onRangeChange={tr.set}
+        range={range}
       />
       <div className="grid grid-cols-1 lg:grid-cols-2 border-b border-line">
         <Panel title="Top talkers" sub="src → dst · by bytes" right="SOURCE · FLOWS">
-          <TalkersList qs={qs} onAdd={f.add} range={apiRange} rangeKey={tr.queryKey} />
+          <TalkersList qs={qs} onAdd={f.add} range={apiRange} rangeKey={rangeKey} />
         </Panel>
         <Panel title="Top services" sub="dst port · by bytes" right="SOURCE · FLOWS">
-          <ServicesList qs={qs} onAdd={f.add} range={apiRange} rangeKey={tr.queryKey} />
+          <ServicesList qs={qs} onAdd={f.add} range={apiRange} rangeKey={rangeKey} />
         </Panel>
         <Panel title="Top protocols" sub="share of total" right="SOURCE · FLOWS">
-          <ProtocolsList qs={qs} onAdd={f.add} range={apiRange} rangeKey={tr.queryKey} />
+          <ProtocolsList qs={qs} onAdd={f.add} range={apiRange} rangeKey={rangeKey} />
         </Panel>
         <Panel title="Top conversations" sub="5-tuple · by bytes" right="SOURCE · FLOWS">
-          <ConversationsList qs={qs} onAdd={f.add} range={apiRange} rangeKey={tr.queryKey} />
+          <ConversationsList qs={qs} onAdd={f.add} range={apiRange} rangeKey={rangeKey} />
         </Panel>
       </div>
     </div>
@@ -60,13 +58,11 @@ function FilterBar({
   onRemove,
   onClear,
   range,
-  onRangeChange,
 }: {
   filters: Filter[]
   onRemove: (key: FilterKey, value?: string) => void
   onClear: () => void
   range: TimeRange
-  onRangeChange: (r: TimeRange) => void
 }) {
   const has = filters.length > 0
   return (
@@ -80,21 +76,18 @@ function FilterBar({
           <span className="text-faint">{f.keyLabel ?? keyLabelFor(f.key)} ·</span> {f.label ?? f.value}
         </Chip>
       ))}
-      <span className="ml-auto flex items-center gap-3">
-        {has ? (
-          <button
-            className="font-mono text-[11px] text-dim hover:text-text px-2 py-1 border border-line"
-            onClick={onClear}
-          >
-            clear all
-          </button>
-        ) : (
-          <span className="font-mono text-[11px] text-faint italic">
-            click any row to add a filter
-          </span>
-        )}
-        <TimeRangeSelector range={range} onChange={onRangeChange} />
-      </span>
+      {has ? (
+        <button
+          className="ml-auto font-mono text-[11px] text-dim hover:text-text px-2 py-1 border border-line"
+          onClick={onClear}
+        >
+          clear all
+        </button>
+      ) : (
+        <span className="ml-auto font-mono text-[11px] text-faint italic">
+          click any row to add a filter
+        </span>
+      )}
     </div>
   )
 }

@@ -7,10 +7,8 @@ import {
   rangeLabel,
   rangeSeconds,
   toApi,
-  useTimeRange,
   type TimeRange,
 } from '../timeRange'
-import { TimeRangeSelector } from './TimeRangeSelector'
 
 // TwoLine renders a primary value with a smaller, faint secondary
 // underneath. Used everywhere the SNMP enrichment exposes a
@@ -43,13 +41,18 @@ function TwoLine({
 // sub-tabs (Summary / Interfaces / Flows). SNMP-driven enrichment
 // (model, OS, uptime, location) lands in a later slice; for now the
 // view shows what we know from observed flows + counter samples.
-export function Devices() {
-  const tr = useTimeRange('dv')
-  const apiRange = toApi(tr.range)
+export function Devices({
+  range,
+  rangeKey,
+}: {
+  range: TimeRange
+  rangeKey: unknown
+}) {
+  const apiRange = toApi(range)
   const list = useQuery({
-    queryKey: ['devices', tr.queryKey],
+    queryKey: ['devices', rangeKey],
     queryFn: () => api.devices(apiRange),
-    refetchInterval: tr.range.kind === 'preset' ? 5000 : false,
+    refetchInterval: range.kind === 'preset' ? 5000 : false,
   })
   const devices = list.data?.devices ?? []
   const [selected, setSelected] = useState<string | null>(null)
@@ -66,13 +69,12 @@ export function Devices() {
         selected={selected}
         onSelect={setSelected}
         loading={list.isLoading}
-        range={tr.range}
+        range={range}
       />
       <Feature
         exporter={selected}
-        range={tr.range}
-        onRangeChange={tr.set}
-        rangeKey={tr.queryKey}
+        range={range}
+        rangeKey={rangeKey}
       />
     </div>
   )
@@ -176,12 +178,10 @@ type SubTab = 'summary' | 'interfaces' | 'flows'
 function Feature({
   exporter,
   range,
-  onRangeChange,
   rangeKey,
 }: {
   exporter: string | null
   range: TimeRange
-  onRangeChange: (r: TimeRange) => void
   rangeKey: unknown
 }) {
   const [sub, setSub] = useState<SubTab>('summary')
@@ -194,12 +194,7 @@ function Feature({
   }
   return (
     <article className="overflow-auto">
-      <FeatureHeader
-        exporter={exporter}
-        range={range}
-        onRangeChange={onRangeChange}
-        rangeKey={rangeKey}
-      />
+      <FeatureHeader exporter={exporter} range={range} rangeKey={rangeKey} />
       <SubTabs active={sub} onChange={setSub} />
       <div>
         {sub === 'summary' && <SummaryTab exporter={exporter} range={range} rangeKey={rangeKey} />}
@@ -213,12 +208,10 @@ function Feature({
 function FeatureHeader({
   exporter,
   range,
-  onRangeChange,
   rangeKey,
 }: {
   exporter: string
   range: TimeRange
-  onRangeChange: (r: TimeRange) => void
   rangeKey: unknown
 }) {
   const apiRange = toApi(range)
@@ -261,9 +254,6 @@ function FeatureHeader({
             snmp {fmt.time(i.polled_at).slice(11, 19)}Z
           </span>
         )}
-        <span className="ml-auto normal-case">
-          <TimeRangeSelector range={range} onChange={onRangeChange} />
-        </span>
       </div>
       <h1 className="font-mono text-[26px] font-semibold tracking-tight text-text leading-[1.1]">
         {headline}
