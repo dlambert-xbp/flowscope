@@ -136,13 +136,26 @@ func (h *handlers) recentFlows(w http.ResponseWriter, r *http.Request) {
 func parseFilter(r *http.Request) store.FlowFilter {
 	q := r.URL.Query()
 	return store.FlowFilter{
-		Exporter: q.Get("exporter"),
-		SrcAddr:  q.Get("src_addr"),
-		DstAddr:  q.Get("dst_addr"),
-		SrcPort:  parseUint16(q.Get("src_port")),
-		DstPort:  parseUint16(q.Get("dst_port")),
-		Proto:    parseUint16(q.Get("proto")),
+		Exporter:      q.Get("exporter"),
+		SrcAddr:       q.Get("src_addr"),
+		DstAddr:       q.Get("dst_addr"),
+		SrcPort:       parseUint16(q.Get("src_port")),
+		DstPort:       parseUint16(q.Get("dst_port")),
+		Proto:         parseUint16(q.Get("proto")),
+		InputIfIndex:  parseUint32(q.Get("input_ifindex")),
+		OutputIfIndex: parseUint32(q.Get("output_ifindex")),
 	}
+}
+
+func parseUint32(s string) uint32 {
+	if s == "" {
+		return 0
+	}
+	n, err := strconv.ParseUint(s, 10, 32)
+	if err != nil {
+		return 0
+	}
+	return uint32(n)
 }
 
 func parseUint16(s string) uint16 {

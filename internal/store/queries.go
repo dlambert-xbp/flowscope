@@ -848,12 +848,14 @@ LIMIT 1`
 // are bound through the driver — never interpolated into SQL — so
 // untrusted user input cannot escape into the WHERE clause.
 type FlowFilter struct {
-	Exporter string // IP string ("10.2.0.11" or "2001:db8::1"); validated as netip.Addr
-	SrcAddr  string
-	DstAddr  string
-	SrcPort  uint16 // 0 = unset
-	DstPort  uint16
-	Proto    uint16 // 16-bit so 0 can mean "unset"; valid values fit in 8 bits
+	Exporter      string // IP string ("10.2.0.11" or "2001:db8::1"); validated as netip.Addr
+	SrcAddr       string
+	DstAddr       string
+	SrcPort       uint16 // 0 = unset
+	DstPort       uint16
+	Proto         uint16 // 16-bit so 0 can mean "unset"; valid values fit in 8 bits
+	InputIfIndex  uint32 // 0 = unset; observation interface on the exporter
+	OutputIfIndex uint32 // 0 = unset
 }
 
 // buildWhere returns SQL fragments and bound args for the WHERE clause
@@ -896,6 +898,14 @@ func buildWhere(tr TimeRange, f FlowFilter) (string, []any, error) {
 	if f.Proto != 0 {
 		where = append(where, "proto = ?")
 		args = append(args, uint8(f.Proto))
+	}
+	if f.InputIfIndex != 0 {
+		where = append(where, "input_ifindex = ?")
+		args = append(args, f.InputIfIndex)
+	}
+	if f.OutputIfIndex != 0 {
+		where = append(where, "output_ifindex = ?")
+		args = append(args, f.OutputIfIndex)
 	}
 	return strings.Join(where, " AND "), args, nil
 }

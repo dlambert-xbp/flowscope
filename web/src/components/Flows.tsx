@@ -13,7 +13,7 @@ import type {
   TopNSort,
   TimeRangeArg,
 } from '../api'
-import { useFilters, toQuery, keyLabelFor, type Filter, type FilterKey } from '../filters'
+import { useFilters, toQuery, keyLabelFor, FILTER_KEYS, type Filter, type FilterKey } from '../filters'
 import { rangeLabel, toApi, type TimeRange } from '../timeRange'
 import { ServiceLabel, useServiceName } from './ServiceLabel'
 import { LiveTail } from './LiveTail'
@@ -64,6 +64,7 @@ export function Flows({
       <LiveTail />
       <FilterBar
         filters={f.filters}
+        onAdd={f.add}
         onRemove={f.remove}
         onClear={f.clear}
         range={range}
@@ -99,41 +100,218 @@ export function Flows({
 
 function FilterBar({
   filters,
+  onAdd,
   onRemove,
   onClear,
   range,
 }: {
   filters: Filter[]
+  onAdd: (f: Filter) => void
   onRemove: (key: FilterKey, value?: string) => void
   onClear: () => void
   range: TimeRange
 }) {
   const has = filters.length > 0
+  const [building, setBuilding] = useState(false)
   return (
-    <div className="flex items-center gap-2 px-4 py-3 border-b border-line bg-surface flex-wrap">
-      <span className="text-[10.5px] uppercase tracking-[0.1em] text-faint font-semibold mr-1">
-        Filters
-      </span>
-      <Chip neutral>window · {rangeLabel(range)}</Chip>
-      {filters.map((f) => (
-        <Chip key={`${f.key}_${f.value}`} onRemove={() => onRemove(f.key, f.value)}>
-          <span className="text-faint">{f.keyLabel ?? keyLabelFor(f.key)} ·</span> {f.label ?? f.value}
-        </Chip>
-      ))}
-      {has ? (
+    <div className="border-b border-line bg-surface">
+      <div className="flex items-center gap-2 px-4 py-3 flex-wrap">
+        <span className="text-[10.5px] uppercase tracking-[0.1em] text-faint font-semibold mr-1">
+          Filters
+        </span>
+        <Chip neutral>window · {rangeLabel(range)}</Chip>
+        {filters.map((f) => (
+          <Chip key={`${f.key}_${f.value}`} onRemove={() => onRemove(f.key, f.value)}>
+            <span className="text-faint">{f.keyLabel ?? keyLabelFor(f.key)} ·</span>{' '}
+            {f.label ?? f.value}
+          </Chip>
+        ))}
         <button
-          className="ml-auto font-mono text-[11px] text-dim hover:text-text px-2 py-1 border border-line"
-          onClick={onClear}
+          onClick={() => setBuilding((b) => !b)}
+          aria-expanded={building}
+          aria-controls="filter-builder"
+          className="font-mono text-[11px] inline-flex items-center gap-1.5 px-2 py-1 border border-line text-dim hover:border-accent hover:text-text"
         >
-          clear all
+          <span aria-hidden className="text-accent">+</span>
+          add filter
         </button>
-      ) : (
-        <span className="ml-auto font-mono text-[11px] text-faint italic">
-          click any row to add a filter
+        {has && (
+          <button
+            className="font-mono text-[11px] text-dim hover:text-text px-2 py-1 border border-line"
+            onClick={onClear}
+          >
+            clear all
+          </button>
+        )}
+        {!has && !building && (
+          <span className="ml-auto font-mono text-[11px] text-faint italic">
+            click any row, or use <span className="text-dim">+ add filter</span>
+          </span>
+        )}
+      </div>
+      {building && (
+        <FilterBuilder
+          existing={filters}
+          onAdd={(f) => {
+            onAdd(f)
+            setBuilding(false)
+          }}
+          onCancel={() => setBuilding(false)}
+        />
+      )}
+    </div>
+  )
+}
+
+/* ----------------------------- Filter builder ----------------------------- */
+
+// FilterBuilder is the cold-start filter form. Lets the operator
+// type a value for any FilterKey without having to first see it on
+// screen. Validates per-key (IP, port number, ifindex) and submits
+// a Filter through onAdd. Pre-populates the value if the same key
+// already has a chip — adding the form's value replaces that chip
+// (one-value-per-key invariant in useFilters).
+function FilterBuilder({
+  existing,
+  onAdd,
+  onCancel,
+}: {
+  existing: Filter[]
+  onAdd: (f: Filter) => void
+  onCancel: () => void
+}) {
+  const [key, setKey] = useState<FilterKey>('exporter')
+  const [value, setValue] = useState<string>('')
+  const [label, setLabel] = useState<string>('')
+  const [error, setError] = useState<string | null>(null)
+  const placeholder = PLACEHOLDERS[key]
+  const submit = () => {
+    const v = value.trim()
+    if (!v) {
+      setError('value required')
+      return
+    }
+    const validationError = validateValue(key, v)
+    if (validationError) {
+      setError(validationError)
+      return
+    }
+    const f: Filter = { key, value: v }
+    const lbl = label.trim()
+    if (lbl && lbl !== v) f.label = lbl
+    onAdd(f)
+    setValue('')
+    setLabel('')
+    setError(null)
+  }
+  // Show a hint when the chosen key already has a chip so the
+  // operator knows submitting will replace it.
+  const replaces = existing.find((e) => e.key === key)
+  return (
+    <div
+      id="filter-builder"
+      className="px-4 py-3 border-t border-line-soft bg-ink flex items-center gap-2 flex-wrap"
+    >
+      <span className="text-[10.5px] uppercase tracking-[0.1em] text-faint font-semibold mr-1">
+        New filter
+      </span>
+      <select
+        value={key}
+        onChange={(e) => {
+          setKey(e.target.value as FilterKey)
+          setError(null)
+        }}
+        className="font-mono text-[12px] bg-surface border border-line text-text px-2 py-1 outline-none focus:border-accent"
+      >
+        {FILTER_KEYS.map((k) => (
+          <option key={k} value={k}>
+            {keyLabelFor(k)}
+          </option>
+        ))}
+      </select>
+      <input
+        value={value}
+        onChange={(e) => {
+          setValue(e.target.value)
+          setError(null)
+        }}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') submit()
+          else if (e.key === 'Escape') onCancel()
+        }}
+        placeholder={placeholder}
+        className="font-mono text-[12px] bg-surface border border-line text-text px-2 py-1 outline-none focus:border-accent w-[220px]"
+        autoFocus
+      />
+      <input
+        value={label}
+        onChange={(e) => setLabel(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') submit()
+          else if (e.key === 'Escape') onCancel()
+        }}
+        placeholder="display label (optional)"
+        className="font-mono text-[12px] bg-surface border border-line text-dim placeholder:text-faint px-2 py-1 outline-none focus:border-accent w-[180px]"
+      />
+      <button
+        onClick={submit}
+        className="font-mono text-[11px] px-2.5 py-1 border border-accent bg-accent-wash text-text hover:bg-accent hover:text-ink"
+      >
+        add
+      </button>
+      <button
+        onClick={onCancel}
+        className="font-mono text-[11px] px-2.5 py-1 border border-line text-dim hover:text-text"
+      >
+        cancel
+      </button>
+      {error && (
+        <span className="font-mono text-[11px] text-crit">· {error}</span>
+      )}
+      {!error && replaces && (
+        <span className="font-mono text-[11px] text-faint italic">
+          replaces {keyLabelFor(replaces.key)} · {replaces.label ?? replaces.value}
         </span>
       )}
     </div>
   )
+}
+
+const PLACEHOLDERS: Record<FilterKey, string> = {
+  exporter: 'exporter IP (e.g. 10.110.0.182)',
+  src_addr: 'source IP',
+  dst_addr: 'destination IP',
+  src_port: 'source port (1–65535)',
+  dst_port: 'destination port',
+  proto: 'protocol number (6=TCP, 17=UDP)',
+  input_ifindex: 'input ifindex',
+  output_ifindex: 'output ifindex',
+}
+
+function validateValue(key: FilterKey, value: string): string | null {
+  switch (key) {
+    case 'exporter':
+    case 'src_addr':
+    case 'dst_addr':
+      return /^[0-9a-fA-F:.]+$/.test(value) ? null : 'expected an IP address'
+    case 'src_port':
+    case 'dst_port': {
+      const n = Number(value)
+      if (!Number.isInteger(n) || n < 1 || n > 65535) return 'port 1–65535'
+      return null
+    }
+    case 'proto': {
+      const n = Number(value)
+      if (!Number.isInteger(n) || n < 0 || n > 255) return 'proto 0–255'
+      return null
+    }
+    case 'input_ifindex':
+    case 'output_ifindex': {
+      const n = Number(value)
+      if (!Number.isInteger(n) || n < 0) return 'non-negative integer'
+      return null
+    }
+  }
 }
 
 function Chip({
