@@ -2,6 +2,17 @@ import { Fragment, useState, type ReactNode } from 'react'
 import { fmt, labelExporter, labelInterface } from '../api'
 import type { InterfaceRow } from '../api'
 import { InterfaceChart } from './InterfaceChart'
+import { Th, useTableSort, type SortColumns } from './sortable'
+
+const COLS: SortColumns<InterfaceRow> = {
+  exporter: (r) => labelExporter(r).primary,
+  iface: (r) => labelInterface(r).primary,
+  in_latest: (r) => r.in_bps_latest,
+  out_latest: (r) => r.out_bps_latest,
+  in_peak: (r) => r.in_bps_peak,
+  out_peak: (r) => r.out_bps_peak,
+  last_seen: (r) => r.last_seen,
+}
 
 function TwoLine({
   primary,
@@ -30,6 +41,16 @@ export function Interfaces({
   loading: boolean
 }) {
   const [active, setActive] = useState<{ exporter: string; ifindex: number } | null>(null)
+  const { sortedRows, sortKey, sortDir, toggle } = useTableSort(rows, COLS, {
+    key: 'in_latest',
+    dir: 'desc',
+  })
+  const thProps = (k: string) => ({
+    sortKey: k,
+    active: sortKey === k,
+    dir: sortDir,
+    onToggle: toggle,
+  })
 
   return (
     <section>
@@ -57,18 +78,18 @@ export function Interfaces({
           </colgroup>
           <thead>
             <tr>
-              <th>exporter</th>
-              <th>interface</th>
-              <th className="r">in latest</th>
-              <th className="r">out latest</th>
-              <th className="r">in peak</th>
-              <th className="r">out peak</th>
-              <th className="r">last seen</th>
+              <Th {...thProps('exporter')}>exporter</Th>
+              <Th {...thProps('iface')}>interface</Th>
+              <Th {...thProps('in_latest')} align="r">in latest</Th>
+              <Th {...thProps('out_latest')} align="r">out latest</Th>
+              <Th {...thProps('in_peak')} align="r">in peak</Th>
+              <Th {...thProps('out_peak')} align="r">out peak</Th>
+              <Th {...thProps('last_seen')} align="r">last seen</Th>
               <th />
             </tr>
           </thead>
           <tbody>
-            {rows.map((r) => {
+            {sortedRows.map((r) => {
               const isActive = active?.exporter === r.exporter && active?.ifindex === r.ifindex
               const eLbl = labelExporter(r)
               const iLbl = labelInterface(r)

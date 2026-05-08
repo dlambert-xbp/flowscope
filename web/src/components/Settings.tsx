@@ -2,6 +2,25 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState, type ReactNode } from 'react'
 import { api, fmt } from '../api'
 import type { SNMPCredential, SNMPTestResult } from '../api'
+import { Th, useTableSort, type SortColumns } from './sortable'
+
+const CRED_COLS: SortColumns<SNMPCredential> = {
+  exporter: (r) => r.exporter,
+  version: (r) => r.version,
+  identity: (r) => (r.version === 'v3' ? r.v3_username || '' : 'community'),
+  secrets: (r) => {
+    if (r.version === 'v3') {
+      const parts = [r.has_auth_pass ? 'auth' : null, r.has_priv_pass ? 'priv' : null].filter(
+        Boolean,
+      )
+      return parts.length ? parts.join(' + ') : 'noAuthNoPriv'
+    }
+    return r.has_community ? 1 : 0
+  },
+  port: (r) => r.port,
+  interval: (r) => r.interval_sec,
+  updated: (r) => r.updated_at || '',
+}
 
 // Settings tab — for v0 the only sub-page is SNMP credential
 // management. Future settings sub-pages (alert rule editor, OIDC,
@@ -117,6 +136,10 @@ function CredentialList({
   loading: boolean
   onEdit: (c: SNMPCredential) => void
 }) {
+  const { sortedRows, sortKey, sortDir, toggle } = useTableSort(rows, CRED_COLS, {
+    key: 'exporter',
+    dir: 'asc',
+  })
   if (loading) return <p className="text-dim font-mono text-[12px]">loading…</p>
   if (rows.length === 0) {
     return (
@@ -126,22 +149,28 @@ function CredentialList({
       </div>
     )
   }
+  const thProps = (k: string) => ({
+    sortKey: k,
+    active: sortKey === k,
+    dir: sortDir,
+    onToggle: toggle,
+  })
   return (
     <table className="w-full">
       <thead>
         <tr>
-          <th>exporter</th>
-          <th>version</th>
-          <th>identity</th>
-          <th>secrets</th>
-          <th className="r">port</th>
-          <th className="r">interval</th>
-          <th>updated</th>
+          <Th {...thProps('exporter')}>exporter</Th>
+          <Th {...thProps('version')}>version</Th>
+          <Th {...thProps('identity')}>identity</Th>
+          <Th {...thProps('secrets')}>secrets</Th>
+          <Th {...thProps('port')} align="r">port</Th>
+          <Th {...thProps('interval')} align="r">interval</Th>
+          <Th {...thProps('updated')}>updated</Th>
           <th />
         </tr>
       </thead>
       <tbody>
-        {rows.map((r) => (
+        {sortedRows.map((r) => (
           <CredentialRow key={r.exporter} c={r} onEdit={() => onEdit(r)} />
         ))}
       </tbody>

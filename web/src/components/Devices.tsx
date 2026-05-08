@@ -3,6 +3,7 @@ import { Fragment, useState, type ReactNode } from 'react'
 import { api, fmt, labelExporter, labelInterface } from '../api'
 import type { Device, DeviceInventory, InterfaceRow, RecentFlow } from '../api'
 import { InterfaceChart } from './InterfaceChart'
+import { Th, useTableSort, type SortColumns } from './sortable'
 
 // TwoLine renders a primary value with a smaller, faint secondary
 // underneath. Used everywhere the SNMP enrichment exposes a
@@ -439,6 +440,15 @@ function RecentFlowsMini({ exporter, limit }: { exporter: string; limit: number 
   )
 }
 
+const IFACE_COLS: SortColumns<InterfaceRow> = {
+  iface: (r) => labelInterface(r).primary,
+  in_latest: (r) => r.in_bps_latest,
+  out_latest: (r) => r.out_bps_latest,
+  in_peak: (r) => r.in_bps_peak,
+  out_peak: (r) => r.out_bps_peak,
+  last_seen: (r) => r.last_seen,
+}
+
 function InterfacesMini({ exporter }: { exporter: string }) {
   const q = useQuery({
     queryKey: ['device-ifaces', exporter],
@@ -446,6 +456,10 @@ function InterfacesMini({ exporter }: { exporter: string }) {
     refetchInterval: 5000,
   })
   const ifaces = q.data?.interfaces ?? []
+  const { sortedRows, sortKey, sortDir, toggle } = useTableSort(ifaces, IFACE_COLS, {
+    key: 'in_latest',
+    dir: 'desc',
+  })
   if (q.isLoading) return <p className="text-dim font-mono text-[12px]">loading…</p>
   if (ifaces.length === 0) {
     return (
@@ -454,6 +468,12 @@ function InterfacesMini({ exporter }: { exporter: string }) {
       </p>
     )
   }
+  const thProps = (k: string) => ({
+    sortKey: k,
+    active: sortKey === k,
+    dir: sortDir,
+    onToggle: toggle,
+  })
   return (
     <table className="w-full table-fixed">
       <colgroup>
@@ -466,16 +486,16 @@ function InterfacesMini({ exporter }: { exporter: string }) {
       </colgroup>
       <thead>
         <tr>
-          <th>interface</th>
-          <th className="r">in (latest)</th>
-          <th className="r">out (latest)</th>
-          <th className="r">in peak</th>
-          <th className="r">out peak</th>
-          <th className="r">last seen</th>
+          <Th {...thProps('iface')}>interface</Th>
+          <Th {...thProps('in_latest')} align="r">in (latest)</Th>
+          <Th {...thProps('out_latest')} align="r">out (latest)</Th>
+          <Th {...thProps('in_peak')} align="r">in peak</Th>
+          <Th {...thProps('out_peak')} align="r">out peak</Th>
+          <Th {...thProps('last_seen')} align="r">last seen</Th>
         </tr>
       </thead>
       <tbody>
-        {ifaces.slice(0, 10).map((i: InterfaceRow) => {
+        {sortedRows.slice(0, 10).map((i: InterfaceRow) => {
           const lbl = labelInterface(i)
           return (
             <tr key={i.ifindex} className="hover:bg-surface">
@@ -505,6 +525,16 @@ function InterfacesTab({ exporter }: { exporter: string }) {
     refetchInterval: 5000,
   })
   const ifaces = q.data?.interfaces ?? []
+  const { sortedRows, sortKey, sortDir, toggle } = useTableSort(ifaces, IFACE_COLS, {
+    key: 'in_latest',
+    dir: 'desc',
+  })
+  const thProps = (k: string) => ({
+    sortKey: k,
+    active: sortKey === k,
+    dir: sortDir,
+    onToggle: toggle,
+  })
   return (
     <div>
       <div className="flex items-baseline gap-3 px-4 py-3 border-b border-line">
@@ -535,17 +565,17 @@ function InterfacesTab({ exporter }: { exporter: string }) {
           </colgroup>
           <thead>
             <tr>
-              <th>interface</th>
-              <th className="r">in (latest)</th>
-              <th className="r">out (latest)</th>
-              <th className="r">in peak</th>
-              <th className="r">out peak</th>
-              <th className="r">last seen</th>
+              <Th {...thProps('iface')}>interface</Th>
+              <Th {...thProps('in_latest')} align="r">in (latest)</Th>
+              <Th {...thProps('out_latest')} align="r">out (latest)</Th>
+              <Th {...thProps('in_peak')} align="r">in peak</Th>
+              <Th {...thProps('out_peak')} align="r">out peak</Th>
+              <Th {...thProps('last_seen')} align="r">last seen</Th>
               <th />
             </tr>
           </thead>
           <tbody>
-            {ifaces.map((i: InterfaceRow) => {
+            {sortedRows.map((i: InterfaceRow) => {
               const lbl = labelInterface(i)
               const isActive = activeIfindex === i.ifindex
               return (
@@ -587,6 +617,15 @@ function InterfacesTab({ exporter }: { exporter: string }) {
 
 /* ----------------------------- Flows tab ----------------------------- */
 
+const DEVICE_FLOW_COLS: SortColumns<RecentFlow> = {
+  observed: (r) => r.observed,
+  source: (r) => r.source,
+  src_dst: (r) => `${r.src_addr}:${r.src_port}>${r.dst_addr}:${r.dst_port}`,
+  proto: (r) => r.proto,
+  packets: (r) => r.packets,
+  bytes: (r) => r.bytes,
+}
+
 function FlowsTab({ exporter }: { exporter: string }) {
   const q = useQuery({
     queryKey: ['device-flows', exporter],
@@ -594,6 +633,16 @@ function FlowsTab({ exporter }: { exporter: string }) {
     refetchInterval: 2000,
   })
   const flows = q.data?.flows ?? []
+  const { sortedRows, sortKey, sortDir, toggle } = useTableSort(flows, DEVICE_FLOW_COLS, {
+    key: 'observed',
+    dir: 'desc',
+  })
+  const thProps = (k: string) => ({
+    sortKey: k,
+    active: sortKey === k,
+    dir: sortDir,
+    onToggle: toggle,
+  })
   return (
     <div>
       <div className="flex items-baseline gap-3 px-4 py-3 border-b border-line">
@@ -623,16 +672,16 @@ function FlowsTab({ exporter }: { exporter: string }) {
           </colgroup>
           <thead>
             <tr>
-              <th>time</th>
-              <th>source</th>
-              <th>src → dst</th>
-              <th>proto</th>
-              <th className="r">packets</th>
-              <th className="r">bytes</th>
+              <Th {...thProps('observed')}>time</Th>
+              <Th {...thProps('source')}>source</Th>
+              <Th {...thProps('src_dst')}>src → dst</Th>
+              <Th {...thProps('proto')}>proto</Th>
+              <Th {...thProps('packets')} align="r">packets</Th>
+              <Th {...thProps('bytes')} align="r">bytes</Th>
             </tr>
           </thead>
           <tbody>
-            {flows.map((f: RecentFlow, i: number) => (
+            {sortedRows.map((f: RecentFlow, i: number) => (
               <tr key={i} className="hover:bg-surface">
                 <td className="n text-faint">{fmt.time(f.observed).slice(11, 23)}</td>
                 <td className="n text-dim">{f.source}</td>
