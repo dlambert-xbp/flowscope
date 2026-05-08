@@ -170,6 +170,35 @@ func (h *handlers) healthStreams(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// flowsFlagsTimeseries returns bucketed TCP flag counts over the
+// time range, narrowed by the filter. Powers the drawer
+// "Connection state" tab.
+//
+//	GET /api/flows/flags-timeseries?window=300s&bucket=5
+//	     &exporter=...&src_addr=...&dst_addr=...&...
+//
+// Bucket defaults to autoBucket(window) when 0 or missing; same
+// auto-bucket curve as /api/flows/timeseries so a drawer with
+// both tabs open shows aligned bucket boundaries.
+func (h *handlers) flowsFlagsTimeseries(w http.ResponseWriter, r *http.Request) {
+	tr := parseTimeRange(r, 5*time.Minute)
+	bucket := parseInt(r.URL.Query().Get("bucket"), 0)
+	if bucket <= 0 {
+		bucket = autoBucket(tr)
+	}
+	rows, err := store.QueryFlagsTimeseries(r.Context(), h.conn, tr, bucket, parseFilter(r))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"count":          len(rows),
+		"buckets":        rows,
+		"bucket_seconds": bucket,
+		"window":         tr.WindowDuration().String(),
+	})
+}
+
 // flowsTimeseries returns bucketed bytes/packets/flows over the
 // time range, narrowed by the filter. Powers the drill-in chart on
 // the Flows-tab drawer.

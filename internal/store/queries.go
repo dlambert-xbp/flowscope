@@ -148,7 +148,10 @@ type InterfaceTimeseriesPt struct {
 }
 
 // RecentFlow is the row shape returned by /api/flows/recent. It mirrors
-// the canonical record.Flow but with JSON-friendly types.
+// the canonical record.Flow but with JSON-friendly types. TCPFlags is
+// the OR of flags observed across the flow's lifetime — useful for
+// the drawer raw-record view's flag-decode badge. 0 for non-TCP
+// records.
 type RecentFlow struct {
 	Observed       time.Time `json:"observed"`
 	Exporter       string    `json:"exporter"`
@@ -164,6 +167,7 @@ type RecentFlow struct {
 	OutputIfIndex  uint32    `json:"output_ifindex"`
 	SrcAS          uint32    `json:"src_as"`
 	DstAS          uint32    `json:"dst_as"`
+	TCPFlags       uint8     `json:"tcp_flags"`
 	Source         string    `json:"source"`
 }
 
@@ -1414,7 +1418,7 @@ SELECT
     f.observed, f.exporter, ifNull(inv.sys_name, '') AS exporter_name,
     f.src_addr, f.dst_addr,
     f.src_port, f.dst_port, f.proto, f.bytes, f.packets,
-    f.input_ifindex, f.output_ifindex, f.src_as, f.dst_as, f.source
+    f.input_ifindex, f.output_ifindex, f.src_as, f.dst_as, f.tcp_flags, f.source
 FROM flows AS f
 LEFT JOIN inv ON f.exporter = inv.exporter
 WHERE ` + whereSQL + `
@@ -1440,6 +1444,7 @@ LIMIT ? OFFSET ?`
 			&rf.Bytes, &rf.Packets,
 			&rf.InputIfIndex, &rf.OutputIfIndex,
 			&rf.SrcAS, &rf.DstAS,
+			&rf.TCPFlags,
 			&rf.Source,
 		); err != nil {
 			return nil, fmt.Errorf("store: scan flows list row: %w", err)
@@ -1516,6 +1521,92 @@ ORDER BY ts ASC`
 	return out, rows.Err()
 }
 
+// FlagsBucket is one bucket on the per-conversation TCP-flag
+// timeline rendered in the drawer's Connection state tab. Each
+// counter is the number of flow records in this bucket whose
+// ORed tcp_flags has the corresponding bit set.
+//
+// SYN+ACK is counted as a separate dimension (both bits set in
+// the same record) because it's the marker for a successful
+// handshake — distinct from a bare SYN (initiation, possibly
+// unanswered) or a bare ACK (data flow / keepalive). All counts
+// are over flow records, not packets — sFlow is sampled, NetFlow
+// aggregates over the flow's lifetime.
+type FlagsBucket struct {
+	Ts      time.Time `json:"ts"`
+	SYN     uint64    `json:"syn"`     // any record with SYN set
+	SYNACK  uint64    `json:"syn_ack"` // SYN and ACK both set in the same record
+	FIN     uint64    `json:"fin"`
+	RST     uint64    `json:"rst"`
+	ACKOnly uint64    `json:"ack_only"` // ACK set, SYN+FIN+RST clear — data flow
+	PSH     uint64    `json:"psh"`
+	URG     uint64    `json:"urg"`
+	Total   uint64    `json:"total"` // total flow records in this bucket (all protos)
+}
+
+// QueryFlagsTimeseries returns bucketed TCP-flag counts over the
+// time range, narrowed by the filter. Buckets align via
+// toStartOfInterval so the same window over a stable input always
+// returns the same boundaries.
+//
+// We deliberately don't filter to proto=6 server-side — non-TCP
+// records have tcp_flags=0 by construction, so they contribute
+// 0 to every flag count. The Total field still reflects all
+// records so the UI can compute "X% of records carried flag Y"
+// even on mixed-protocol filters.
+func QueryFlagsTimeseries(
+	ctx context.Context,
+	conn driver.Conn,
+	tr TimeRange,
+	bucketSeconds int,
+	f FlowFilter,
+) ([]FlagsBucket, error) {
+	if bucketSeconds < 1 {
+		bucketSeconds = 1
+	}
+	if bucketSeconds > 3600 {
+		bucketSeconds = 3600
+	}
+	whereSQL, args, err := buildWhere(tr, f)
+	if err != nil {
+		return nil, err
+	}
+	// TCP flag bits per RFC 793: FIN=0x01 SYN=0x02 RST=0x04
+	// PSH=0x08 ACK=0x10 URG=0x20.
+	q := `
+SELECT
+    toStartOfInterval(observed, INTERVAL ? SECOND) AS ts,
+    countIf(bitAnd(tcp_flags, 2)  != 0)                                AS syn,
+    countIf(bitAnd(tcp_flags, 18) = 18)                                AS syn_ack,
+    countIf(bitAnd(tcp_flags, 1)  != 0)                                AS fin,
+    countIf(bitAnd(tcp_flags, 4)  != 0)                                AS rst,
+    countIf(bitAnd(tcp_flags, 16) != 0 AND bitAnd(tcp_flags, 7)  = 0)  AS ack_only,
+    countIf(bitAnd(tcp_flags, 8)  != 0)                                AS psh,
+    countIf(bitAnd(tcp_flags, 32) != 0)                                AS urg,
+    count()                                                            AS total
+FROM flows
+WHERE ` + whereSQL + `
+GROUP BY ts
+ORDER BY ts ASC`
+	args = append([]any{uint64(bucketSeconds)}, args...)
+	rows, err := conn.Query(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("store: query flags timeseries: %w", err)
+	}
+	defer rows.Close()
+	out := make([]FlagsBucket, 0, 64)
+	for rows.Next() {
+		var b FlagsBucket
+		if err := rows.Scan(
+			&b.Ts, &b.SYN, &b.SYNACK, &b.FIN, &b.RST, &b.ACKOnly, &b.PSH, &b.URG, &b.Total,
+		); err != nil {
+			return nil, fmt.Errorf("store: scan flags timeseries: %w", err)
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
 // QueryRecentFlows returns the most recent N rows from the flows table,
 // newest first. If exporter is non-empty, results are filtered to that
 // single exporter. Limit is clamped to [1, 1000].
@@ -1542,7 +1633,7 @@ SELECT
     f.observed, f.exporter, ifNull(inv.sys_name, '') AS exporter_name,
     f.src_addr, f.dst_addr,
     f.src_port, f.dst_port, f.proto, f.bytes, f.packets,
-    f.input_ifindex, f.output_ifindex, f.src_as, f.dst_as, f.source
+    f.input_ifindex, f.output_ifindex, f.src_as, f.dst_as, f.tcp_flags, f.source
 FROM flows AS f
 LEFT JOIN inv ON f.exporter = inv.exporter` + exporterPredicate + `
 ORDER BY f.observed DESC
@@ -1567,6 +1658,7 @@ LIMIT ?`
 			&rf.Bytes, &rf.Packets,
 			&rf.InputIfIndex, &rf.OutputIfIndex,
 			&rf.SrcAS, &rf.DstAS,
+			&rf.TCPFlags,
 			&rf.Source,
 		); err != nil {
 			return nil, fmt.Errorf("store: scan recent flow: %w", err)

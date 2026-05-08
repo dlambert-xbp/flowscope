@@ -27,6 +27,7 @@ export type RecentFlow = {
   output_ifindex: number
   src_as: number
   dst_as: number
+  tcp_flags: number
   source: string
 }
 
@@ -193,6 +194,25 @@ export type FlowTimeseriesPoint = {
 export type FlowsTimeseriesResponse = {
   count: number
   points: FlowTimeseriesPoint[]
+  bucket_seconds: number
+  window: string
+}
+
+export type FlagsBucket = {
+  ts: string
+  syn: number
+  syn_ack: number
+  fin: number
+  rst: number
+  ack_only: number
+  psh: number
+  urg: number
+  total: number
+}
+
+export type FlowsFlagsTimeseriesResponse = {
+  count: number
+  buckets: FlagsBucket[]
   bucket_seconds: number
   window: string
 }
@@ -556,6 +576,19 @@ export const api = {
     getJSON<FlowsTimeseriesResponse>(
       withFilters(
         `/api/flows/timeseries?${timeQuery(range)}${
+          bucketSeconds ? `&bucket=${bucketSeconds}` : ''
+        }`,
+        filters,
+      ),
+    ),
+  flowsFlagsTimeseries: (
+    filters: URLSearchParams,
+    range?: TimeRangeArg,
+    bucketSeconds?: number,
+  ) =>
+    getJSON<FlowsFlagsTimeseriesResponse>(
+      withFilters(
+        `/api/flows/flags-timeseries?${timeQuery(range)}${
           bucketSeconds ? `&bucket=${bucketSeconds}` : ''
         }`,
         filters,

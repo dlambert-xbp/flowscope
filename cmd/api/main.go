@@ -128,6 +128,7 @@ func run() error {
 	r.Get("/api/flows/recent", h.recentFlows)
 	r.Get("/api/flows/list", h.flowsList)
 	r.Get("/api/flows/timeseries", h.flowsTimeseries)
+	r.Get("/api/flows/flags-timeseries", h.flowsFlagsTimeseries)
 	r.Get("/api/devices", h.devices)
 	r.Get("/api/devices/{exporter}", h.device)
 	r.Get("/api/devices/{exporter}/inventory", h.deviceInventory)
