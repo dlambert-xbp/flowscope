@@ -1,0 +1,44 @@
+{{- if .Values.init.enabled }}
+# Standalone Job for the init container. The same image is also wired
+# as an initContainer on the api / ingest Deployments — but operators
+# sometimes want to reapply retention without doing a full restart of
+# the data plane (e.g. after PUT /api/settings/general/flow_retention_days
+# from the UI). `helm upgrade` triggers this Job via the
+# helm.sh/hook annotation; bare `kubectl apply` operators can also
+# invoke it manually.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "flowscope.fullname" . }}-init
+  labels:
+    {{- include "flowscope.labels" . | nindent 4 }}
+    app.kubernetes.io/component: init
+  annotations:
+    # Run the Job before api / ingest pods come up on every upgrade.
+    # before-hook-creation deletes the previous Job so the upgrade
+    # doesn't fail with "Job already exists".
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        {{- include "flowscope.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: init
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: init
+          image: {{ include "flowscope.initImage" . }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          env:
+            - name: FLOWSCOPE_CLICKHOUSE_DSN
+              value: {{ .Values.global.clickhouseDSN | quote }}
+            - name: FLOWSCOPE_LOG_LEVEL
+              value: {{ .Values.global.logLevel | quote }}
+          resources:
+            {{- toYaml .Values.init.resources | nindent 12 }}
+{{- end }}

@@ -36,6 +36,27 @@ services:
       retries: 20
       start_period: 10s
 
+  # One-shot bootstrap. Applies forward-only schema migrations, then
+  # reads flow_retention_days / counter_retention_days from app_settings
+  # and emits ALTER TABLE ... MODIFY TTL. Exits 0 on success. api +
+  # ingest gate on this service completing successfully so they never
+  # take traffic against a half-migrated schema or a stale TTL.
+  init:
+    build:
+      context: .
+      dockerfile: cmd/init/Dockerfile
+    image: flowscope-init:latest
+    container_name: flowscope-init
+    restart: "no"
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    environment:
+      FLOWSCOPE_CLICKHOUSE_DSN: "clickhouse://flowscope:flowscope@clickhouse:9000/flowscope"
+      FLOWSCOPE_LOG_LEVEL: "info"
+    mem_limit: 128m
+    cpus: 0.25
+
   ingest:
     build:
       context: .
@@ -46,6 +67,8 @@ services:
     depends_on:
       clickhouse:
         condition: service_healthy
+      init:
+        condition: service_completed_successfully
     ports:
       - "2055:2055/udp"   # NetFlow v5/v9/IPFIX
       - "6343:6343/udp"   # sFlow v5
@@ -67,6 +90,8 @@ services:
     depends_on:
       clickhouse:
         condition: service_healthy
+      init:
+        condition: service_completed_successfully
     ports:
       - "9102:9102/tcp"   # Prometheus /metrics
     environment:
@@ -100,6 +125,8 @@ services:
     depends_on:
       clickhouse:
         condition: service_healthy
+      init:
+        condition: service_completed_successfully
     ports:
       - "9101:9101/tcp"   # Prometheus /metrics
     environment:
@@ -120,6 +147,8 @@ services:
     depends_on:
       clickhouse:
         condition: service_healthy
+      init:
+        condition: service_completed_successfully
     ports:
       - "8080:8080/tcp"   # HTTP — JSON API + placeholder live HTML at /
     environment:

@@ -1,0 +1,14 @@
+apiVersion: v2
+name: flowscope
+description: |
+  FlowScope — netflow / sFlow / IPFIX collector with ClickHouse storage,
+  alerting, SNMP discovery, and a React SPA for operators.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.27.0-0"
+home: https://github.com/dlambert-xbp/flowscope
+sources:
+  - https://github.com/dlambert-xbp/flowscope
+maintainers:
+  - name: FlowScope maintainers
