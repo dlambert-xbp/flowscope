@@ -48,6 +48,26 @@ var (
 		},
 		[]string{"protocol", "reason"},
 	)
+
+	// IngestDroppedUnauthorized counts UDP datagrams dropped at the
+	// listener because the source IP is not on the exporter
+	// allowlist (or its row is disabled). Labeled by exporter so the
+	// Overview "Receiver health" panel can highlight which sources
+	// are being rejected. Empty allowlist = accept-all and never
+	// increments this counter.
+	//
+	// Cardinality note: a hostile sender can spray packets from
+	// random source IPs and bloat this label set. Operators running
+	// in deny-by-default mode should fronted the listener with a UDP
+	// firewall rule that limits sources to the management subnet —
+	// the same rule that would normally precede an allowlist anyway.
+	IngestDroppedUnauthorized = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "flowscope_ingest_dropped_unauthorized_total",
+			Help: "UDP datagrams dropped at the listener because the source is not on the exporter allowlist (or is disabled).",
+		},
+		[]string{"exporter"},
+	)
 )
 
 // NetFlow v9 / IPFIX template cache metrics.
