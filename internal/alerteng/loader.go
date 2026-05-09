@@ -76,6 +76,35 @@ func applyOverride(base Rule, o settings.AlertRuleSetting, hasOverride bool) Rul
 			return severityWrap{Rule: r, severity: o.Severity}
 		}
 		return r
+	case InterfaceOperStatusChange:
+		r.DebounceSeconds = paramInt(params, "debounce_seconds", r.DebounceSeconds)
+		r.LookbackHours = paramInt(params, "lookback_hours", r.LookbackHours)
+		if o.Severity != "" {
+			return severityWrap{Rule: r, severity: o.Severity}
+		}
+		return r
+	case InterfaceUtilizationHigh:
+		r.ThresholdPct = paramInt(params, "threshold_pct", r.ThresholdPct)
+		r.CriticalBumpPct = paramInt(params, "critical_bump_pct", r.CriticalBumpPct)
+		r.WindowSeconds = paramInt(params, "window_seconds", r.WindowSeconds)
+		if o.Severity != "" {
+			return severityWrap{Rule: r, severity: o.Severity}
+		}
+		return r
+	case InterfaceErrorsRate:
+		r.WindowSeconds = paramInt(params, "window_seconds", r.WindowSeconds)
+		r.ErrorsPerMin = paramInt(params, "errors_per_min", r.ErrorsPerMin)
+		if o.Severity != "" {
+			return severityWrap{Rule: r, severity: o.Severity}
+		}
+		return r
+	case TopTalkerBaselineAnomaly:
+		r.Multiplier = paramFloat64(params, "multiplier", r.Multiplier)
+		r.MinBaselineBytes = paramUint64(params, "min_baseline_bytes", r.MinBaselineBytes)
+		if o.Severity != "" {
+			return severityWrap{Rule: r, severity: o.Severity}
+		}
+		return r
 	default:
 		if o.Severity != "" {
 			return severityWrap{Rule: base, severity: o.Severity}
@@ -143,6 +172,18 @@ func describe(r Rule) map[string]any {
 		return map[string]any{"silent_seconds": x.SilentSeconds, "active_seconds": x.ActiveSeconds}
 	case HeavyTalker:
 		return map[string]any{"window_seconds": x.WindowSeconds, "bytes_threshold": x.BytesThreshold}
+	case InterfaceOperStatusChange:
+		return map[string]any{"debounce_seconds": x.DebounceSeconds, "lookback_hours": x.LookbackHours}
+	case InterfaceUtilizationHigh:
+		return map[string]any{
+			"threshold_pct":     x.ThresholdPct,
+			"critical_bump_pct": x.CriticalBumpPct,
+			"window_seconds":    x.WindowSeconds,
+		}
+	case InterfaceErrorsRate:
+		return map[string]any{"window_seconds": x.WindowSeconds, "errors_per_min": x.ErrorsPerMin}
+	case TopTalkerBaselineAnomaly:
+		return map[string]any{"multiplier": x.Multiplier, "min_baseline_bytes": x.MinBaselineBytes}
 	case severityWrap:
 		return describe(x.Rule)
 	}
@@ -168,6 +209,24 @@ func paramInt(p map[string]any, key string, fallback int) int {
 		return n
 	case int64:
 		return int(n)
+	}
+	return fallback
+}
+
+func paramFloat64(p map[string]any, key string, fallback float64) float64 {
+	v, ok := p[key]
+	if !ok {
+		return fallback
+	}
+	switch n := v.(type) {
+	case float64:
+		return n
+	case float32:
+		return float64(n)
+	case int:
+		return float64(n)
+	case int64:
+		return float64(n)
 	}
 	return fallback
 }

@@ -7,10 +7,11 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 )
 
-// DefaultRules returns the v0 built-in rule set. More rules
-// (interface utilization, BGP transitions, top-talker delta vs
-// baseline) are follow-up slices once SNMP enrichment and gNMI BGP
-// state are in place.
+// DefaultRules returns the v0 built-in rule set. The four extra rules
+// added in the P1 push (oper-status change, utilization, errors rate,
+// baseline anomaly) live in rules_extra.go. BGP transitions and
+// device-unreachable are still deferred until bgpPeerTable walks and
+// gNMI ingest land in P3.
 func DefaultRules() []Rule {
 	return []Rule{
 		ExporterSilent{
@@ -18,8 +19,25 @@ func DefaultRules() []Rule {
 			ActiveSeconds: 600,
 		},
 		HeavyTalker{
-			WindowSeconds: 300,
+			WindowSeconds:  300,
 			BytesThreshold: 1 << 30, // 1 GiB
+		},
+		InterfaceOperStatusChange{
+			DebounceSeconds: 60,
+			LookbackHours:   24,
+		},
+		InterfaceUtilizationHigh{
+			ThresholdPct:    80,
+			CriticalBumpPct: 15,
+			WindowSeconds:   300,
+		},
+		InterfaceErrorsRate{
+			WindowSeconds: 300,
+			ErrorsPerMin:  10,
+		},
+		TopTalkerBaselineAnomaly{
+			Multiplier:       3.0,
+			MinBaselineBytes: 1_000_000_000, // 1 GB
 		},
 	}
 }
