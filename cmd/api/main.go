@@ -156,6 +156,7 @@ func run() error {
 	// Settings & Services. Reads are open (proxy-trust, Phase 1);
 	// writes go through the X-Auth-Token middleware. Token CRUD is
 	// admin-only because creating a token grants new auth state.
+	r.Get("/api/config/effective", h.effectiveConfig)
 	r.Get("/api/services/lookup", h.servicesLookup)
 	r.Get("/api/services/library", h.servicesLibrary)
 	r.Get("/api/services/custom", h.listCustomServices)

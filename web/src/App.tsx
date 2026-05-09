@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import { api, fmt } from './api'
+import { getConfig } from './config'
 import { Overview } from './components/Overview'
 import { Flows } from './components/Flows'
 import { Devices } from './components/Devices'
@@ -207,7 +208,8 @@ function Bar({ tab, onTab }: { tab: Tab; onTab: (t: Tab) => void }) {
           <span className="absolute inset-[3px] bg-accent" />
         </span>
         <span className="font-semibold tracking-tight text-[14px]">
-          FlowScope<span className="text-accent">.</span>
+          {getConfig().display_name}
+          <span className="text-accent">.</span>
         </span>
       </div>
       <div className="flex h-full">

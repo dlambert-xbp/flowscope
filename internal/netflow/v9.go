@@ -99,7 +99,8 @@ var (
 
 // TemplateField describes one field inside a template. Length is the
 // declared field length in bytes; for IPFIX a length of 0xFFFF means
-// variable-length (we currently skip records that hit one — TODO).
+// variable-length (RFC 7011 §7) — the actual length is read from the
+// wire as a 1- or 3-byte prefix per record.
 type TemplateField struct {
 	Type       uint16
 	Length     uint16
@@ -387,9 +388,10 @@ type decoderContext struct {
 }
 
 // decodeDataRecords walks a data flowset body, producing one Flow per
-// template-shaped record. Records hitting a variable-length IPFIX
-// field abandon the rest of the body (TODO: full variable-length
-// support).
+// template-shaped record. Templates with no variable-length fields use
+// the fixed-stride hot path; templates that contain at least one IPFIX
+// variable-length field (declared length 0xFFFF, RFC 7011 §7) fall
+// back to an adaptive walker that reads the per-record length prefix.
 func decodeDataRecords(
 	template []TemplateField,
 	body []byte,
@@ -402,12 +404,15 @@ func decodeDataRecords(
 	for _, f := range template {
 		if f.Length == ipfixVariableLength {
 			hasVar = true
-			break
+			continue
 		}
 		recordLen += int(f.Length)
 	}
-	if hasVar || recordLen == 0 {
-		return dst // skip variable-length records for now
+	if hasVar {
+		return decodeVariableRecords(template, body, exporter, dst, ctx)
+	}
+	if recordLen == 0 {
+		return dst
 	}
 	for off := 0; off+recordLen <= len(body); off += recordLen {
 		if f, ok := decodeOneRecord(template, body[off:off+recordLen], exporter, ctx); ok {
@@ -415,6 +420,91 @@ func decodeDataRecords(
 		}
 	}
 	return dst
+}
+
+// decodeVariableRecords walks a data flowset whose template declares
+// at least one variable-length field. Each record is consumed
+// adaptively: fixed-length fields take exactly Length bytes; a field
+// with Length == 0xFFFF is preceded on the wire by a 1-byte length L,
+// or — if that byte is 255 — three bytes (255 sentinel + uint16 BE
+// length). Truncation at any point cleanly abandons the rest of the
+// body without panicking; partial records are dropped.
+func decodeVariableRecords(
+	template []TemplateField,
+	body []byte,
+	exporter netip.Addr,
+	dst []record.Flow,
+	ctx decoderContext,
+) []record.Flow {
+	off := 0
+	for off < len(body) {
+		flow, consumed, ok := decodeOneVarRecord(template, body[off:], exporter, ctx)
+		if !ok {
+			return dst
+		}
+		dst = append(dst, flow)
+		off += consumed
+		if consumed == 0 {
+			// Defensive: a zero-length record would loop forever.
+			return dst
+		}
+	}
+	return dst
+}
+
+// decodeOneVarRecord parses a single record whose template may contain
+// variable-length fields. Returns the produced Flow, the number of
+// bytes consumed, and an ok flag. ok=false means the record was
+// truncated and the caller should stop walking the flowset.
+func decodeOneVarRecord(template []TemplateField, rec []byte, exporter netip.Addr, ctx decoderContext) (record.Flow, int, bool) {
+	out := record.Flow{
+		Exporter: exporter,
+		Source:   record.SourceNetFlowV9,
+	}
+	if ctx.isIPFIX {
+		out.Source = record.SourceIPFIX
+		out.Observed = ctx.exportTime
+	}
+
+	off := 0
+	var lastSwitchedMs uint32
+	var flowEndMs uint64
+	haveLastSwitched := false
+	haveFlowEnd := false
+
+	for _, f := range template {
+		var fieldLen int
+		if f.Length == ipfixVariableLength {
+			if off+1 > len(rec) {
+				return out, 0, false
+			}
+			l := int(rec[off])
+			off++
+			if l == 255 {
+				if off+2 > len(rec) {
+					return out, 0, false
+				}
+				l = int(binary.BigEndian.Uint16(rec[off : off+2]))
+				off += 2
+			}
+			fieldLen = l
+		} else {
+			fieldLen = int(f.Length)
+		}
+		if off+fieldLen > len(rec) {
+			return out, 0, false
+		}
+		val := rec[off : off+fieldLen]
+		off += fieldLen
+
+		if f.Enterprise != 0 {
+			continue
+		}
+		applyField(&out, f.Type, val, &lastSwitchedMs, &flowEndMs, &haveLastSwitched, &haveFlowEnd)
+	}
+
+	finalizeObserved(&out, ctx, lastSwitchedMs, flowEndMs, haveLastSwitched, haveFlowEnd)
+	return out, off, true
 }
 
 // decodeOneRecord walks one fixed-size record's bytes and pulls out
@@ -447,78 +537,104 @@ func decodeOneRecord(template []TemplateField, rec []byte, exporter netip.Addr, 
 		if f.Enterprise != 0 {
 			continue
 		}
-		switch f.Type {
-		case fieldInBytes:
-			out.Bytes = readUintBE(val)
-		case fieldInPackets:
-			out.Packets = readUintBE(val)
-		case fieldOutBytes:
-			if out.Bytes == 0 {
-				out.Bytes = readUintBE(val)
-			}
-		case fieldOutPackets:
-			if out.Packets == 0 {
-				out.Packets = readUintBE(val)
-			}
-		case fieldProtocol:
-			if len(val) >= 1 {
-				out.Proto = val[0]
-			}
-		case fieldTOS:
-			if len(val) >= 1 {
-				out.Tos = val[0]
-			}
-		case fieldTCPFlags:
-			if len(val) >= 1 {
-				out.TCPFlags = val[0]
-			}
-		case fieldL4SrcPort:
-			out.SrcPort = uint16(readUintBE(val))
-		case fieldL4DstPort:
-			out.DstPort = uint16(readUintBE(val))
-		case fieldIPv4SrcAddr:
-			if len(val) == 4 {
-				out.SrcAddr = netip.AddrFrom4([4]byte{val[0], val[1], val[2], val[3]})
-			}
-		case fieldIPv4DstAddr:
-			if len(val) == 4 {
-				out.DstAddr = netip.AddrFrom4([4]byte{val[0], val[1], val[2], val[3]})
-			}
-		case fieldIPv6SrcAddr:
-			if len(val) == 16 {
-				var b16 [16]byte
-				copy(b16[:], val)
-				out.SrcAddr = netip.AddrFrom16(b16)
-			}
-		case fieldIPv6DstAddr:
-			if len(val) == 16 {
-				var b16 [16]byte
-				copy(b16[:], val)
-				out.DstAddr = netip.AddrFrom16(b16)
-			}
-		case fieldInputSnmp:
-			out.InputIfIndex = uint32(readUintBE(val))
-		case fieldOutputSnmp:
-			out.OutputIfIndex = uint32(readUintBE(val))
-		case fieldVlan:
-			out.VlanID = uint16(readUintBE(val))
-		case fieldSrcAS:
-			out.SrcAS = uint32(readUintBE(val))
-		case fieldDstAS:
-			out.DstAS = uint32(readUintBE(val))
-		case fieldLastSwitched:
-			lastSwitchedMs = uint32(readUintBE(val))
-			haveLastSwitched = true
-		case fieldFlowEndMillis:
-			flowEndMs = readUintBE(val)
-			haveFlowEnd = true
-		}
+		applyField(&out, f.Type, val, &lastSwitchedMs, &flowEndMs, &haveLastSwitched, &haveFlowEnd)
 	}
 
-	// Compute Observed:
-	//  - IPFIX with absolute flowEndMillis → use it directly.
-	//  - v9 with LAST_SWITCHED (ms since boot) → bootWall + ms.
-	//  - Otherwise leave whatever default the caller stamped.
+	finalizeObserved(&out, ctx, lastSwitchedMs, flowEndMs, haveLastSwitched, haveFlowEnd)
+	return out, true
+}
+
+// applyField dispatches one decoded field value into the canonical
+// Flow record. Shared by the fixed-stride and variable-length walkers
+// so the field-ID switch lives in one place.
+func applyField(
+	out *record.Flow,
+	fieldType uint16,
+	val []byte,
+	lastSwitchedMs *uint32,
+	flowEndMs *uint64,
+	haveLastSwitched, haveFlowEnd *bool,
+) {
+	switch fieldType {
+	case fieldInBytes:
+		out.Bytes = readUintBE(val)
+	case fieldInPackets:
+		out.Packets = readUintBE(val)
+	case fieldOutBytes:
+		if out.Bytes == 0 {
+			out.Bytes = readUintBE(val)
+		}
+	case fieldOutPackets:
+		if out.Packets == 0 {
+			out.Packets = readUintBE(val)
+		}
+	case fieldProtocol:
+		if len(val) >= 1 {
+			out.Proto = val[0]
+		}
+	case fieldTOS:
+		if len(val) >= 1 {
+			out.Tos = val[0]
+		}
+	case fieldTCPFlags:
+		if len(val) >= 1 {
+			out.TCPFlags = val[0]
+		}
+	case fieldL4SrcPort:
+		out.SrcPort = uint16(readUintBE(val))
+	case fieldL4DstPort:
+		out.DstPort = uint16(readUintBE(val))
+	case fieldIPv4SrcAddr:
+		if len(val) == 4 {
+			out.SrcAddr = netip.AddrFrom4([4]byte{val[0], val[1], val[2], val[3]})
+		}
+	case fieldIPv4DstAddr:
+		if len(val) == 4 {
+			out.DstAddr = netip.AddrFrom4([4]byte{val[0], val[1], val[2], val[3]})
+		}
+	case fieldIPv6SrcAddr:
+		if len(val) == 16 {
+			var b16 [16]byte
+			copy(b16[:], val)
+			out.SrcAddr = netip.AddrFrom16(b16)
+		}
+	case fieldIPv6DstAddr:
+		if len(val) == 16 {
+			var b16 [16]byte
+			copy(b16[:], val)
+			out.DstAddr = netip.AddrFrom16(b16)
+		}
+	case fieldInputSnmp:
+		out.InputIfIndex = uint32(readUintBE(val))
+	case fieldOutputSnmp:
+		out.OutputIfIndex = uint32(readUintBE(val))
+	case fieldVlan:
+		out.VlanID = uint16(readUintBE(val))
+	case fieldSrcAS:
+		out.SrcAS = uint32(readUintBE(val))
+	case fieldDstAS:
+		out.DstAS = uint32(readUintBE(val))
+	case fieldLastSwitched:
+		*lastSwitchedMs = uint32(readUintBE(val))
+		*haveLastSwitched = true
+	case fieldFlowEndMillis:
+		*flowEndMs = readUintBE(val)
+		*haveFlowEnd = true
+	}
+}
+
+// finalizeObserved sets the Flow's Observed timestamp using whichever
+// time source the record provided:
+//   - IPFIX with absolute flowEndMillis → use it directly.
+//   - v9 with LAST_SWITCHED (ms since boot) → bootWall + ms.
+//   - Otherwise leave whatever default the caller stamped.
+func finalizeObserved(
+	out *record.Flow,
+	ctx decoderContext,
+	lastSwitchedMs uint32,
+	flowEndMs uint64,
+	haveLastSwitched, haveFlowEnd bool,
+) {
 	if haveFlowEnd {
 		out.Observed = time.UnixMilli(int64(flowEndMs)).UTC()
 	} else if haveLastSwitched && !ctx.isIPFIX {
@@ -526,7 +642,6 @@ func decodeOneRecord(template []TemplateField, rec []byte, exporter netip.Addr, 
 	} else if out.Observed.IsZero() {
 		out.Observed = ctx.exportTime
 	}
-	return out, true
 }
 
 // readUintBE returns a big-endian unsigned integer of length 1, 2, 4,

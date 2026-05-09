@@ -13,6 +13,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 
+	"github.com/dlambert-xbp/flowscope/internal/alerteng"
 	"github.com/dlambert-xbp/flowscope/internal/audit"
 	"github.com/dlambert-xbp/flowscope/internal/authz"
 	"github.com/dlambert-xbp/flowscope/internal/services"
@@ -327,6 +328,38 @@ func (h *handlers) putGeneralSetting(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, v)
 }
 
+// effectiveConfig returns the runtime-effective values for the
+// display-side keys in app_settings, merged on top of hard-coded
+// defaults. Used by the SPA on boot to seed theme / time range /
+// brand display name without each component re-fetching.
+//
+// Retention values are deliberately omitted — they take effect only
+// at init-container time via ALTER TABLE TTL, not at request time,
+// and surfacing them here would invite the misimpression that the
+// SPA can change them on the fly.
+//
+//	GET /api/config/effective
+func (h *handlers) effectiveConfig(w http.ResponseWriter, r *http.Request) {
+	out := map[string]any{
+		"display_name":       "FlowScope",
+		"default_theme":      "system",
+		"default_time_range": "5m",
+		"timezone":           "UTC",
+	}
+	if h.settings.store != nil {
+		rows, err := h.settings.store.AppSettings.List(r.Context())
+		if err == nil {
+			for _, row := range rows {
+				switch row.Name {
+				case "display_name", "default_theme", "default_time_range", "timezone":
+					out[row.Name] = row.Value
+				}
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
 // validGeneralKey closes the set of allowed keys. New keys land here
 // in the same PR that makes them — keeping the set explicit means a
 // typo in the UI can't silently create a junk row.
@@ -512,7 +545,17 @@ func (h *handlers) listAlertRules(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"rows": rows, "count": len(rows), "available": availableRules()})
+	effective, err := alerteng.Effective(r.Context(), h.settings.store.AlertRules)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"rows":      rows,
+		"count":     len(rows),
+		"available": availableRules(),
+		"effective": effective,
+	})
 }
 
 func (h *handlers) putAlertRule(w http.ResponseWriter, r *http.Request) {

@@ -320,3 +320,105 @@ func appendU64BE(b []byte, v uint64) []byte {
 	binary.BigEndian.PutUint64(x[:], v)
 	return append(b, x[:]...)
 }
+
+// ---------- Variable-length IPFIX records (RFC 7011 §7) ----------
+
+// TestDecodeDataRecords_VarShort exercises a record whose template has
+// a single variable-length field encoded with the short (1-byte length)
+// prefix, followed by a fixed-length protocol byte. The variable-length
+// field carries an unrecognized field ID so the decoder consumes its
+// bytes and moves on; the protocol field validates that the walker
+// landed on the correct offset.
+func TestDecodeDataRecords_VarShort(t *testing.T) {
+	template := []TemplateField{
+		{Type: 82, Length: ipfixVariableLength}, // interfaceName, ignored
+		{Type: fieldProtocol, Length: 1},
+	}
+	body := []byte{}
+	name := []byte("eth0")          // 4 bytes
+	body = append(body, byte(len(name)))
+	body = append(body, name...)
+	body = append(body, 6) // protocol = TCP
+
+	flows := decodeDataRecords(template, body, netip.MustParseAddr("10.0.0.1"), nil, decoderContext{isIPFIX: true})
+	if len(flows) != 1 {
+		t.Fatalf("len(flows) = %d, want 1", len(flows))
+	}
+	if flows[0].Proto != 6 {
+		t.Errorf("Proto = %d, want 6 (variable-length walker mis-aligned)", flows[0].Proto)
+	}
+}
+
+// TestDecodeDataRecords_VarLong covers the 3-byte length form (255
+// sentinel + uint16 length) used when a variable-length field is ≥255
+// bytes. We use a 300-byte payload, then a fixed protocol byte.
+func TestDecodeDataRecords_VarLong(t *testing.T) {
+	template := []TemplateField{
+		{Type: 82, Length: ipfixVariableLength},
+		{Type: fieldProtocol, Length: 1},
+	}
+	payload := make([]byte, 300)
+	for i := range payload {
+		payload[i] = byte(i)
+	}
+	body := []byte{}
+	body = append(body, 255) // long-length sentinel
+	var lenBuf [2]byte
+	binary.BigEndian.PutUint16(lenBuf[:], uint16(len(payload)))
+	body = append(body, lenBuf[:]...)
+	body = append(body, payload...)
+	body = append(body, 17) // protocol = UDP
+
+	flows := decodeDataRecords(template, body, netip.MustParseAddr("10.0.0.1"), nil, decoderContext{isIPFIX: true})
+	if len(flows) != 1 {
+		t.Fatalf("len(flows) = %d, want 1", len(flows))
+	}
+	if flows[0].Proto != 17 {
+		t.Errorf("Proto = %d, want 17 (long-length prefix mis-decoded)", flows[0].Proto)
+	}
+}
+
+// TestDecodeDataRecords_VarTruncated ensures that a length prefix
+// claiming more bytes than are present abandons the record cleanly
+// without panicking and without emitting a partial flow.
+func TestDecodeDataRecords_VarTruncated(t *testing.T) {
+	template := []TemplateField{
+		{Type: 82, Length: ipfixVariableLength},
+		{Type: fieldProtocol, Length: 1},
+	}
+	body := []byte{}
+	body = append(body, 100)                  // claim 100 bytes
+	body = append(body, make([]byte, 50)...)  // only deliver 50
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("decodeDataRecords panicked on truncated record: %v", r)
+		}
+	}()
+	flows := decodeDataRecords(template, body, netip.MustParseAddr("10.0.0.1"), nil, decoderContext{isIPFIX: true})
+	if len(flows) != 0 {
+		t.Errorf("len(flows) = %d, want 0 on truncated record", len(flows))
+	}
+}
+
+// TestDecodeDataRecords_VarMultipleRecords verifies the adaptive
+// walker correctly advances across record boundaries when each record
+// has a different variable-length payload size.
+func TestDecodeDataRecords_VarMultipleRecords(t *testing.T) {
+	template := []TemplateField{
+		{Type: 82, Length: ipfixVariableLength},
+		{Type: fieldProtocol, Length: 1},
+	}
+	// Record 1: 3-byte name + proto 6
+	body := []byte{3, 'e', 't', 'h', 6}
+	// Record 2: 5-byte name + proto 17
+	body = append(body, 5, 'e', 'n', 'p', '1', 's', 17)
+
+	flows := decodeDataRecords(template, body, netip.MustParseAddr("10.0.0.1"), nil, decoderContext{isIPFIX: true})
+	if len(flows) != 2 {
+		t.Fatalf("len(flows) = %d, want 2", len(flows))
+	}
+	if flows[0].Proto != 6 || flows[1].Proto != 17 {
+		t.Errorf("protos = %d,%d; want 6,17", flows[0].Proto, flows[1].Proto)
+	}
+}
