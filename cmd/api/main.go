@@ -141,6 +141,7 @@ func run() error {
 	r.Get("/api/top/asn", h.topASN)
 	r.Get("/api/alerts", h.alerts)
 	r.Get("/api/alerts/summary", h.alertSummary)
+	r.Get("/api/alerts/{id}", h.alertDetail)
 	r.Post("/api/alerts/{id}/ack", h.ackAlert)
 	r.Post("/api/alerts/{id}/close", h.closeAlert)
 	r.Get("/api/snmp/credentials", h.listCredentials)

@@ -650,6 +650,32 @@ func (h *handlers) alerts(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// alertDetail returns the full timeline + linked flows for one alert.
+//
+//	GET /api/alerts/{id}
+//
+// Powers the alert detail modal: a click on an alert row opens the
+// dialog with (a) the alert summary, (b) every alert_events row for
+// this (rule, scope, group_key) as a chronological timeline, and (c)
+// a short list of linked flows derived from the rule's labels.
+func (h *handlers) alertDetail(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "id is required")
+		return
+	}
+	d, err := store.QueryAlertDetail(r.Context(), h.conn, id)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "alert not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, d)
+}
+
 // alertSummary returns the four-bucket counts for the Alerts tab
 // summary stats.
 //
