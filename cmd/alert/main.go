@@ -7,13 +7,13 @@
 // opened / closed transitions and fans out to enabled
 // webhook_endpoints (Slack / Teams / PagerDuty / HTTP). Co-locating
 // the dispatcher with the engine keeps the deploy footprint at one
-// binary; it inherits the single-replica constraint until leader
-// election (P0 #5) lands and is documented as a known tradeoff.
+// binary.
 //
-// VISION.md §6 calls for the alert service to run as a singleton
-// (leader-elected against ClickHouse Keeper). Slice 14 ships a
-// single-replica engine and assumes one instance — production
-// readiness adds the lease lock in a follow-up.
+// Both loops run inside a ClickHouse-backed leader lease
+// (internal/leaderlease). Followers stay idle until they win the
+// lease; loss of lease cancels the leader's child context so engine
+// + dispatcher stop gracefully. Operators can therefore set
+// alert.replicas > 1 in the Helm chart for HA without dupe-firing.
 package main
 
 import (
@@ -29,6 +29,7 @@ import (
 
 	"github.com/dlambert-xbp/flowscope/internal/alerteng"
 	"github.com/dlambert-xbp/flowscope/internal/audit"
+	"github.com/dlambert-xbp/flowscope/internal/leaderlease"
 	"github.com/dlambert-xbp/flowscope/internal/notifier"
 	"github.com/dlambert-xbp/flowscope/internal/obs"
 	"github.com/dlambert-xbp/flowscope/internal/secrets"
@@ -136,18 +137,55 @@ func run() error {
 	auditW := audit.NewClickHouseWriter(conn)
 	disp := notifier.New(conn, crypter, auditW).WithTick(dispTick)
 
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		if err := disp.Run(ctx); err != nil {
-			slog.Error("notifier: dispatcher exited with error", "err", err)
-		}
-	}()
+	// Leader election (P0 #5). Two replicas would dupe-fire BOTH the
+	// engine and the dispatcher; a ClickHouse-backed lease ensures
+	// exactly one replica runs the loops at any moment. Tunables
+	// expose TTL + renew cadence so operators can balance failover
+	// latency against ClickHouse write traffic.
+	leaseTTLStr := envOr("FLOWSCOPE_ALERT_LEASE_TTL", "30s")
+	leaseTTL, err := time.ParseDuration(leaseTTLStr)
+	if err != nil {
+		return fmt.Errorf("invalid FLOWSCOPE_ALERT_LEASE_TTL %q: %w", leaseTTLStr, err)
+	}
+	leaseRenewStr := envOr("FLOWSCOPE_ALERT_LEASE_RENEW", "10s")
+	leaseRenew, err := time.ParseDuration(leaseRenewStr)
+	if err != nil {
+		return fmt.Errorf("invalid FLOWSCOPE_ALERT_LEASE_RENEW %q: %w", leaseRenewStr, err)
+	}
+	lease := leaderlease.New(leaderlease.FromConn(conn), leaderlease.Config{
+		Name:          "alert",
+		TTL:           leaseTTL,
+		RenewInterval: leaseRenew,
+	})
+	slog.Info("alert: leader-lease configured",
+		"name", lease.Name(),
+		"holder", lease.Holder(),
+		"ttl", leaseTTL.String(),
+		"renew", leaseRenew.String(),
+	)
 
-	engineErr := engine.Run(ctx)
-	wg.Wait()
-	return engineErr
+	onBecomeLeader := func(leaderCtx context.Context) error {
+		slog.Info("alert: became leader — starting engine + dispatcher")
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := disp.Run(leaderCtx); err != nil {
+				slog.Error("notifier: dispatcher exited with error", "err", err)
+			}
+		}()
+		engineErr := engine.Run(leaderCtx)
+		wg.Wait()
+		// engine.Run / disp.Run return nil on ctx cancellation. Surface
+		// only real errors — the periodic "lease lost, cancel child"
+		// path is not an error.
+		if engineErr != nil && leaderCtx.Err() == nil {
+			return engineErr
+		}
+		return nil
+	}
+
+	return lease.Run(ctx, onBecomeLeader)
 }
 
 func envOr(key, def string) string {

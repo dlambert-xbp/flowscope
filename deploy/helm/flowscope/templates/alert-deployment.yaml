@@ -1,0 +1,73 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "flowscope.fullname" . }}-alert
+  labels:
+    {{- include "flowscope.labels" . | nindent 4 }}
+    app.kubernetes.io/component: alert
+spec:
+  # alert.replicaCount > 1 is safe because both the engine and the
+  # webhook dispatcher run inside a ClickHouse-backed leader lease
+  # (internal/leaderlease, migration 000010_leader_lease.sql).
+  # Followers stay idle until they win the lease; loss of lease
+  # cancels the leader's child context so engine + dispatcher stop
+  # before another replica picks up.
+  replicas: {{ .Values.alert.replicaCount }}
+  # Recreate strategy: with replicas=1 a rolling update would briefly
+  # leave two replicas trying to lead at once. The lease prevents
+  # dupe-firing in that window, but Recreate also avoids the wasted
+  # ClickHouse round-trips from a transient follower. With replicas>1
+  # operators should override this to RollingUpdate via --set.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "flowscope.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: alert
+  template:
+    metadata:
+      labels:
+        {{- include "flowscope.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: alert
+    spec:
+      # Block on schema migrations + retention TTL applying so the
+      # leader_lease table exists before the alert pod tries to read
+      # it.
+      initContainers:
+        {{- include "flowscope.initContainer" . | nindent 8 }}
+      containers:
+        - name: alert
+          image: "{{ if .Values.global.imageRegistry }}{{ .Values.global.imageRegistry }}/{{ end }}{{ .Values.alert.image.repository }}:{{ default .Values.image.tag .Values.alert.image.tag }}"
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - name: metrics
+              containerPort: 9101
+          env:
+            - name: FLOWSCOPE_CLICKHOUSE_DSN
+              value: {{ .Values.global.clickhouseDSN | quote }}
+            - name: FLOWSCOPE_LOG_LEVEL
+              value: {{ .Values.global.logLevel | quote }}
+            - name: FLOWSCOPE_ALERT_LEASE_TTL
+              value: "{{ .Values.alert.leaderLease.ttlSeconds }}s"
+            - name: FLOWSCOPE_ALERT_LEASE_RENEW
+              value: "{{ .Values.alert.leaderLease.renewIntervalSeconds }}s"
+            {{- range $k, $v := .Values.alert.env }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+          # No HTTP liveness — alert serves only /metrics. Use a TCP
+          # probe so kubelet restarts on a wedged process rather than
+          # waiting for the lease to expire and a follower to take
+          # over.
+          readinessProbe:
+            tcpSocket:
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: metrics
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.alert.resources | nindent 12 }}

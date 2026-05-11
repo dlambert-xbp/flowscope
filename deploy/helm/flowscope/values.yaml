@@ -132,3 +132,35 @@ ingest:
     FLOWSCOPE_NETFLOW_PORT: "2055"
     FLOWSCOPE_SFLOW_PORT: "6343"
     FLOWSCOPE_IPFIX_PORT: "4739"
+
+# alert runs the rule engine + webhook dispatcher. Both loops are
+# wrapped in a ClickHouse-backed leader lease (P0 #5,
+# internal/leaderlease), so alert.replicaCount > 1 is safe — followers
+# stay idle until they win the lease. Recommended HA: 2 replicas with
+# the defaults below.
+alert:
+  replicaCount: 1
+  image:
+    repository: flowscope-alert
+    tag: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  env:
+    FLOWSCOPE_ALERT_TICK: "10s"
+    FLOWSCOPE_ALERT_STABILITY: "60s"
+    FLOWSCOPE_NOTIFIER_TICK: "5s"
+    FLOWSCOPE_METRICS_ADDR: ":9101"
+  # leaderLease tunes the ClickHouse-backed lease that ensures exactly
+  # one replica runs the engine + dispatcher at a time. TTL is the
+  # total lifetime per acquire/renew; renewIntervalSeconds is how
+  # often the leader extends it. Rule of thumb: TTL ≥ 3× renew so a
+  # single missed renew doesn't drop the lease. Failover latency on a
+  # crashed leader is bounded by ttlSeconds.
+  leaderLease:
+    ttlSeconds: 30
+    renewIntervalSeconds: 10
