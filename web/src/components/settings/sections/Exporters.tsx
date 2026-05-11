@@ -44,6 +44,21 @@ export function Exporters() {
             <strong className="text-warn">Permissive mode.</strong> Anyone who can
             send a NetFlow/sFlow/IPFIX packet to your collectors will be ingested.
             Production deployments should add at least one explicit entry.
+            <div className="mt-1.5 text-faint">
+              Adding the first row enforces deny-by-default. Empty list = accept all.
+            </div>
+          </Banner>
+        </div>
+      )}
+      {!acceptAll && (
+        <div className="px-6 pt-4">
+          <Banner tone="accent">
+            <strong className="text-accent">Deny-by-default active.</strong> Only
+            sources on this list are ingested; everything else is dropped at the
+            UDP listener and counted as
+            {' '}
+            <span className="font-mono text-[12px]">flowscope_ingest_dropped_unauthorized_total</span>.
+            Removing every row reverts to accept-all.
           </Banner>
         </div>
       )}
