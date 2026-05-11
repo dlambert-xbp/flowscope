@@ -31,9 +31,15 @@ import (
 	"github.com/dlambert-xbp/flowscope/internal/obs"
 	"github.com/dlambert-xbp/flowscope/internal/record"
 	"github.com/dlambert-xbp/flowscope/internal/seqtrack"
+	"github.com/dlambert-xbp/flowscope/internal/settings"
 	"github.com/dlambert-xbp/flowscope/internal/sflow"
 	"github.com/dlambert-xbp/flowscope/internal/store"
 )
+
+// allowlistRefreshInterval is how often the gate re-reads the
+// exporter_allowlist table from ClickHouse. Operator-side mutations
+// land on ingest within one tick. Tuned per Session C in TASKS.md.
+const allowlistRefreshInterval = 30 * time.Second
 
 const ringCapacity = 5000 // VISION.md §3.3
 
@@ -105,17 +111,30 @@ func run() error {
 	templateCache := netflow.NewTemplateCache()
 	tracker := seqtrack.New()
 
+	// Exporter allowlist gate. Defaults to accept-all so we never
+	// drop traffic in standalone (no-ClickHouse) mode and so the
+	// gate is permissive during the priming round-trip. The
+	// refresher goroutine flips it to deny-by-default once the first
+	// non-empty allowlist load completes.
+	gate := newAllowlistGate()
+	if chConn != nil {
+		settingsStore := settings.New(chConn, nil)
+		go gate.runRefresher(ctx, settingsStore.Allowlist, allowlistRefreshInterval)
+	} else {
+		slog.Info("allowlist: ClickHouse disabled — gate stays permissive (accept-all)")
+	}
+
 	var wg sync.WaitGroup
 	wg.Add(3)
 	go func() {
 		defer wg.Done()
-		if err := runNetFlowListener(ctx, netflowAddr, flowEmitter, templateCache, tracker); err != nil {
+		if err := runNetFlowListener(ctx, netflowAddr, flowEmitter, templateCache, tracker, gate); err != nil {
 			slog.Error("netflow listener exited", "err", err)
 		}
 	}()
 	go func() {
 		defer wg.Done()
-		if err := runSFlowListener(ctx, sflowAddr, flowEmitter, counterEmitter, tracker); err != nil {
+		if err := runSFlowListener(ctx, sflowAddr, flowEmitter, counterEmitter, tracker, gate); err != nil {
 			slog.Error("sflow listener exited", "err", err)
 		}
 	}()
@@ -161,7 +180,10 @@ func run() error {
 // runNetFlowListener serves the NetFlow / IPFIX UDP port. Dispatches
 // by version word: 5 → fixed v5 parser, 9 / 10 → template-driven
 // v9 / IPFIX parser sharing the supplied TemplateCache.
-func runNetFlowListener(ctx context.Context, addr string, emitter *record.Emitter, cache *netflow.TemplateCache, tracker *seqtrack.Tracker) error {
+//
+// gate enforces the exporter_allowlist BEFORE parse. Drops increment
+// flowscope_ingest_dropped_unauthorized_total inside Allow.
+func runNetFlowListener(ctx context.Context, addr string, emitter *record.Emitter, cache *netflow.TemplateCache, tracker *seqtrack.Tracker, gate *allowlistGate) error {
 	conn, err := openUDP(ctx, addr)
 	if err != nil {
 		return err
@@ -184,6 +206,11 @@ func runNetFlowListener(ctx context.Context, addr string, emitter *record.Emitte
 		}
 		obs.UDPPacketsReceived.WithLabelValues("netflow").Inc()
 		exporter := src.Addr().Unmap()
+		// Allowlist gate: drop unauthorized sources before paying
+		// the parse cost. Empty allowlist = accept-all.
+		if !gate.Allow(exporter) {
+			continue
+		}
 		version := binary.BigEndian.Uint16(buf[0:2])
 		scratch = scratch[:0]
 		var protocol string
@@ -234,7 +261,13 @@ func runNetFlowListener(ctx context.Context, addr string, emitter *record.Emitte
 // runSFlowListener serves the sFlow v5 UDP port. Each datagram can
 // contain both flow_samples and counters_samples; the parser produces
 // both in one call and the listener routes each through its emitter.
-func runSFlowListener(ctx context.Context, addr string, flowEmitter *record.Emitter, counterEmitter *record.CounterEmitter, tracker *seqtrack.Tracker) error {
+//
+// gate enforces the exporter_allowlist BEFORE parse. We gate on the
+// UDP source address (not the post-parse sFlow agent_address) so the
+// drop happens before we touch the payload — agent_address is
+// declared inside the datagram itself and could be spoofed
+// independent of the underlying source.
+func runSFlowListener(ctx context.Context, addr string, flowEmitter *record.Emitter, counterEmitter *record.CounterEmitter, tracker *seqtrack.Tracker, gate *allowlistGate) error {
 	conn, err := openUDP(ctx, addr)
 	if err != nil {
 		return err
@@ -258,6 +291,13 @@ func runSFlowListener(ctx context.Context, addr string, flowEmitter *record.Emit
 		}
 		obs.UDPPacketsReceived.WithLabelValues("sflow").Inc()
 		fallback := src.Addr().Unmap()
+		// Allowlist gate: drop unauthorized sources before parse.
+		// Empty allowlist = accept-all. We deliberately gate on the
+		// UDP source rather than the parsed sFlow agent_address —
+		// see the function comment for why.
+		if !gate.Allow(fallback) {
+			continue
+		}
 		// Note datagram seq before parse; agent_address override (per
 		// VISION.md §4.1) means the post-parse exporter may differ from
 		// the UDP source. Use the UDP source for tracking — parsing-time

@@ -927,6 +927,212 @@ FROM latest`
 	return &s, nil
 }
 
+// AlertEvent is one row from alert_events — the audit trail behind a
+// single (rule, scope, group_key). The detail modal renders a list
+// of these as a timeline of "samples that triggered" plus the
+// state-transition events (opened, acknowledged, closed).
+type AlertEvent struct {
+	Ts       time.Time         `json:"ts"`
+	State    string            `json:"state"`
+	Severity string            `json:"severity"`
+	Title    string            `json:"title"`
+	Body     string            `json:"body"`
+	Actor    string            `json:"actor"`
+	Labels   map[string]string `json:"labels"`
+}
+
+// AlertDetail bundles everything the alert detail modal needs in one
+// API response: the current alert summary (same shape as QueryAlerts),
+// the full event timeline for that (rule, scope, group_key), and a
+// short list of linked flows derived from the labels recorded at
+// open / heartbeat time.
+type AlertDetail struct {
+	Alert    Alert        `json:"alert"`
+	Timeline []AlertEvent `json:"timeline"`
+	Flows    []RecentFlow `json:"flows"`
+	// FlowsSource explains how the linked-flow list was derived so the
+	// UI can show a one-line provenance hint. Possible values:
+	//   "labels"     — labels carried enough specificity to filter
+	//   "exporter"   — only the exporter IP was usable
+	//   "none"       — labels did not include any field we could filter on
+	FlowsSource string `json:"flows_source"`
+}
+
+// QueryAlertDetail returns the full detail bundle for one alert by id.
+// id is the cityHash64-hex returned by QueryAlerts. ErrNotFound is
+// returned when no event has ever been written for that hash.
+func QueryAlertDetail(ctx context.Context, conn driver.Conn, id string) (*AlertDetail, error) {
+	// Resolve the (rule_id, scope, group_key) tuple from the hash.
+	// Use the same WHERE the ack/close path uses so the lookups stay
+	// consistent across endpoints.
+	const lookup = `
+SELECT rule_id, scope, group_key
+FROM alert_events
+WHERE cityHash64(concat(rule_id, '|', scope, '|', group_key)) = reinterpretAsUInt64(reverse(unhex(?)))
+GROUP BY rule_id, scope, group_key
+LIMIT 1`
+	var ruleID, scope, groupKey string
+	if err := conn.QueryRow(ctx, lookup, id).Scan(&ruleID, &scope, &groupKey); err != nil {
+		if isNoRows(err) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("store: lookup alert %s: %w", id, err)
+	}
+
+	// Build the alert summary (same argMax shape as QueryAlerts) for
+	// just this one (rule, scope, group_key). Bound to 7d like the
+	// list endpoint so closed-but-still-in-ledger alerts still resolve.
+	const summary = `
+SELECT
+    argMax(state, ts)    AS state,
+    argMax(severity, ts) AS severity,
+    argMax(title, ts)    AS title,
+    argMax(body, ts)     AS body,
+    argMax(runbook, ts)  AS runbook,
+    argMax(actor, ts)    AS actor,
+    argMax(labels, ts)   AS labels,
+    min(ts)              AS opened_at,
+    max(ts)              AS last_active_at
+FROM alert_events
+WHERE ts >= now() - INTERVAL 7 DAY
+  AND rule_id   = ?
+  AND scope     = ?
+  AND group_key = ?`
+	a := Alert{ID: id, RuleID: ruleID, Scope: scope, GroupKey: groupKey}
+	if err := conn.QueryRow(ctx, summary, ruleID, scope, groupKey).Scan(
+		&a.State, &a.Severity, &a.Title, &a.Body, &a.Runbook, &a.Actor,
+		&a.Labels, &a.OpenedAt, &a.LastActiveAt,
+	); err != nil {
+		return nil, fmt.Errorf("store: alert detail summary: %w", err)
+	}
+
+	// Best-effort SNMP enrichment for scope_display, mirroring the
+	// behavior in QueryAlerts so the modal header reads the same as
+	// the row that opened it.
+	if ip := a.Labels["exporter"]; ip != "" {
+		if addr, err := netip.ParseAddr(ip); err == nil {
+			const qn = `
+SELECT argMax(sys_name, polled_at)
+FROM device_inventory
+WHERE polled_at >= now() - INTERVAL 7 DAY AND exporter = ?
+GROUP BY exporter`
+			var n string
+			if err := conn.QueryRow(ctx, qn, toIPv6(addr)).Scan(&n); err == nil && n != "" {
+				if a.Scope == ip {
+					a.ScopeDisplay = n + " · " + ip
+				} else {
+					a.ScopeDisplay = a.Scope + " · " + n
+				}
+			}
+		}
+	}
+
+	// Timeline: every event row for this key in the last 7 days,
+	// oldest first so the UI can render top-to-bottom chronologically.
+	// Capped at 200 events so a flapping alert with thousands of
+	// heartbeats doesn't blow up the response payload — the cap is
+	// communicated to the UI by the row count alone (no explicit
+	// "truncated" flag yet; this is a follow-up if we see it in the wild).
+	const tl = `
+SELECT ts, state, severity, title, body, actor, labels
+FROM alert_events
+WHERE ts >= now() - INTERVAL 7 DAY
+  AND rule_id   = ?
+  AND scope     = ?
+  AND group_key = ?
+ORDER BY ts ASC
+LIMIT 200`
+	timeline := make([]AlertEvent, 0, 32)
+	rows, err := conn.Query(ctx, tl, ruleID, scope, groupKey)
+	if err != nil {
+		return nil, fmt.Errorf("store: alert detail timeline: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var ev AlertEvent
+		if err := rows.Scan(&ev.Ts, &ev.State, &ev.Severity, &ev.Title, &ev.Body, &ev.Actor, &ev.Labels); err != nil {
+			return nil, fmt.Errorf("store: scan alert event: %w", err)
+		}
+		timeline = append(timeline, ev)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Linked flows: derive a FlowFilter from the labels recorded by
+	// the rule. Today's two built-ins write:
+	//   exporter_silent → labels{exporter}
+	//   heavy_talker    → labels{src_addr, dst_addr, bytes}
+	// The window is the alert's lifetime, clamped to [60s, 30m].
+	flows, source, err := queryAlertLinkedFlows(ctx, conn, &a)
+	if err != nil {
+		// Don't fail the whole response just because the flow lookup
+		// hiccupped — the timeline is still useful on its own.
+		flows = nil
+		source = "error: " + err.Error()
+	}
+
+	return &AlertDetail{
+		Alert:       a,
+		Timeline:    timeline,
+		Flows:       flows,
+		FlowsSource: source,
+	}, nil
+}
+
+// queryAlertLinkedFlows turns alert labels into a flow filter and
+// returns up to 50 recent flows that match. Returns ([], "none", nil)
+// when no label is specific enough to filter on.
+func queryAlertLinkedFlows(ctx context.Context, conn driver.Conn, a *Alert) ([]RecentFlow, string, error) {
+	f := FlowFilter{
+		Exporter: a.Labels["exporter"],
+		SrcAddr:  a.Labels["src_addr"],
+		DstAddr:  a.Labels["dst_addr"],
+	}
+	source := ""
+	switch {
+	case f.SrcAddr != "" || f.DstAddr != "":
+		source = "labels"
+	case f.Exporter != "":
+		source = "exporter"
+	default:
+		return nil, "none", nil
+	}
+
+	// Window = alert lifetime, but clamp so a 7-day-old alert doesn't
+	// scan a week of flows just to populate a modal.
+	from := a.OpenedAt
+	to := a.LastActiveAt
+	if to.IsZero() {
+		to = time.Now().UTC()
+	}
+	if to.Before(from) {
+		from, to = to, from
+	}
+	span := to.Sub(from)
+	const minSpan = 60 * time.Second
+	const maxSpan = 30 * time.Minute
+	if span < minSpan {
+		// Pad symmetrically around openedAt so a brand-new alert still
+		// shows the flows immediately surrounding the open event.
+		half := (minSpan - span) / 2
+		from = from.Add(-half)
+		to = to.Add(half)
+	}
+	if to.Sub(from) > maxSpan {
+		from = to.Add(-maxSpan)
+	}
+	tr := AbsoluteRange(from, to)
+
+	// Use the existing list query so SNMP enrichment, IP unmap, and
+	// the WHERE-builder edge cases are all reused. Sort newest first.
+	flows, err := QueryFlowsList(ctx, conn, tr, 50, 0, FlowsListSortObserved, FlowsListDirDesc, f)
+	if err != nil {
+		return nil, "", err
+	}
+	return flows, source, nil
+}
+
 // AckAlert appends an acknowledged event for an alert. The alert id
 // is the cityHash64-hex returned by QueryAlerts; we look up the
 // (rule_id, scope, group_key) tuple via the same hash and write an

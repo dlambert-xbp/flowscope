@@ -1,0 +1,83 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "flowscope.fullname" . }}-ingest
+  labels:
+    {{- include "flowscope.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ingest
+spec:
+  replicas: {{ .Values.ingest.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "flowscope.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: ingest
+  template:
+    metadata:
+      labels:
+        {{- include "flowscope.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: ingest
+    spec:
+      # Same init container as the api Deployment — block on schema
+      # migrations + retention TTL before listening for flows. Two
+      # replicas applying retention concurrently is safe; ALTER TABLE
+      # ... MODIFY TTL is idempotent in ClickHouse and the audit row
+      # is append-only.
+      initContainers:
+        {{- include "flowscope.initContainer" . | nindent 8 }}
+      containers:
+        - name: ingest
+          image: "{{ if .Values.global.imageRegistry }}{{ .Values.global.imageRegistry }}/{{ end }}{{ .Values.ingest.image.repository }}:{{ default .Values.image.tag .Values.ingest.image.tag }}"
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - name: netflow
+              containerPort: {{ .Values.ingest.service.netflowPort }}
+              protocol: UDP
+            - name: sflow
+              containerPort: {{ .Values.ingest.service.sflowPort }}
+              protocol: UDP
+            - name: ipfix
+              containerPort: {{ .Values.ingest.service.ipfixPort }}
+              protocol: UDP
+            - name: metrics
+              containerPort: 9100
+              protocol: TCP
+          env:
+            - name: FLOWSCOPE_CLICKHOUSE_DSN
+              value: {{ .Values.global.clickhouseDSN | quote }}
+            - name: FLOWSCOPE_LOG_LEVEL
+              value: {{ .Values.global.logLevel | quote }}
+            {{- range $k, $v := .Values.ingest.env }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.ingest.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "flowscope.fullname" . }}-ingest
+  labels:
+    {{- include "flowscope.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ingest
+spec:
+  # NetFlow / sFlow / IPFIX listeners are UDP and benefit from the 5-
+  # tuple-hashed external load balancer described in CLAUDE.md so
+  # template state stays colocated with data records.
+  type: {{ .Values.ingest.service.type }}
+  ports:
+    - name: netflow
+      port: {{ .Values.ingest.service.netflowPort }}
+      targetPort: netflow
+      protocol: UDP
+    - name: sflow
+      port: {{ .Values.ingest.service.sflowPort }}
+      targetPort: sflow
+      protocol: UDP
+    - name: ipfix
+      port: {{ .Values.ingest.service.ipfixPort }}
+      targetPort: ipfix
+      protocol: UDP
+  selector:
+    {{- include "flowscope.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: ingest

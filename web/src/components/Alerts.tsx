@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState, type ReactNode } from 'react'
 import { api, fmt } from '../api'
 import type { Alert, AlertSummary } from '../api'
+import { AlertDetail } from './AlertDetail'
 
 type StateFilter = 'open' | 'acknowledged' | 'closed'
 
@@ -10,6 +11,12 @@ type StateFilter = 'open' | 'acknowledged' | 'closed'
 // "story" with severity, scope, runbook, and ack/close actions.
 export function Alerts() {
   const [state, setState] = useState<StateFilter>('open')
+  // Selected alert for the detail modal. Setting this is the
+  // synchronous state flip the click handler does *before* the fetch
+  // — that's what makes the modal feel immediate (memory:
+  // render-on-state-change).
+  const [selected, setSelected] = useState<Alert | null>(null)
+
   const summary = useQuery({
     queryKey: ['alerts-summary'],
     queryFn: () => api.alertSummary(),
@@ -33,7 +40,17 @@ export function Alerts() {
         ackCount={counts?.acknowledged ?? 0}
         closedCount={counts?.closed_last_24h ?? 0}
       />
-      <List alerts={list.data?.alerts ?? []} loading={list.isLoading} error={list.error as Error | undefined} />
+      <List
+        alerts={list.data?.alerts ?? []}
+        loading={list.isLoading}
+        error={list.error as Error | undefined}
+        onSelect={setSelected}
+      />
+      <AlertDetail
+        open={selected !== null}
+        alert={selected}
+        onClose={() => setSelected(null)}
+      />
     </div>
   )
 }
@@ -153,10 +170,12 @@ function List({
   alerts,
   loading,
   error,
+  onSelect,
 }: {
   alerts: Alert[]
   loading: boolean
   error?: Error
+  onSelect: (a: Alert) => void
 }) {
   if (loading) {
     return <div className="px-6 py-6 text-faint font-mono text-[12px]">loading…</div>
@@ -176,13 +195,13 @@ function List({
   return (
     <ul>
       {alerts.map((a) => (
-        <Row key={a.id} alert={a} />
+        <Row key={a.id} alert={a} onSelect={onSelect} />
       ))}
     </ul>
   )
 }
 
-function Row({ alert }: { alert: Alert }) {
+function Row({ alert, onSelect }: { alert: Alert; onSelect: (a: Alert) => void }) {
   const qc = useQueryClient()
   const ack = useMutation({
     mutationFn: () => api.ackAlert(alert.id),
@@ -212,11 +231,22 @@ function Row({ alert }: { alert: Alert }) {
         ? 'bg-warn'
         : 'bg-accent'
 
+  // Click on the row content opens the detail modal. Per the
+  // render-on-state-change rule the parent flips state synchronously
+  // here — the AlertDetail component shows skeleton placeholders
+  // while the GET /api/alerts/{id} fetch resolves. Action buttons
+  // (ack / close) are siblings, so clicks on them don't trigger the
+  // modal because the listener is on the content button only.
   return (
     <li className="border-b border-line">
       <div className="grid grid-cols-[3px_1fr_auto] gap-4 px-6 py-4">
         <div className={`${sevBar} -mx-6`} />
-        <div className="min-w-0">
+        <button
+          type="button"
+          onClick={() => onSelect(alert)}
+          aria-label={`Open detail for alert: ${alert.title}`}
+          className="min-w-0 text-left hover:bg-ink/40 -mx-2 px-2 -my-1 py-1 rounded-sm cursor-pointer"
+        >
           <div className="flex items-baseline gap-3 mb-1">
             <span className={`font-mono text-[10px] uppercase tracking-[0.18em] font-semibold ${sevColor}`}>
               {alert.severity}
@@ -252,7 +282,7 @@ function Row({ alert }: { alert: Alert }) {
               </span>
             )}
           </div>
-        </div>
+        </button>
         <div className="flex flex-col gap-1.5 shrink-0">
           {alert.state !== 'acknowledged' && alert.state !== 'closed' && (
             <Button onClick={() => ack.mutate()} disabled={ack.isPending}>
