@@ -128,6 +128,35 @@ export type AlertSummary = {
   closed_last_24h: number
 }
 
+// AlertEvent is one row from the append-only alert_events ledger,
+// as returned by /api/alerts/{id}.timeline. The detail modal
+// renders these chronologically. Heartbeats are samples; opened /
+// acknowledged / closed are state transitions worth highlighting.
+export type AlertEvent = {
+  ts: string
+  state: 'opened' | 'heartbeat' | 'closed' | 'acknowledged'
+  severity: 'critical' | 'warning' | 'info'
+  title: string
+  body: string
+  actor: string
+  labels: Record<string, string>
+}
+
+// AlertDetail is the full payload behind /api/alerts/{id}: the
+// summary the row already shows, the event timeline, and a short
+// list of linked flows derived from the alert's labels. flows_source
+// explains how those flows were filtered:
+//   "labels"   — src/dst labels narrowed the query meaningfully
+//   "exporter" — only the exporter IP was usable
+//   "none"     — no labels carried scope; flows array is empty
+//   "error: …" — backend hit an error fetching flows; timeline still valid
+export type AlertDetail = {
+  alert: Alert
+  timeline: AlertEvent[]
+  flows: RecentFlow[]
+  flows_source: string
+}
+
 export type StreamRow = {
   source: string
   flows: number
@@ -621,6 +650,8 @@ export const api = {
       state ? `/api/alerts?state=${state}` : `/api/alerts`,
     ),
   alertSummary: () => getJSON<AlertSummary>(`/api/alerts/summary`),
+  alertDetail: (id: string) =>
+    getJSON<AlertDetail>(`/api/alerts/${encodeURIComponent(id)}`),
   ackAlert: (id: string) =>
     fetch(`/api/alerts/${encodeURIComponent(id)}/ack`, { method: 'POST' }).then((r) => {
       if (!r.ok) throw new Error(`ack ${id} → ${r.status}`)
