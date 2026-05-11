@@ -1,0 +1,111 @@
+# Web E2E (Playwright) — stub gate.
+#
+# CLAUDE.md lists Playwright as a CI gate, and TASKS.md #1 reiterates
+# it. But TASKS.md #18 ("Web e2e via Playwright wired to ephemeral
+# compose") is still open — there's no playwright.config.* in web/
+# today, and no `e2e` script in web/package.json.
+#
+# This workflow ships the gate now so that the moment item #18 lands —
+# adding `web/playwright.config.ts` + an `e2e` npm script — the gate
+# starts enforcing without anyone having to remember to wire the CI.
+#
+# Until then: we bring the compose stack up (smoke test that
+# docker-compose.yml still parses + builds), then either run the
+# Playwright suite if it exists or no-op with an explanatory log line.
+
+name: ci-e2e-playwright
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    name: playwright (stub until TASKS.md #18)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Node
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+
+      - name: Detect Playwright config
+        id: detect
+        # We support .ts / .js / .cjs / .mjs config names — same set
+        # Playwright's CLI auto-discovers.
+        run: |
+          shopt -s nullglob
+          configs=( web/playwright.config.ts web/playwright.config.js web/playwright.config.cjs web/playwright.config.mjs )
+          if (( ${#configs[@]} > 0 )); then
+            echo "have_config=true" >> "$GITHUB_OUTPUT"
+            echo "Found Playwright config: ${configs[*]}"
+          else
+            echo "have_config=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Playwright stub::No web/playwright.config.* found. See TASKS.md #18."
+          fi
+
+      # The remaining steps gate on whether Playwright is actually
+      # wired up. Until TASKS.md #18 closes, the job exits 0 here.
+
+      - name: Bring up compose stack
+        if: steps.detect.outputs.have_config == 'true'
+        run: |
+          docker compose up -d --build
+          # Wait for the api service to start serving. 60s is generous
+          # given the init container has to migrate ClickHouse first.
+          for i in $(seq 1 60); do
+            if curl -fsS http://localhost:8080/api/summary > /dev/null 2>&1; then
+              echo "api healthy after ${i}s"
+              break
+            fi
+            sleep 1
+          done
+
+      - name: Install web deps
+        if: steps.detect.outputs.have_config == 'true'
+        working-directory: web
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+
+      - name: Install Playwright browsers
+        if: steps.detect.outputs.have_config == 'true'
+        working-directory: web
+        # `--with-deps` installs the OS packages Chromium / Firefox /
+        # WebKit need on a fresh Ubuntu runner.
+        run: npx playwright install --with-deps
+
+      - name: Run Playwright
+        if: steps.detect.outputs.have_config == 'true'
+        working-directory: web
+        run: npm run e2e
+
+      - name: Tear down compose stack
+        if: always() && steps.detect.outputs.have_config == 'true'
+        run: docker compose down -v
+
+      - name: Stub no-op (TASKS.md #18 not yet closed)
+        if: steps.detect.outputs.have_config != 'true'
+        # TODO(TASKS.md #18): remove this branch once
+        # web/playwright.config.* and an `e2e` script exist.
+        # When that lands, this whole workflow becomes a hard gate
+        # automatically — no edits needed here.
+        run: |
+          echo "Playwright not wired yet — skipping. Tracking issue: TASKS.md #18."
+          exit 0

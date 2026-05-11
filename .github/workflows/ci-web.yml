@@ -1,0 +1,90 @@
+# Web CI — install, typecheck, lint, vitest, build.
+#
+# Scripts in web/package.json today (verified at PR time):
+#   dev, build, preview, lint
+# `lint` is `tsc --noEmit` (acts as typecheck today).
+# `test` (vitest) and `typecheck` are not wired yet — they're called out
+# in CLAUDE.md as expected scripts. We run them conditionally so the
+# workflow passes today and becomes a hard gate the moment they land in
+# package.json.
+#
+# Pin third-party actions to commit SHAs (tag comment next to each pin).
+
+name: ci-web
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-web-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: web
+
+jobs:
+  build-and-test:
+    name: install + typecheck + lint + test + build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Node
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: '20'
+          # Caches ~/.npm keyed on web/package-lock.json. If the lockfile
+          # isn't checked in yet, setup-node falls back to no-cache and
+          # warns (non-fatal).
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        # Prefer `npm ci` for reproducibility when a lockfile exists.
+        # Fall back to `npm install` if it doesn't (early-stage repos).
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            echo "::warning::web/package-lock.json missing; using 'npm install' (non-reproducible)."
+            npm install
+          fi
+
+      - name: Typecheck
+        # `lint` is `tsc --noEmit` today, so it doubles as the typecheck.
+        # Once a real `typecheck` script lands we'll prefer it; until
+        # then this is the canonical type check.
+        #
+        # `node -p` parses package.json so we don't depend on the exact
+        # whitespace of `npm run`'s table output.
+        run: |
+          if node -e "process.exit(require('./package.json').scripts?.typecheck ? 0 : 1)"; then
+            npm run typecheck
+          else
+            echo "No 'typecheck' script yet — falling back to 'lint' (tsc --noEmit)."
+            npm run lint
+          fi
+
+      - name: Lint
+        # Distinct from the typecheck step above so that once `lint`
+        # becomes an ESLint invocation and `typecheck` becomes `tsc`,
+        # both gate independently.
+        run: npm run lint
+
+      - name: Unit tests (vitest)
+        # `test` isn't in package.json yet. When it is, this becomes a
+        # hard gate. `--if-present` keeps npm quiet if the script is
+        # missing.
+        run: npm test --if-present
+
+      - name: Build
+        # `build` is `tsc --noEmit && vite build` per package.json.
+        # If this fails the SPA can't ship — non-negotiable.
+        run: npm run build
