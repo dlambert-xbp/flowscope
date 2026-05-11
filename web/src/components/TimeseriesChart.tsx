@@ -65,8 +65,23 @@ export function TimeseriesChart({
   const plotRef = useRef<uPlot | null>(null)
   const themeRef = useRef<string>('')
   const dataExtentRef = useRef<[number, number] | null>(null)
+  // zoomedRef mirrors the zoomed React state so the setData callback
+  // (which runs inside the useEffect closure on every refetch) can
+  // decide whether to preserve the current scale or reset it without
+  // adding `zoomed` to the effect's deps (which would re-run on every
+  // user drag and rebuild the plot).
+  const zoomedRef = useRef(false)
   const { resolved } = useTheme()
   const [zoomed, setZoomed] = useState(false)
+  // Structural signature: any change here forces a destroy + rebuild
+  // of the uPlot instance so series labels, colours, axis formatters
+  // and y-anchors all refresh. Pure data changes (new xs / new
+  // series[i].values) take the cheap setData path. This is what makes
+  // switching from the Memory rollup to the Temperature rollup
+  // actually re-label the y-axis instead of carrying the old "%"
+  // formatter into a °C plot.
+  const structuralKey = `${height}|${yMin ?? ''}|${yMax ?? ''}|${series.length}|${series.map((s) => `${s.label}/${s.color}`).join(',')}`
+  const structuralRef = useRef(structuralKey)
 
   useEffect(() => {
     const wrap = wrapRef.current
@@ -80,6 +95,7 @@ export function TimeseriesChart({
         plotRef.current = null
       }
       dataExtentRef.current = null
+      zoomedRef.current = false
       setZoomed(false)
       return
     }
@@ -89,11 +105,20 @@ export function TimeseriesChart({
 
     const width = wrap.clientWidth || 600
 
-    if (plotRef.current && themeRef.current !== resolved) {
+    // Rebuild on theme change OR on structural change (different
+    // series shape / labels / colours / formatters / y-anchors).
+    const structuralChanged = structuralRef.current !== structuralKey
+    if (
+      plotRef.current &&
+      (themeRef.current !== resolved || structuralChanged)
+    ) {
       plotRef.current.destroy()
       plotRef.current = null
+      zoomedRef.current = false
+      setZoomed(false)
     }
     themeRef.current = resolved
+    structuralRef.current = structuralKey
 
     if (!plotRef.current) {
       plotRef.current = new uPlot(
@@ -109,6 +134,7 @@ export function TimeseriesChart({
             const extent = dataExtentRef.current
             if (!extent) return
             const isFull = Math.abs(min - extent[0]) < 0.5 && Math.abs(max - extent[1]) < 0.5
+            zoomedRef.current = !isFull
             setZoomed(!isFull)
           },
         }),
@@ -117,9 +143,16 @@ export function TimeseriesChart({
       )
     } else {
       plotRef.current.setSize({ width, height })
-      plotRef.current.setData(data)
+      // Preserve the user's zoom across refetch refreshes: uPlot's
+      // setData defaults resetScales=true, which is the silent
+      // killer that made drag-zoom "reset back to normal a second
+      // later" — every 5-15s refetch wiped the brushed scale. When
+      // the user has explicitly zoomed we pass false so the brushed
+      // window survives. The "↺ reset zoom" affordance is the
+      // explicit way out.
+      plotRef.current.setData(data, !zoomedRef.current)
     }
-  }, [xs, series, height, yMin, yMax, yFormat, resolved])
+  }, [xs, series, height, yMin, yMax, yFormat, resolved, structuralKey])
 
   useEffect(() => {
     const wrap = wrapRef.current
@@ -142,6 +175,8 @@ export function TimeseriesChart({
     const extent = dataExtentRef.current
     if (!u || !extent) return
     u.setScale('x', { min: extent[0], max: extent[1] })
+    zoomedRef.current = false
+    setZoomed(false)
   }
 
   return (

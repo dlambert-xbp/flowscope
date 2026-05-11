@@ -626,12 +626,6 @@ function SummaryTab({
       <Section title="Health" sub="cpu · memory · storage · last 24h" right="SOURCE · SNMP">
         <ResourcesPanel exporter={exporter} />
       </Section>
-      <Section
-        title="Recent flows reported by this exporter"
-        sub="last 60s · forwarded traffic, not addressed to this device"
-      >
-        <RecentFlowsMini exporter={exporter} limit={6} />
-      </Section>
       <Section title="Top interfaces" sub={`counter samples · ${winLabel}`} right="SOURCE · COUNTERS">
         <InterfacesMini exporter={exporter} range={range} rangeKey={rangeKey} />
       </Section>
@@ -1236,34 +1230,6 @@ function Section({
       </div>
       <div className="pt-2">{children}</div>
     </section>
-  )
-}
-
-function RecentFlowsMini({ exporter, limit }: { exporter: string; limit: number }) {
-  const q = useQuery({
-    queryKey: ['device-recent', exporter, limit],
-    queryFn: () => api.recentFlows(limit, exporter),
-    refetchInterval: 2000,
-  })
-  const flows = q.data?.flows ?? []
-  if (q.isLoading) return <p className="text-dim font-mono text-[12px]">loading…</p>
-  if (flows.length === 0) {
-    return <p className="text-dim font-mono text-[12px]">no flows yet</p>
-  }
-  return (
-    <ul className="font-mono text-[12px] space-y-1">
-      {flows.map((f, i) => (
-        <li key={i} className="flex gap-3 text-dim">
-          <span className="text-faint">{fmt.time(f.observed).slice(11, 19)}</span>
-          <span className="text-accent">{fmt.proto(f.proto)}</span>
-          <span className="truncate">
-            {f.src_addr}:{f.src_port} <span className="text-faint">→</span>{' '}
-            {f.dst_addr}:{f.dst_port}
-          </span>
-          <span className="ml-auto text-text tabular shrink-0">{fmt.bytes(f.bytes)}</span>
-        </li>
-      ))}
-    </ul>
   )
 }
 
