@@ -110,6 +110,15 @@ func (h *ClickHouseHandle) Truncate(ctx context.Context, t testing.TB) {
 		"iface_counter_samples",
 		"events",
 		"alert_events",
+		// SNMP inventory snapshots — the interface_* rules read from
+		// device_snmp_interfaces, so the fixture tables for those rules
+		// need a clean slate too. Added with the P2 rule integration
+		// tests; safe to truncate when missing because IF EXISTS guards.
+		"device_snmp_interfaces",
+		// Operator-tunable rule overrides. Some integration tests insert
+		// rows here to exercise the loader→rule plumbing end-to-end and
+		// rely on a clean slate between cases.
+		"alert_rule_settings",
 	}
 	for _, tbl := range tables {
 		// TRUNCATE on MergeTree is supported and synchronous.
