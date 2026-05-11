@@ -7,6 +7,7 @@ import type {
   FlowsListSort,
   RecentFlow,
   TopASN,
+  TopInterface,
   TopTalker,
   TopService,
   TopProtocol,
@@ -14,6 +15,7 @@ import type {
   TopNSort,
   TimeRangeArg,
 } from '../api'
+import { labelExporter, labelInterface } from '../api'
 import { useFilters, toQuery, keyLabelFor, FILTER_KEYS, type Filter, type FilterKey } from '../filters'
 import { rangeLabel, toApi, type TimeRange } from '../timeRange'
 import { ServiceLabel, useServiceName } from './ServiceLabel'
@@ -33,7 +35,7 @@ import { Hostname, useReverseDNS } from './Hostname'
 // full 5-tuple) to add or replace a filter chip; chips re-narrow
 // every panel's query and persist in the URL.
 
-type TabId = 'talkers' | 'services' | 'protocols' | 'conversations' | 'asn'
+type TabId = 'talkers' | 'services' | 'protocols' | 'conversations' | 'asn' | 'interfaces'
 
 const TAB_LABELS: Record<TabId, string> = {
   talkers: 'Top talkers',
@@ -41,6 +43,7 @@ const TAB_LABELS: Record<TabId, string> = {
   protocols: 'Top protocols',
   conversations: 'Top conversations',
   asn: 'Top ASN',
+  interfaces: 'Top interfaces',
 }
 
 const TOP_N_OPTIONS = [10, 25, 50] as const
@@ -537,6 +540,17 @@ function ActivePanel({
           topN={topN}
         />
       )}
+      {tab === 'interfaces' && (
+        <InterfacesList
+          qs={qs}
+          onAdd={onAdd}
+          onDrill={onDrill}
+          range={range}
+          rangeKey={rangeKey}
+          sortBy={sortBy}
+          topN={topN}
+        />
+      )}
     </Panel>
   )
 }
@@ -554,6 +568,8 @@ function subtitleFor(tab: TabId, sortBy: TopNSort): string {
       return `5-tuple · ${by}`
     case 'asn':
       return `src AS → dst AS · ${by}`
+    case 'interfaces':
+      return `per exporter ifindex · in + out · ${by}`
   }
 }
 
@@ -829,6 +845,111 @@ function ConversationsList({ qs, onAdd, onDrill, range, rangeKey, sortBy, topN }
         sortBy={sortBy}
       />
     </ListShell>
+  )
+}
+
+function InterfacesList({ qs, onAdd, onDrill, range, rangeKey, sortBy, topN }: ListBase) {
+  const q = useQuery({
+    queryKey: ['top-interfaces', qs.toString(), rangeKey, sortBy, topN],
+    queryFn: () => api.topInterfaces(qs, range, topN, sortBy),
+  })
+  return (
+    <ListShell loading={q.isLoading} empty={!q.data?.rows.length} error={q.error as Error | undefined}>
+      <Rows
+        rows={q.data?.rows ?? []}
+        keyOf={(r: TopInterface) => `${r.exporter}_${r.ifindex}`}
+        renderLeft={(r) => <InterfaceLeft r={r} onAdd={onAdd} />}
+        valueOf={(r) => valueOfRow(sortBy, r)}
+        renderRight={(r) => <InterfaceRight r={r} sortBy={sortBy} />}
+        drillFor={(r) => {
+          // Default drill = traffic exiting this interface on this
+          // exporter (the most operator-intuitive read of "this
+          // interface's traffic"). Operator can pivot to ingress with
+          // the dedicated "in" trigger on the left side.
+          const exp = labelExporter(r)
+          const ifLbl = labelInterface(r)
+          return {
+            title: `${exp.primary} · ${ifLbl.primary}`,
+            subtitle: 'egress on this interface',
+            filters: [
+              { key: 'exporter', value: r.exporter, label: r.sys_name || undefined },
+              {
+                key: 'output_ifindex',
+                value: String(r.ifindex),
+                label: r.if_descr || `ifindex ${r.ifindex}`,
+              },
+            ],
+          }
+        }}
+        onDrill={onDrill}
+        sortBy={sortBy}
+      />
+    </ListShell>
+  )
+}
+
+// InterfaceLeft renders the exporter + interface identity and the two
+// FilterTriggers that pivot the rest of the page to ingress-only or
+// egress-only traffic on this ifindex. Stacked label on top mirrors
+// the Devices tab's TwoLine pattern.
+function InterfaceLeft({ r, onAdd }: { r: TopInterface; onAdd: (f: Filter) => void }) {
+  const exp = labelExporter(r)
+  const ifLbl = labelInterface(r)
+  const ifValue = String(r.ifindex)
+  const ifLabel = r.if_descr || `ifindex ${r.ifindex}`
+  return (
+    <span className="font-mono text-[12px] inline-flex items-baseline gap-2 min-w-0">
+      <FilterTrigger k="exporter" value={r.exporter} onAdd={onAdd} label={r.sys_name || undefined}>
+        <span className="text-text truncate">{exp.primary}</span>
+      </FilterTrigger>
+      <span className="text-faint shrink-0">·</span>
+      <span className="text-text truncate">{ifLbl.primary}</span>
+      <span className="text-faint shrink-0">
+        ifindex {r.ifindex}
+      </span>
+      <span className="ml-1 shrink-0 inline-flex items-baseline gap-1">
+        <FilterTrigger
+          k="input_ifindex"
+          value={ifValue}
+          onAdd={onAdd}
+          label={ifLabel}
+          keyLabel="in iface"
+        >
+          <span className="text-faint hover:text-accent">[in]</span>
+        </FilterTrigger>
+        <FilterTrigger
+          k="output_ifindex"
+          value={ifValue}
+          onAdd={onAdd}
+          label={ifLabel}
+          keyLabel="out iface"
+        >
+          <span className="text-faint hover:text-accent">[out]</span>
+        </FilterTrigger>
+      </span>
+    </span>
+  )
+}
+
+// InterfaceRight shows the directional split for the active sort
+// dimension. "← 1.2 MiB · → 800 KiB" reads naturally: arrow into
+// the interface is ingress, arrow out is egress. Total (used for the
+// row's progress bar) lives in the Rows component via valueOf.
+function InterfaceRight({ r, sortBy }: { r: TopInterface; sortBy: TopNSort }) {
+  const inV =
+    sortBy === 'packets' ? r.in_packets : sortBy === 'flows' ? r.in_flows : r.in_bytes
+  const outV =
+    sortBy === 'packets' ? r.out_packets : sortBy === 'flows' ? r.out_flows : r.out_bytes
+  return (
+    <span className="font-mono text-[12px] tabular text-text inline-flex items-baseline gap-2">
+      <span>
+        <span className="text-faint">←</span> {formatValue(sortBy, inV)}
+      </span>
+      <span className="text-faint">·</span>
+      <span>
+        <span className="text-faint">→</span> {formatValue(sortBy, outV)}
+      </span>
+    </span>
   )
 }
 

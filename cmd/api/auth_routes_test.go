@@ -62,6 +62,7 @@ func TestReadEndpointsRequireToken(t *testing.T) {
 		r.Get("/api/top/protocols", mark("top-protocols"))
 		r.Get("/api/top/conversations", mark("top-conversations"))
 		r.Get("/api/top/asn", mark("top-asn"))
+		r.Get("/api/top/interfaces", mark("top-interfaces"))
 		r.Get("/api/alerts", mark("alerts"))
 		r.Get("/api/alerts/summary", mark("alerts-summary"))
 		r.Get("/api/alerts/{id}", mark("alert-detail"))
@@ -101,6 +102,7 @@ func TestReadEndpointsRequireToken(t *testing.T) {
 		{"GET", "/api/top/protocols"},
 		{"GET", "/api/top/conversations"},
 		{"GET", "/api/top/asn"},
+		{"GET", "/api/top/interfaces"},
 		{"GET", "/api/alerts"},
 		{"GET", "/api/alerts/summary"},
 		{"GET", "/api/alerts/abc-123"},
