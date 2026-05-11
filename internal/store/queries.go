@@ -764,16 +764,21 @@ type DeviceResource struct {
 	LatestPercent  float32               `json:"latest_percent"`
 	LatestBytes    uint64                `json:"latest_bytes"`
 	MaxBytes       uint64                `json:"max_bytes"`
+	LatestNumeric  float64               `json:"latest_numeric"`
+	Unit           string                `json:"unit"`
 	Points         []DeviceResourcePoint `json:"points"`
 }
 
-// DeviceResourcePoint is one (ts, percent) data point on the
-// per-component sparkline. Bytes-typed metrics still emit percent
-// here so the chart renders consistently; the headline tile carries
-// the absolute byte count.
+// DeviceResourcePoint is one (ts, percent, numeric) data point on
+// the per-component sparkline. Utilization kinds (cpu / memory /
+// storage) drive the chart from ValuePercent; sensor kinds
+// (temperature / fan / voltage / current / power) drive it from
+// ValueNumeric and the corresponding `unit`. The UI picks based on
+// the row's Unit field.
 type DeviceResourcePoint struct {
 	Ts           time.Time `json:"ts"`
 	ValuePercent float32   `json:"value_percent"`
+	ValueNumeric float64   `json:"value_numeric"`
 }
 
 // QueryDeviceResources returns the per-component health timeseries
@@ -801,8 +806,11 @@ SELECT
     argMax(value_percent, polled_at) AS latest_percent,
     argMax(value_bytes,   polled_at) AS latest_bytes,
     argMax(max_bytes,     polled_at) AS max_bytes,
+    argMax(value_numeric, polled_at) AS latest_numeric,
+    argMax(unit,          polled_at) AS unit,
     groupArray(polled_at)             AS ts_points,
-    groupArray(value_percent)         AS pct_points
+    groupArray(value_percent)         AS pct_points,
+    groupArray(value_numeric)         AS num_points
 FROM (
     SELECT *
     FROM device_resource_samples
@@ -822,11 +830,13 @@ ORDER BY kind, component`
 			r         DeviceResource
 			tsPoints  []time.Time
 			pctPoints []float32
+			numPoints []float64
 		)
 		if err := rows.Scan(
 			&r.Kind, &r.Component, &r.Source, &r.LatestTs,
 			&r.LatestPercent, &r.LatestBytes, &r.MaxBytes,
-			&tsPoints, &pctPoints,
+			&r.LatestNumeric, &r.Unit,
+			&tsPoints, &pctPoints, &numPoints,
 		); err != nil {
 			return nil, fmt.Errorf("store: scan device resource: %w", err)
 		}
@@ -834,9 +844,16 @@ ORDER BY kind, component`
 		if len(pctPoints) < n {
 			n = len(pctPoints)
 		}
+		if len(numPoints) < n {
+			n = len(numPoints)
+		}
 		r.Points = make([]DeviceResourcePoint, 0, n)
 		for i := 0; i < n; i++ {
-			r.Points = append(r.Points, DeviceResourcePoint{Ts: tsPoints[i], ValuePercent: pctPoints[i]})
+			r.Points = append(r.Points, DeviceResourcePoint{
+				Ts:           tsPoints[i],
+				ValuePercent: pctPoints[i],
+				ValueNumeric: numPoints[i],
+			})
 		}
 		out = append(out, r)
 	}
