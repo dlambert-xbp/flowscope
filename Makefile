@@ -10,8 +10,12 @@ secrets/snmp_master:
 		echo "secrets/snmp_master.example not found — are you at the repo root?"; \
 		exit 1; \
 	fi
-	@umask 077 && openssl rand -base64 32 > $@
-	@chmod 600 $@
-	@echo "Created $@ with a random 32-byte master key (mode 600)."
+	@openssl rand -base64 32 > $@
+	@chmod 644 $@
+	@echo "Created $@ with a random 32-byte master key (mode 644)."
+	@echo "Mode 644 is required so api/alert/snmp containers (non-root uid)"
+	@echo "can read it via the docker-compose bind-mount. The file is"
+	@echo "gitignored. Production resolves the master from Azure Key Vault."
+	@echo ""
 	@echo "If you have existing SNMP v3 credentials encrypted under a previous"
 	@echo "master key, replace the contents of $@ with that key before starting."
