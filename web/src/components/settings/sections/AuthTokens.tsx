@@ -305,15 +305,37 @@ function OIDC() {
 
   if (!c) return null
 
+  // Phase 2 ships in this PR — show the operator the active sign-in
+  // entry point when the flag is on, and the rollback hint when it's
+  // off. The Banner tone tracks state so a glance is enough.
+  const enabled = !!c.enabled
   return (
-    <Section eyebrow="OIDC SSO" hint={c.login_flow_status}>
-      <Banner tone="warn">
-        <strong className="text-warn">Phase 2.</strong> The login flow is not yet
-        active — saving here stages the configuration for the rollout. Reads and
-        writes still use the shared / per-token mechanism above.
-      </Banner>
+    <Section eyebrow="OIDC SSO" hint={enabled ? 'login flow active' : 'login flow staged · enable to activate'}>
+      {enabled ? (
+        <Banner tone="accent">
+          <strong className="text-accent">Active.</strong> Users can sign in via
+          your IdP at <a href="/auth/login" className="underline">/auth/login</a>.
+          The shared / per-token paths still work — OIDC is additive.
+        </Banner>
+      ) : (
+        <Banner tone="warn">
+          <strong className="text-warn">Staged.</strong> Fill in the fields and
+          flip <em>enabled</em> on to activate the login flow. Shared and per-
+          token auth keep working either way.
+        </Banner>
+      )}
+      <div className="flex items-center gap-3 mb-3">
+        {enabled && (
+          <a
+            href="/auth/login"
+            className="px-3 py-1.5 border border-accent text-accent text-[12px] hover:bg-accent-wash font-mono"
+          >
+            sign in with SSO →
+          </a>
+        )}
+      </div>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3 max-w-[820px]">
-        <Field label="enabled" hint="turn on once Phase 2 ships">
+        <Field label="enabled" hint="flipping this on activates /auth/login for users">
           <select
             value={c.enabled ? 'on' : 'off'}
             onChange={(e) => setC({ ...c, enabled: e.target.value === 'on' })}

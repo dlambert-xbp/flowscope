@@ -329,6 +329,23 @@ export type TopConversation = {
   last_seen: string
 }
 
+export type TopInterface = {
+  exporter: string
+  sys_name: string
+  ifindex: number
+  if_descr: string
+  if_alias: string
+  in_bytes: number
+  out_bytes: number
+  in_packets: number
+  out_packets: number
+  in_flows: number
+  out_flows: number
+  bytes: number
+  packets: number
+  flows: number
+}
+
 export type TopResponse<T> = {
   count: number
   rows: T[]
@@ -509,6 +526,46 @@ export type AuditEntry = {
   source_ip?: string
 }
 
+// AuthMe is the payload from GET /auth/me — the signed-in user's
+// identity as carried in the OIDC session cookie. Used by the brand
+// bar to show "alice@example.com" and by the Settings page to render
+// the active session card.
+export type AuthMe = {
+  subject: string
+  email: string
+  scope: 'read' | 'write' | 'admin'
+  id: string
+  expires_at: string
+}
+
+// maybeRedirectToLogin checks the response for the Phase 2 OIDC
+// auto-redirect signal: a 401 with WWW-Authenticate: oidc. Backend
+// sets this when a session cookie was present but expired or
+// otherwise rejected by the session source. We use it as the cue to
+// send the user through /auth/login rather than leaving them on a
+// dashboard full of failed fetches.
+//
+// Returns true if a redirect was triggered (caller should treat this
+// as a terminal state — no further parsing).
+function maybeRedirectToLogin(r: Response): boolean {
+  if (r.status !== 401) return false
+  const wa = r.headers.get('WWW-Authenticate') ?? ''
+  if (!wa.toLowerCase().includes('oidc')) return false
+  // Don't bounce if we're already on the /auth/ path or if the
+  // operator explicitly opted out (used during e2e / scripted tests).
+  if (window.location.pathname.startsWith('/auth/')) return false
+  // Stash the current URL so /auth/callback can return to it. The
+  // backend redirect lands at /, but a richer UI could read this on
+  // boot and restore the route.
+  try {
+    sessionStorage.setItem('flowscope:post-login-return', window.location.pathname + window.location.search)
+  } catch {
+    /* noop */
+  }
+  window.location.assign('/auth/login')
+  return true
+}
+
 async function getJSON<T>(url: string): Promise<T> {
   // Phase 1 auth: when the operator has saved an X-Auth-Token in
   // localStorage (Settings page), attach it to every read so the
@@ -516,11 +573,22 @@ async function getJSON<T>(url: string): Promise<T> {
   // no token is saved we still send the request — the backend allows
   // unauth-bypass when no auth is configured server-side, and returns
   // 401 when it is. The caller's existing error path surfaces that.
+  //
+  // Phase 2: if the backend returns 401 with WWW-Authenticate: oidc,
+  // the browser auto-redirects to /auth/login. credentials: 'same-
+  // origin' carries the session cookie when one is present.
   const headers: Record<string, string> = {}
   const tok = settingsAuthToken()
   if (tok) headers['X-Auth-Token'] = tok
-  const r = await fetch(url, { cache: 'no-store', headers })
-  if (!r.ok) throw new Error(`${url} → ${r.status} ${r.statusText}`)
+  const r = await fetch(url, { cache: 'no-store', headers, credentials: 'same-origin' })
+  if (!r.ok) {
+    if (maybeRedirectToLogin(r)) {
+      // Reject with an Error so React Query treats this as a failed
+      // request; the location.assign above will navigate away.
+      throw new Error(`${url} → 401 (redirecting to /auth/login)`)
+    }
+    throw new Error(`${url} → ${r.status} ${r.statusText}`)
+  }
   return (await r.json()) as T
 }
 
@@ -808,6 +876,18 @@ export const api = {
         filters,
       ),
     ),
+  topInterfaces: (
+    filters: URLSearchParams,
+    range?: TimeRangeArg,
+    limit = 20,
+    sort: TopNSort = 'bytes',
+  ) =>
+    getJSON<TopResponse<TopInterface>>(
+      withFilters(
+        `/api/top/interfaces?${timeQuery(range)}&limit=${limit}&sort=${sort}`,
+        filters,
+      ),
+    ),
 
   /* --------------------- Services --------------------- */
   serviceLookup: (proto: string, port: number) =>
@@ -895,6 +975,25 @@ export const api = {
 
   /* --------------------- Advanced --------------------- */
   listAdvanced: () => getJSON<{ fields: AdvancedField[] }>(`/api/settings/advanced`),
+
+  /* --------------------- Auth (Phase 2 OIDC) --------------------- */
+  authMe: async (): Promise<AuthMe | null> => {
+    // /auth/me returns 401 when no session — we treat that as "signed
+    // out" without throwing. Anything else (200 with a body, or a
+    // genuine error like 500) propagates the usual way.
+    const r = await fetch('/auth/me', { cache: 'no-store', credentials: 'same-origin' })
+    if (r.status === 401) return null
+    if (!r.ok) throw new Error(`/auth/me → ${r.status} ${r.statusText}`)
+    return (await r.json()) as AuthMe
+  },
+  authLogout: async (): Promise<{ ok: boolean }> => {
+    const r = await fetch('/auth/logout', {
+      method: 'POST',
+      credentials: 'same-origin',
+    })
+    if (!r.ok) throw new Error(`/auth/logout → ${r.status}`)
+    return (await r.json()) as { ok: boolean }
+  },
 }
 
 // settingsAuthToken is read once per page-load. The Settings UI keeps
@@ -932,8 +1031,12 @@ async function settingsWrite<T = unknown>(
     method,
     headers,
     body: body !== undefined ? JSON.stringify(body) : undefined,
+    credentials: 'same-origin',
   })
   if (!r.ok) {
+    if (maybeRedirectToLogin(r)) {
+      throw new Error(`${method} ${url} → 401 (redirecting to /auth/login)`)
+    }
     const text = await r.text()
     throw new Error(`${method} ${url} → ${r.status}: ${text}`)
   }

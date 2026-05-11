@@ -30,6 +30,7 @@ import (
 	"github.com/dlambert-xbp/flowscope/internal/rdns"
 	"github.com/dlambert-xbp/flowscope/internal/secrets"
 	"github.com/dlambert-xbp/flowscope/internal/services"
+	"github.com/dlambert-xbp/flowscope/internal/sessionsign"
 	"github.com/dlambert-xbp/flowscope/internal/settings"
 	"github.com/dlambert-xbp/flowscope/internal/snmpx"
 	"github.com/dlambert-xbp/flowscope/internal/store"
@@ -97,6 +98,31 @@ func run() error {
 	auditReader := audit.NewClickHouseReader(conn)
 	resolver := services.NewResolver()
 
+	// Phase 2 OIDC login: optional. Wired when FLOWSCOPE_SESSION_KEY_REF
+	// (or legacy FLOWSCOPE_SESSION_KEY) is set. Independent root from
+	// the SNMP master key — rotating one does not disturb the other.
+	var (
+		signer  *sessionsign.Signer
+		sessAdp *sessionAdapter
+	)
+	sessKey, err := secrets.ResolveSessionKey(ctx)
+	if err != nil {
+		return fmt.Errorf("session key: %w", err)
+	}
+	if sessKey != "" {
+		s, err := sessionsign.New(sessKey)
+		if err != nil {
+			return fmt.Errorf("session signer: %w", err)
+		}
+		signer = s
+		sessAdp = &sessionAdapter{signer: signer, cookieName: sessionCookieName}
+		slog.Info("oidc login enabled (Phase 2)",
+			"session_key_fp", secrets.Fingerprint(sessKey),
+		)
+	} else {
+		slog.Info("oidc login disabled (no FLOWSCOPE_SESSION_KEY_REF / FLOWSCOPE_SESSION_KEY)")
+	}
+
 	// Seed the resolver with whatever's in custom_services right now,
 	// then refresh on a 30-second tick to pick up edits from peer api
 	// replicas. Per-replica writes already prime locally via
@@ -106,6 +132,11 @@ func run() error {
 	authCfg := authz.Config{
 		SharedToken: os.Getenv("FLOWSCOPE_AUTH_TOKEN"),
 		Tokens:      settingsStore.APITokens,
+	}
+	// Wire session source only when the signer is built. nil leaves the
+	// existing shared/per-token paths unchanged.
+	if sessAdp != nil {
+		authCfg.Sessions = sessAdp
 	}
 
 	r := chi.NewRouter()
@@ -140,6 +171,11 @@ func run() error {
 			Timeout: 3 * time.Second,
 		},
 		rdns: rdns.New(rdns.Options{}),
+		auth: authDeps{
+			signer:  signer,
+			store:   settingsStore.OIDC,
+			crypter: crypter,
+		},
 	}
 	// /healthz is the k8s liveness probe — never gated. Same for the
 	// static dashboard mount and the /metrics scrape endpoint below.
@@ -150,6 +186,15 @@ func run() error {
 	// header (the token is loaded from localStorage on first render).
 	// It returns brand / theme defaults only, no flow data.
 	r.Get("/api/config/effective", h.effectiveConfig)
+
+	// OIDC Phase 2 endpoints — all unauthenticated by design (users
+	// hitting /auth/login don't yet have a session). The cookie
+	// minted by /auth/callback is what later requests authenticate
+	// with via the authz.SessionSource wired above.
+	r.Get("/auth/login", h.authLogin)
+	r.Get("/auth/callback", h.authCallback)
+	r.Post("/auth/logout", h.authLogout)
+	r.Get("/auth/me", h.authMe)
 
 	// Phase 1 read gate. Every GET that exposes flow / topology /
 	// alert / SNMP-derived data — plus the /api/health/* operator
@@ -182,6 +227,7 @@ func run() error {
 		r.Get("/api/top/protocols", h.topProtocols)
 		r.Get("/api/top/conversations", h.topConversations)
 		r.Get("/api/top/asn", h.topASN)
+		r.Get("/api/top/interfaces", h.topInterfaces)
 		r.Get("/api/alerts", h.alerts)
 		r.Get("/api/alerts/summary", h.alertSummary)
 		r.Get("/api/alerts/{id}", h.alertDetail)

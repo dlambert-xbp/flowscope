@@ -36,6 +36,11 @@ type handlers struct {
 	ingestHealthURL  string
 	ingestHealthHTTP *http.Client
 	rdns             *rdns.Cache
+	// auth carries the OIDC login-flow collaborators (Phase 2). The
+	// signer is nil when FLOWSCOPE_SESSION_KEY_REF is unset — in that
+	// case the /auth/* endpoints return 503 and the session-source on
+	// the authz middleware is left unwired.
+	auth authDeps
 }
 
 // health is a minimal liveness probe used by Kubernetes / Container
@@ -439,6 +444,24 @@ func (h *handlers) topConversations(w http.ResponseWriter, r *http.Request) {
 	limit := parseInt(r.URL.Query().Get("limit"), 20)
 	sort := store.ParseTopNSort(r.URL.Query().Get("sort"))
 	rows, err := store.QueryTopConversations(r.Context(), h.conn, tr, limit, sort, parseFilter(r))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"count":  len(rows),
+		"rows":   rows,
+		"source": "flows",
+		"sort":   string(sort),
+		"window": tr.WindowDuration().String(),
+	})
+}
+
+func (h *handlers) topInterfaces(w http.ResponseWriter, r *http.Request) {
+	tr := parseTimeRange(r, 5*time.Minute)
+	limit := parseInt(r.URL.Query().Get("limit"), 20)
+	sort := store.ParseTopNSort(r.URL.Query().Get("sort"))
+	rows, err := store.QueryTopInterfaces(r.Context(), h.conn, tr, limit, sort, parseFilter(r))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
