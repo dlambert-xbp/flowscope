@@ -1,0 +1,105 @@
+# Go CI — vet, lint, race-tests (unit), integration tests (Docker daemon).
+#
+# CLAUDE.md is explicit: `go test -race` is non-negotiable on every CI run.
+# Local Windows boxes can't satisfy cgo + gcc for -race, so this Linux
+# workflow is the only place that proves the race detector is clean.
+#
+# Third-party actions are pinned to commit SHAs (the human-readable tag is
+# commented next to each pin). Bumping a pin is a deliberate review.
+
+name: ci-go
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-go-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  vet-lint-test:
+    name: vet + lint + unit (race)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Matrix kept narrow on purpose: go.mod pins 1.25.0 and CLAUDE.md
+        # says "Go 1.25+". Add another version here only if we actually
+        # ship on it.
+        go: ['1.25.x']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Go
+        uses: actions/setup-go@3041bf56c941b39c61721a86cd11f3bb1338122a # v5.2.0
+        with:
+          go-version: ${{ matrix.go }}
+          # setup-go's built-in cache keys on go.sum and handles GOMODCACHE
+          # + build cache. We don't need a separate actions/cache step.
+          cache: true
+
+      - name: go mod download
+        run: go mod download
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: golangci-lint
+        # No .golangci.yml in the repo today — the action falls back to
+        # the linter's default enabled set. A project-level config would
+        # be a good follow-up (see PR body).
+        uses: golangci/golangci-lint-action@1b6671e713fd51c7f28eb88acf29c9bf3c2eb15f # v6.5.0
+        with:
+          version: v1.62.2
+
+      - name: go test -race (unit)
+        # -race forces CGO, which is available on ubuntu-latest by default.
+        # `-coverprofile` is cheap and gives us an artifact for trend lines.
+        run: |
+          go test -race -covermode=atomic -coverprofile=coverage.out ./...
+
+      - name: Upload coverage artifact
+        if: always()
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        continue-on-error: true
+        with:
+          name: go-coverage
+          path: coverage.out
+          retention-days: 14
+
+  integration:
+    name: integration (Docker daemon)
+    runs-on: ubuntu-latest
+    # ubuntu-latest already has dockerd running, so the `integration`
+    # build tag — which CLAUDE.md says hits a local ClickHouse — can
+    # spin up containers directly. No services: { ... } block needed.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Go
+        uses: actions/setup-go@3041bf56c941b39c61721a86cd11f3bb1338122a # v5.2.0
+        with:
+          go-version: '1.25.x'
+          cache: true
+
+      - name: Verify docker daemon
+        run: docker version && docker info
+
+      - name: go test -tags=integration
+        # No -race here on purpose: the integration corpus is I/O-bound
+        # against ClickHouse; the unit job above already proves race-
+        # freedom on the pure-Go packages. Keep this job's runtime
+        # short by leaving the race detector off.
+        #
+        # Today there are no integration-tagged tests in the tree
+        # (TASKS.md #10). `go test` exits 0 with "no test files" in
+        # that case, so this is a safe stub that becomes a real gate
+        # the moment the first `//go:build integration` test lands.
+        run: go test -tags=integration ./...

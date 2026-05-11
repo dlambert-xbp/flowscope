@@ -1,0 +1,65 @@
+# Helm CI — chart lint + template smoke test.
+#
+# Matches the CLAUDE.md "Helm chart smoke test" recipe:
+#   helm lint deploy/helm/flowscope
+#   helm template deploy/helm/flowscope > /tmp/rendered.yaml
+#
+# `helm template` is the canonical way to catch templating regressions
+# without needing a real cluster. We upload the rendered YAML as an
+# artifact so reviewers can eyeball the diff on a PR.
+
+name: ci-helm
+
+on:
+  pull_request:
+    paths:
+      - 'deploy/helm/**'
+      - '.github/workflows/ci-helm.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'deploy/helm/**'
+      - '.github/workflows/ci-helm.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-helm-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-template:
+    name: helm lint + template
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Helm
+        uses: azure/setup-helm@fe7b79cd5ee1e45176fcad797de68ecaf3ca4814 # v4.2.0
+        with:
+          # Helm 3.x line. Bumping is fine; pinning prevents a Helm
+          # upgrade from silently breaking template rendering on PRs.
+          version: 'v3.16.3'
+
+      - name: helm version
+        run: helm version
+
+      - name: helm lint
+        run: helm lint deploy/helm/flowscope
+
+      - name: helm template
+        run: |
+          mkdir -p _out
+          helm template flowscope deploy/helm/flowscope > _out/rendered.yaml
+          echo "rendered $(wc -l < _out/rendered.yaml) lines"
+
+      - name: Upload rendered manifest
+        if: always()
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        continue-on-error: true
+        with:
+          name: helm-rendered
+          path: _out/rendered.yaml
+          retention-days: 14
