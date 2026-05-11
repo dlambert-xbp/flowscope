@@ -28,6 +28,7 @@ import (
 	"github.com/dlambert-xbp/flowscope/internal/notifier"
 	"github.com/dlambert-xbp/flowscope/internal/obs"
 	"github.com/dlambert-xbp/flowscope/internal/rdns"
+	"github.com/dlambert-xbp/flowscope/internal/secrets"
 	"github.com/dlambert-xbp/flowscope/internal/services"
 	"github.com/dlambert-xbp/flowscope/internal/settings"
 	"github.com/dlambert-xbp/flowscope/internal/snmpx"
@@ -61,25 +62,34 @@ func run() error {
 	defer conn.Close()
 
 	// Optional SNMP credential store for the Settings → SNMP admin
-	// endpoints. Disabled when FLOWSCOPE_SNMP_KEY is unset; the api
+	// endpoints. Disabled when no master key is resolvable; the api
 	// then surfaces the management endpoints as 503 Service
 	// Unavailable so the operator can see why. The same crypter seals
 	// the broader Settings secrets (webhook, OIDC client) so we reuse
-	// it instead of growing a second secret root.
+	// it instead of growing a second secret root. Master key
+	// resolution is delegated to internal/secrets — FLOWSCOPE_SNMP_KEY_REF
+	// preferred, legacy FLOWSCOPE_SNMP_KEY as a deprecation-warned
+	// fallback.
 	var (
 		creds   snmpx.CredentialStore
 		crypter *snmpx.Crypter
 	)
-	if mk := os.Getenv("FLOWSCOPE_SNMP_KEY"); mk != "" {
+	mk, err := secrets.ResolveSNMPMaster(ctx)
+	if err != nil {
+		return fmt.Errorf("snmp master key: %w", err)
+	}
+	if mk != "" {
 		c, err := snmpx.NewCrypter(mk)
 		if err != nil {
 			return fmt.Errorf("snmp crypter: %w", err)
 		}
 		crypter = c
 		creds = snmpx.NewClickHouseCredentialStore(conn, crypter)
-		slog.Info("snmp credential management enabled")
+		slog.Info("snmp credential management enabled",
+			"master_fp", secrets.Fingerprint(mk),
+		)
 	} else {
-		slog.Warn("FLOWSCOPE_SNMP_KEY not set — snmp credential management endpoints will return 503")
+		slog.Warn("FLOWSCOPE_SNMP_KEY_REF / FLOWSCOPE_SNMP_KEY not set — snmp credential management endpoints will return 503")
 	}
 
 	settingsStore := settings.New(conn, crypter)

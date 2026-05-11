@@ -31,6 +31,7 @@ import (
 	"github.com/dlambert-xbp/flowscope/internal/audit"
 	"github.com/dlambert-xbp/flowscope/internal/notifier"
 	"github.com/dlambert-xbp/flowscope/internal/obs"
+	"github.com/dlambert-xbp/flowscope/internal/secrets"
 	"github.com/dlambert-xbp/flowscope/internal/settings"
 	"github.com/dlambert-xbp/flowscope/internal/snmpx"
 	"github.com/dlambert-xbp/flowscope/internal/store"
@@ -103,19 +104,28 @@ func run() error {
 
 	// Webhook dispatcher runs alongside the engine. It is independent
 	// — the engine writes events; the dispatcher reads them and fans
-	// out. Both share the same ClickHouse connection. When
-	// FLOWSCOPE_SNMP_KEY is unset the dispatcher logs a warning and
-	// skips endpoints that store secrets, since secret_ct can't be
-	// decrypted without the master.
+	// out. Both share the same ClickHouse connection. Master key
+	// resolution is delegated to internal/secrets
+	// (FLOWSCOPE_SNMP_KEY_REF preferred, legacy FLOWSCOPE_SNMP_KEY as
+	// a deprecation-warned fallback). When the master is unset the
+	// dispatcher logs a warning and skips endpoints that store
+	// secrets, since secret_ct can't be decrypted without the master.
+	mk, err := secrets.ResolveSNMPMaster(ctx)
+	if err != nil {
+		return fmt.Errorf("snmp master key: %w", err)
+	}
 	var crypter *snmpx.Crypter
-	if mk := os.Getenv("FLOWSCOPE_SNMP_KEY"); mk != "" {
+	if mk != "" {
 		c, err := snmpx.NewCrypter(mk)
 		if err != nil {
 			return fmt.Errorf("snmp crypter: %w", err)
 		}
 		crypter = c
+		slog.Info("alert: webhook secret decryption enabled",
+			"master_fp", secrets.Fingerprint(mk),
+		)
 	} else {
-		slog.Warn("FLOWSCOPE_SNMP_KEY not set — webhook dispatcher will skip endpoints with secrets (PagerDuty / authenticated HTTP)")
+		slog.Warn("FLOWSCOPE_SNMP_KEY_REF / FLOWSCOPE_SNMP_KEY not set — webhook dispatcher will skip endpoints with secrets (PagerDuty / authenticated HTTP)")
 	}
 
 	dispTickStr := envOr("FLOWSCOPE_NOTIFIER_TICK", "5s")

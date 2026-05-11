@@ -18,6 +18,65 @@ image:
   repository: flowscope
   tag: "0.1.0"
 
+# Secret resolution for the SNMP master key (and other process-level
+# secrets that go through internal/secrets). Three backends:
+#
+#   env  — value is set as a plain env var on the pod via a SecretRef
+#          out-of-band. Lowest friction, no extra infra. Operator
+#          must create the K8s secret separately.
+#   file — projected from a CSI driver or K8s Secret mounted as a
+#          file at .secrets.file.path. The Deployment sets
+#          FLOWSCOPE_SNMP_KEY_REF=file:<path> and mounts the secret
+#          there. Good fit for the Secrets Store CSI driver.
+#   kv   — Azure Key Vault via Workload Identity. The chart annotates
+#          the ServiceAccount with the federated identity; the Azure
+#          SDK in-pod picks it up via DefaultAzureCredential. The
+#          chart sets FLOWSCOPE_SNMP_KEY_REF=kv:<url>; the operator
+#          must provision the federated credential mapping out of band
+#          (see runbook in the PR description).
+#
+# Only the snmp, alert, and api services consume the master. The
+# ingest service does not need it.
+secrets:
+  backend: env   # env | file | kv
+  # snmpMasterRef is the literal ref pushed into FLOWSCOPE_SNMP_KEY_REF
+  # on consumer pods. Examples per backend:
+  #   env:  env:FLOWSCOPE_SNMP_KEY   (and create the K8s Secret separately)
+  #   file: file:/etc/flowscope/secrets/snmp_master
+  #   kv:   kv:https://my-vault.vault.azure.net/secrets/flowscope-snmp-master
+  snmpMasterRef: "env:FLOWSCOPE_SNMP_KEY"
+  # When backend=env, the chart wires the env var from this K8s Secret
+  # ref. The operator must create the Secret out of band:
+  #   kubectl create secret generic flowscope-snmp \
+  #     --from-literal=master="$(openssl rand -base64 32)"
+  env:
+    secretName: "flowscope-snmp"
+    secretKey: "master"
+  # When backend=file, the chart mounts this Secret into the consumer
+  # pods at .secrets.file.path. Useful with the Secrets Store CSI
+  # driver if the operator wants to wire that in via overrides.
+  file:
+    secretName: "flowscope-snmp"
+    secretKey: "master"
+    path: "/etc/flowscope/secrets/snmp_master"
+  # When backend=kv, the chart annotates the ServiceAccount so AKS
+  # Workload Identity injects a federated token. The operator must
+  # create the federated credential out of band — see PR runbook.
+  # workloadIdentity.clientID is the AAD application (client) ID of
+  # the user-assigned managed identity bound to the SA.
+  workloadIdentity:
+    enabled: false
+    clientID: ""
+    tenantID: ""
+
+serviceAccount:
+  # When secrets.backend=kv this is forced on regardless. Otherwise
+  # the chart creates a SA only if explicitly enabled, so existing
+  # deployments that rely on the default SA keep working.
+  create: false
+  name: "flowscope"
+  annotations: {}
+
 # init: one-shot bootstrap. Runs as an initContainer on api + ingest
 # (and is also exposed as a standalone Job for operators who want to
 # reapply retention without restarting the data plane).

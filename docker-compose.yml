@@ -102,16 +102,21 @@ services:
       FLOWSCOPE_SNMP_COMMUNITY: "elastiflow"
       FLOWSCOPE_SNMP_WORKERS: "8"
       # AES-256-GCM master key for per-exporter credential storage.
-      # MUST be the same value on the api service (set below).
-      # Production: pull from Azure Key Vault via Workload Identity.
-      # Generate with: openssl rand -base64 32
-      FLOWSCOPE_SNMP_KEY: "dev-only-master-key-CHANGE-ME-32-bytes-min"
+      # Resolved through internal/secrets:
+      #   env:VAR       — plaintext from env var (legacy / dev only)
+      #   file:/path    — read file contents (compose default below)
+      #   kv:https://…  — Azure Key Vault via Workload Identity
+      # MUST resolve to the same value on api + alert + snmp services.
+      # Generate the dev value with: openssl rand -base64 32 > ./secrets/snmp_master
+      FLOWSCOPE_SNMP_KEY_REF: "file:/run/secrets/snmp_master"
       # Real gosnmp client. Set "1" only when there is no network
       # reachable from the container (returns deterministic synthetic
       # inventory keyed by exporter address).
       FLOWSCOPE_SNMP_MOCK: "0"
       FLOWSCOPE_METRICS_ADDR: ":9102"
       FLOWSCOPE_LOG_LEVEL: "info"
+    secrets:
+      - snmp_master
     mem_limit: 256m
     cpus: 0.5
 
@@ -133,7 +138,12 @@ services:
       FLOWSCOPE_CLICKHOUSE_DSN: "clickhouse://flowscope:flowscope@clickhouse:9000/flowscope"
       FLOWSCOPE_ALERT_TICK: "10s"
       FLOWSCOPE_METRICS_ADDR: ":9101"
+      # Webhook dispatcher needs the same master key as snmp + api to
+      # decrypt endpoint secret_ct. Mount via the same file: ref.
+      FLOWSCOPE_SNMP_KEY_REF: "file:/run/secrets/snmp_master"
       FLOWSCOPE_LOG_LEVEL: "info"
+    secrets:
+      - snmp_master
     mem_limit: 256m
     cpus: 0.25
 
@@ -154,10 +164,13 @@ services:
     environment:
       FLOWSCOPE_HTTP_ADDR: ":8080"
       FLOWSCOPE_CLICKHOUSE_DSN: "clickhouse://flowscope:flowscope@clickhouse:9000/flowscope"
-      # MUST match the snmp service value above; the api uses it to
-      # encrypt/decrypt credentials posted to /api/snmp/credentials.
-      FLOWSCOPE_SNMP_KEY: "dev-only-master-key-CHANGE-ME-32-bytes-min"
+      # MUST resolve to the same master as the snmp + alert services;
+      # the api uses it to encrypt/decrypt credentials posted to
+      # /api/snmp/credentials and to seal webhook + OIDC secrets.
+      FLOWSCOPE_SNMP_KEY_REF: "file:/run/secrets/snmp_master"
       FLOWSCOPE_LOG_LEVEL: "info"
+    secrets:
+      - snmp_master
     mem_limit: 512m
     cpus: 0.5
 
@@ -178,3 +191,19 @@ services:
 volumes:
   clickhouse-data:
   clickhouse-logs:
+
+# Top-level docker secrets. The snmp_master file holds the AES-256-GCM
+# master key used by internal/snmpx to derive per-record keys via
+# HKDF-SHA256 (see VISION.md §4.2). It is mounted read-only at
+# /run/secrets/snmp_master inside snmp, alert, and api containers.
+#
+# Operator steps (first-time setup):
+#   cp ./secrets/snmp_master.example ./secrets/snmp_master
+#   # then replace the example content with: openssl rand -base64 32
+#
+# The real ./secrets/snmp_master file is gitignored — do NOT commit it.
+# Production deployments should resolve the master from Azure Key Vault
+# via Workload Identity (see deploy/helm/flowscope/values.yaml).
+secrets:
+  snmp_master:
+    file: ./secrets/snmp_master

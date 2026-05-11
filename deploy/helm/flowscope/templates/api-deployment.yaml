@@ -16,7 +16,13 @@ spec:
       labels:
         {{- include "flowscope.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: api
+        {{- if and (eq .Values.secrets.backend "kv") .Values.secrets.workloadIdentity.enabled }}
+        # Required pod label for the Azure Workload Identity mutating
+        # webhook to inject AZURE_* env vars + the projected token.
+        azure.workload.identity/use: "true"
+        {{- end }}
     spec:
+      serviceAccountName: {{ include "flowscope.serviceAccountName" . }}
       # Block on schema migrations + retention TTL applying. The
       # init container reads flow_retention_days /
       # counter_retention_days from app_settings and emits ALTER
@@ -35,10 +41,15 @@ spec:
               value: {{ .Values.global.clickhouseDSN | quote }}
             - name: FLOWSCOPE_LOG_LEVEL
               value: {{ .Values.global.logLevel | quote }}
+            {{- include "flowscope.snmpKeyEnv" . | nindent 12 }}
             {{- range $k, $v := .Values.api.env }}
             - name: {{ $k }}
               value: {{ $v | quote }}
             {{- end }}
+          {{- with (include "flowscope.snmpKeyVolumeMount" . | trim) }}
+          volumeMounts:
+            {{- . | nindent 12 }}
+          {{- end }}
           readinessProbe:
             httpGet:
               path: /healthz
@@ -53,6 +64,10 @@ spec:
             periodSeconds: 15
           resources:
             {{- toYaml .Values.api.resources | nindent 12 }}
+      {{- with (include "flowscope.snmpKeyVolume" . | trim) }}
+      volumes:
+        {{- . | nindent 8 }}
+      {{- end }}
 ---
 apiVersion: v1
 kind: Service
