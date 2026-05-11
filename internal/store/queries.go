@@ -1545,6 +1545,117 @@ LIMIT ?`
 	return out, rows.Err()
 }
 
+// TopInterface is a per-interface aggregate over the trailing window.
+// Each flow contributes to both its input and output interface, so
+// the response carries separate in_/out_ totals plus combined totals
+// used for sorting. SNMP enrichment (sys_name, if_descr, if_alias) is
+// joined in when available — empty strings when SNMP has not yet
+// walked the device. Returned by /api/top/interfaces.
+type TopInterface struct {
+	Exporter   string `json:"exporter"`
+	SysName    string `json:"sys_name"`
+	IfIndex    uint32 `json:"ifindex"`
+	IfDescr    string `json:"if_descr"`
+	IfAlias    string `json:"if_alias"`
+	InBytes    uint64 `json:"in_bytes"`
+	OutBytes   uint64 `json:"out_bytes"`
+	InPackets  uint64 `json:"in_packets"`
+	OutPackets uint64 `json:"out_packets"`
+	InFlows    uint64 `json:"in_flows"`
+	OutFlows   uint64 `json:"out_flows"`
+	Bytes      uint64 `json:"bytes"`
+	Packets    uint64 `json:"packets"`
+	Flows      uint64 `json:"flows"`
+}
+
+// QueryTopInterfaces returns the N busiest interfaces seen in the
+// trailing window, narrowed by the FlowFilter. Each flow record is
+// fanned out via ARRAY JOIN into one row for its input_ifindex and
+// one for its output_ifindex (direction=1/2), so the table is scanned
+// once. ifindex=0 rows (unset on this side of the flow) are dropped.
+// SNMP inventory + ifTable are LEFT JOINed so the UI can show
+// sys_name / if_descr / if_alias when available.
+func QueryTopInterfaces(ctx context.Context, conn driver.Conn, tr TimeRange, limit int, sort TopNSort, f FlowFilter) ([]TopInterface, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 20
+	}
+	whereSQL, args, err := buildWhere(tr, f)
+	if err != nil {
+		return nil, err
+	}
+	q := `
+WITH
+per_iface AS (
+    SELECT
+        exporter,
+        iface_tuple.1 AS ifindex,
+        iface_tuple.2 AS direction,
+        bytes,
+        packets
+    FROM flows
+    ARRAY JOIN [tuple(input_ifindex, toUInt8(1)), tuple(output_ifindex, toUInt8(2))] AS iface_tuple
+    WHERE ` + whereSQL + ` AND iface_tuple.1 != 0
+),
+agg AS (
+    SELECT
+        exporter,
+        ifindex,
+        sumIf(bytes,   direction = 1) AS in_bytes,
+        sumIf(bytes,   direction = 2) AS out_bytes,
+        sumIf(packets, direction = 1) AS in_packets,
+        sumIf(packets, direction = 2) AS out_packets,
+        countIf(direction = 1)        AS in_flows,
+        countIf(direction = 2)        AS out_flows,
+        in_bytes + out_bytes          AS bytes,
+        in_packets + out_packets      AS packets,
+        in_flows + out_flows          AS flows
+    FROM per_iface
+    GROUP BY exporter, ifindex
+),
+inv AS (` + sqlLatestInventory + `),
+sif AS (` + sqlLatestSNMPInterfaces + `)
+SELECT
+    a.exporter,
+    ifNull(inv.sys_name, '') AS sys_name,
+    a.ifindex,
+    ifNull(sif.if_descr, '') AS if_descr,
+    ifNull(sif.if_alias, '') AS if_alias,
+    a.in_bytes, a.out_bytes,
+    a.in_packets, a.out_packets,
+    a.in_flows, a.out_flows,
+    a.bytes, a.packets, a.flows
+FROM agg AS a
+LEFT JOIN inv ON a.exporter = inv.exporter
+LEFT JOIN sif ON a.exporter = sif.exporter AND a.ifindex = sif.ifindex
+ORDER BY ` + sort.orderColumn() + ` DESC
+LIMIT ?`
+	args = append(args, uint64(limit))
+	rows, err := conn.Query(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("store: query top interfaces: %w", err)
+	}
+	defer rows.Close()
+	out := make([]TopInterface, 0, limit)
+	for rows.Next() {
+		var (
+			t        TopInterface
+			exporter netip.Addr
+		)
+		if err := rows.Scan(
+			&exporter, &t.SysName, &t.IfIndex, &t.IfDescr, &t.IfAlias,
+			&t.InBytes, &t.OutBytes,
+			&t.InPackets, &t.OutPackets,
+			&t.InFlows, &t.OutFlows,
+			&t.Bytes, &t.Packets, &t.Flows,
+		); err != nil {
+			return nil, fmt.Errorf("store: scan top interface: %w", err)
+		}
+		t.Exporter = exporter.Unmap().String()
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
 // FlowsListSort is the sort dimension for the paginated flows-list
 // endpoint that powers the Flows-tab Investigate panel. Whitelisted
 // server-side so the column can be inlined into ORDER BY safely.
