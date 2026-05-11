@@ -1,12 +1,14 @@
 // Command snmp is the FlowScope SNMP enrichment service. It walks
-// every observed exporter on a configurable cadence (default 15 min)
-// and persists sysDescr / ifTable / ifXTable into ClickHouse so the
-// Devices tab can render real hardware metadata.
+// every observed exporter on a configurable cadence (default 60s)
+// and persists sysDescr / ifTable / ifXTable / resource samples into
+// ClickHouse so the Devices tab can render real hardware metadata
+// and live CPU/memory/sensor health.
 //
 // VISION.md §3.1 / §4.2 — SNMP is the FALLBACK, not a workhorse.
-// We do not fleet-poll every five minutes. We walk per-device on
-// the configured interval and on operator-triggered demand
-// (triggered walks land in a follow-up slice).
+// The 60s default keeps Devices-tab sparklines feeling live; real
+// labs can dial the per-credential interval_sec up on noisier gear.
+// Operator-triggered walks (via POST /api/devices/{exporter}/snmp/walk)
+// also bypass the cadence floor entirely.
 //
 // Authentication: v2c only in slice 15. v3 with encrypted credential
 // storage (AES-256-GCM, HKDF-SHA256, master key from Key Vault per

@@ -38,6 +38,9 @@ const (
 	ResourceKindStorage     ResourceKind = "storage"
 	ResourceKindTemperature ResourceKind = "temperature"
 	ResourceKindFan         ResourceKind = "fan"
+	ResourceKindPower       ResourceKind = "power"
+	ResourceKindVoltage     ResourceKind = "voltage"
+	ResourceKindCurrent     ResourceKind = "current"
 )
 
 // ResourceSource identifies the MIB the sample came from. Mirrors the
@@ -51,23 +54,32 @@ const (
 	ResourceSourceCiscoProcess    ResourceSource = "cisco-process"
 	ResourceSourceCiscoMempool    ResourceSource = "cisco-mempool"
 	ResourceSourceCiscoEnhMempool ResourceSource = "cisco-enhmempool"
+	ResourceSourceCiscoFRU        ResourceSource = "cisco-fru"
+	ResourceSourceEntitySensor    ResourceSource = "entity-sensor"
 	ResourceSourceJuniperJnx      ResourceSource = "juniper-jnx"
 	ResourceSourceAristaEntity    ResourceSource = "arista-entity"
 )
 
-// ResourceSample is one row of device_resource_samples. Use whichever
-// of value_percent / value_bytes / max_bytes makes sense for the kind:
-//   - cpu     → ValuePercent only
-//   - memory  → ValueBytes + MaxBytes (UI derives percent)
-//   - storage → ValueBytes + MaxBytes
-//   - temp    → ValuePercent (carries °C; column is overloaded)
-//   - fan     → ValuePercent (carries RPM)
+// ResourceSample is one row of device_resource_samples. Pick the
+// fields that fit the kind; the read layer prefers ValueNumeric +
+// Unit when populated (sensor metrics like °C / RPM / V / W) and
+// falls back to ValuePercent for CPU/memory/storage utilization.
+//
+//	cpu         → ValuePercent (0–100)
+//	memory      → ValuePercent + ValueBytes + MaxBytes
+//	storage     → ValuePercent + ValueBytes + MaxBytes
+//	temperature → ValueNumeric + Unit ("C")
+//	fan         → ValueNumeric + Unit ("rpm")
+//	power       → ValueNumeric + Unit ("W") when watts known; otherwise
+//	              ValuePercent overloaded to 0/100 for "PSU not OK / OK"
 type ResourceSample struct {
 	Kind         ResourceKind
 	Component    string // human-readable, e.g. "Processor 1", "Pool: Processor"
 	ValuePercent float32
 	ValueBytes   uint64
 	MaxBytes     uint64
+	ValueNumeric float64
+	Unit         string
 	Source       ResourceSource
 }
 
@@ -244,10 +256,41 @@ func (rc *RealClient) Walk(ctx context.Context, target string) (*Inventory, erro
 // swallowed and logged via the gosnmp client's own logging since this
 // is enrichment, not a hard requirement.
 func walkResources(g *gosnmp.GoSNMP) []ResourceSample {
-	out := make([]ResourceSample, 0, 8)
+	out := make([]ResourceSample, 0, 16)
 	out = append(out, walkHRMIB(g)...)
 	out = append(out, walkCiscoCPU(g)...)
 	out = append(out, walkCiscoMemory(g)...)
+	// entPhysicalName is needed by both walkEntitySensors and
+	// walkCiscoPSU, so we resolve once and pass the map in.
+	physName := walkEntPhysicalNames(g)
+	out = append(out, walkEntitySensors(g, physName)...)
+	out = append(out, walkCiscoPSU(g, physName)...)
+	return out
+}
+
+// walkEntPhysicalNames builds a physIndex → human label map from
+// entPhysicalName, falling back to entPhysicalDescr when name is
+// empty. Used to label sensors and PSUs.
+func walkEntPhysicalNames(g *gosnmp.GoSNMP) map[uint32]string {
+	out := map[uint32]string{}
+	_ = g.BulkWalk(OIDEntPhysicalName, func(pdu gosnmp.SnmpPDU) error {
+		if idx, ok := indexFromOID(pdu.Name, OIDEntPhysicalName); ok {
+			if s := octetString(pdu); s != "" {
+				out[idx] = s
+			}
+		}
+		return nil
+	})
+	_ = g.BulkWalk(OIDEntPhysicalDescr, func(pdu gosnmp.SnmpPDU) error {
+		if idx, ok := indexFromOID(pdu.Name, OIDEntPhysicalDescr); ok {
+			if _, has := out[idx]; !has {
+				if s := octetString(pdu); s != "" {
+					out[idx] = s
+				}
+			}
+		}
+		return nil
+	})
 	return out
 }
 
@@ -375,6 +418,168 @@ func classifyHRStorage(typeOID string) ResourceKind {
 	default:
 		return ""
 	}
+}
+
+// walkEntitySensors walks ENTITY-SENSOR-MIB and emits one sample per
+// sensor whose entPhySensorType maps to one of our resource kinds.
+// Reading = raw * 10^(scale - 9) / 10^precision, per RFC 3433. Sensors
+// in nonoperational state are skipped — the value is meaningless there.
+// physName labels rows by their entPhysicalIndex (sensors share that
+// index space with PSUs, CPUs, etc.).
+func walkEntitySensors(g *gosnmp.GoSNMP, physName map[uint32]string) []ResourceSample {
+	type sensor struct {
+		typ        int
+		scale      int
+		precision  int
+		value      int64
+		operStatus int
+		unitsDispl string
+	}
+	by := map[uint32]*sensor{}
+	ensure := func(i uint32) *sensor {
+		if s, ok := by[i]; ok {
+			return s
+		}
+		s := &sensor{scale: 9, operStatus: 1} // sensible defaults
+		by[i] = s
+		return s
+	}
+	_ = g.BulkWalk(OIDEntPhySensorType, func(pdu gosnmp.SnmpPDU) error {
+		if idx, ok := indexFromOID(pdu.Name, OIDEntPhySensorType); ok {
+			ensure(idx).typ = integerValue(pdu)
+		}
+		return nil
+	})
+	_ = g.BulkWalk(OIDEntPhySensorScale, func(pdu gosnmp.SnmpPDU) error {
+		if idx, ok := indexFromOID(pdu.Name, OIDEntPhySensorScale); ok {
+			ensure(idx).scale = integerValue(pdu)
+		}
+		return nil
+	})
+	_ = g.BulkWalk(OIDEntPhySensorPrecision, func(pdu gosnmp.SnmpPDU) error {
+		if idx, ok := indexFromOID(pdu.Name, OIDEntPhySensorPrecision); ok {
+			ensure(idx).precision = integerValue(pdu)
+		}
+		return nil
+	})
+	_ = g.BulkWalk(OIDEntPhySensorValue, func(pdu gosnmp.SnmpPDU) error {
+		if idx, ok := indexFromOID(pdu.Name, OIDEntPhySensorValue); ok {
+			ensure(idx).value = int64(integerValue(pdu))
+		}
+		return nil
+	})
+	_ = g.BulkWalk(OIDEntPhySensorOperStatus, func(pdu gosnmp.SnmpPDU) error {
+		if idx, ok := indexFromOID(pdu.Name, OIDEntPhySensorOperStatus); ok {
+			ensure(idx).operStatus = integerValue(pdu)
+		}
+		return nil
+	})
+	_ = g.BulkWalk(OIDEntPhySensorUnitsDisplay, func(pdu gosnmp.SnmpPDU) error {
+		if idx, ok := indexFromOID(pdu.Name, OIDEntPhySensorUnitsDisplay); ok {
+			ensure(idx).unitsDispl = octetString(pdu)
+		}
+		return nil
+	})
+
+	out := make([]ResourceSample, 0, len(by))
+	for idx, s := range by {
+		if s.operStatus != 1 { // 1 = ok
+			continue
+		}
+		kind, unit := sensorKindAndUnit(s.typ)
+		if kind == "" {
+			continue
+		}
+		// RFC 3433: actual = raw * 10^(scale - 9) / 10^precision
+		actual := float64(s.value)
+		exp := s.scale - 9 - s.precision
+		switch {
+		case exp > 0:
+			for i := 0; i < exp; i++ {
+				actual *= 10
+			}
+		case exp < 0:
+			for i := 0; i < -exp; i++ {
+				actual /= 10
+			}
+		}
+		// Prefer the device-supplied unit string when present, fall
+		// back to the canonical one from the type table.
+		if s.unitsDispl != "" {
+			unit = s.unitsDispl
+		}
+		comp := physName[idx]
+		if comp == "" {
+			comp = fmt.Sprintf("Sensor %d", idx)
+		}
+		out = append(out, ResourceSample{
+			Kind:         kind,
+			Component:    comp,
+			ValueNumeric: actual,
+			Unit:         unit,
+			Source:       ResourceSourceEntitySensor,
+		})
+	}
+	return out
+}
+
+// sensorKindAndUnit maps an entPhySensorType enum to one of our
+// ResourceKind values plus a canonical unit string. Returns ("", "")
+// for sensor types we deliberately skip (other / unknown / hertz /
+// percentRH / cmm / truthvalue) — the dashboard tile aesthetic only
+// has room for a handful of headline metrics.
+func sensorKindAndUnit(typ int) (ResourceKind, string) {
+	switch typ {
+	case 3, 4: // voltsAC / voltsDC
+		return ResourceKindVoltage, "V"
+	case 5:
+		return ResourceKindCurrent, "A"
+	case 6:
+		return ResourceKindPower, "W"
+	case 8:
+		return ResourceKindTemperature, "C"
+	case 10:
+		return ResourceKindFan, "rpm"
+	default:
+		return "", ""
+	}
+}
+
+// walkCiscoPSU reports per-PSU operational health. cefcFRUPowerOperStatus
+// is 1–12; only "2" (on) is healthy. We project to a 0/100 percent so
+// the standard tile colouring (warn/crit on high values) shows a
+// failed PSU as crit-red, and keep the numeric status code in
+// ValueNumeric for ops-eyes that want the raw enum.
+func walkCiscoPSU(g *gosnmp.GoSNMP, physName map[uint32]string) []ResourceSample {
+	out := make([]ResourceSample, 0, 4)
+	_ = g.BulkWalk(OIDCefcFRUPowerOperStatus, func(pdu gosnmp.SnmpPDU) error {
+		idx, ok := indexFromOID(pdu.Name, OIDCefcFRUPowerOperStatus)
+		if !ok {
+			return nil
+		}
+		status := integerValue(pdu)
+		comp := physName[idx]
+		if comp == "" {
+			comp = fmt.Sprintf("PSU %d", idx)
+		}
+		// Health score: 0 (ok) so the tile reads cool, 100 (fault) so
+		// the warn/crit thresholding lights up bright. Operators see
+		// the raw status enum in the tooltip via ValueNumeric.
+		var pct float32
+		if status != 2 {
+			pct = 100
+		}
+		out = append(out, ResourceSample{
+			Kind:         ResourceKindPower,
+			Component:    comp,
+			ValuePercent: pct,
+			ValueNumeric: float64(status),
+			Unit:         "state",
+			Source:       ResourceSourceCiscoFRU,
+		})
+		return nil
+	})
+	return out
 }
 
 // walkCiscoCPU pulls cpmCPUTotal5minRev (5-min CPU utilization, the

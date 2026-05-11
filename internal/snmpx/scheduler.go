@@ -41,7 +41,12 @@ type Scheduler struct {
 // credential binding.
 func NewScheduler(conn driver.Conn, creds CredentialStore, fallback Client, interval time.Duration, concurrency int) *Scheduler {
 	if interval <= 0 {
-		interval = 15 * time.Minute
+		// 60s default — fast enough that CPU/memory/sensor sparklines on
+		// the Devices tab feel live, slow enough that the walk load on
+		// real gear stays modest. Per-credential interval_sec still
+		// wins for operators who need to dial it back on noisier
+		// devices.
+		interval = 60 * time.Second
 	}
 	if concurrency <= 0 {
 		concurrency = 8
@@ -361,14 +366,19 @@ func (s *Scheduler) persist(ctx context.Context, inv *Inventory) error {
 	}
 
 	if len(inv.Resources) > 0 {
-		batch, err := s.conn.PrepareBatch(ctx, "INSERT INTO device_resource_samples")
+		batch, err := s.conn.PrepareBatch(ctx,
+			`INSERT INTO device_resource_samples
+			   (polled_at, exporter, kind, component,
+			    value_percent, value_bytes, max_bytes, value_numeric, unit, source)`,
+		)
 		if err != nil {
 			return fmt.Errorf("prepare resource batch: %w", err)
 		}
 		for _, r := range inv.Resources {
 			if err := batch.Append(
 				inv.PolledAt, exp16, string(r.Kind), r.Component,
-				r.ValuePercent, r.ValueBytes, r.MaxBytes, string(r.Source),
+				r.ValuePercent, r.ValueBytes, r.MaxBytes,
+				r.ValueNumeric, r.Unit, string(r.Source),
 			); err != nil {
 				return fmt.Errorf("append resource: %w", err)
 			}

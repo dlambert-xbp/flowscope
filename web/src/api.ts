@@ -103,11 +103,20 @@ export type DeviceInventory = {
   interfaces: SNMPInterface[]
 }
 
-export type DeviceResourceKind = 'cpu' | 'memory' | 'storage' | 'temperature' | 'fan'
+export type DeviceResourceKind =
+  | 'cpu'
+  | 'memory'
+  | 'storage'
+  | 'temperature'
+  | 'fan'
+  | 'power'
+  | 'voltage'
+  | 'current'
 
 export type DeviceResourcePoint = {
   ts: string
   value_percent: number
+  value_numeric: number
 }
 
 export type DeviceResource = {
@@ -118,6 +127,8 @@ export type DeviceResource = {
   latest_percent: number
   latest_bytes: number
   max_bytes: number
+  latest_numeric: number
+  unit: string
   points: DeviceResourcePoint[]
 }
 

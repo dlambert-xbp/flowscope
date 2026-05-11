@@ -159,6 +159,70 @@ func mockResources(seed uint64, vendor string) []ResourceSample {
 		Source:       ResourceSourceHRMIB,
 	})
 
+	// Temperature — two sensors, "Inlet" + "Hotspot", drifting around
+	// a believable steady state. Hotspot runs ~15°C above inlet so a
+	// real device's relationship reads correctly on the dashboard.
+	inlet := 22 + float64((seed+tick*3)%8)
+	hotspot := inlet + 12 + float64((seed+tick*5)%6)
+	out = append(out, ResourceSample{
+		Kind:         ResourceKindTemperature,
+		Component:    "Inlet",
+		ValueNumeric: inlet,
+		Unit:         "C",
+		Source:       ResourceSourceEntitySensor,
+	})
+	out = append(out, ResourceSample{
+		Kind:         ResourceKindTemperature,
+		Component:    "Hotspot",
+		ValueNumeric: hotspot,
+		Unit:         "C",
+		Source:       ResourceSourceEntitySensor,
+	})
+
+	// Fans — two fan trays at slightly different RPM so the dashboard
+	// shows useful row variance.
+	fanA := 5800 + float64((seed+tick*7)%600)
+	fanB := 5800 + float64((seed+tick*11)%600)
+	out = append(out, ResourceSample{
+		Kind:         ResourceKindFan,
+		Component:    "Fan tray 1",
+		ValueNumeric: fanA,
+		Unit:         "rpm",
+		Source:       ResourceSourceEntitySensor,
+	})
+	out = append(out, ResourceSample{
+		Kind:         ResourceKindFan,
+		Component:    "Fan tray 2",
+		ValueNumeric: fanB,
+		Unit:         "rpm",
+		Source:       ResourceSourceEntitySensor,
+	})
+
+	// Power — two PSUs, PSU2 simulating a fault one device in eight so
+	// the operator sees an example of a crit-red tile in dev.
+	psu1Status := float64(2) // 2 = on (healthy)
+	psu2Status := float64(2)
+	psu2Pct := float32(0)
+	if seed%8 == 0 {
+		psu2Status = 8 // 8 = failed
+		psu2Pct = 100
+	}
+	out = append(out, ResourceSample{
+		Kind:         ResourceKindPower,
+		Component:    "PSU 1",
+		ValueNumeric: psu1Status,
+		Unit:         "state",
+		Source:       ResourceSourceCiscoFRU,
+	})
+	out = append(out, ResourceSample{
+		Kind:         ResourceKindPower,
+		Component:    "PSU 2",
+		ValuePercent: psu2Pct,
+		ValueNumeric: psu2Status,
+		Unit:         "state",
+		Source:       ResourceSourceCiscoFRU,
+	})
+
 	return out
 }
 

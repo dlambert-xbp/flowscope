@@ -1,39 +1,19 @@
 import { useQuery } from '@tanstack/react-query'
-import { useEffect, useRef, type ReactNode } from 'react'
-import uPlot from 'uplot'
-import 'uplot/dist/uPlot.min.css'
+import { type ReactNode } from 'react'
 import { api, fmt } from '../api'
 import type { InterfaceTimeseriesPoint } from '../api'
-import { useTheme } from '../theme'
 import {
   DEFAULT_TIME_RANGE,
   rangeLabel,
   toApi,
   type TimeRange,
 } from '../timeRange'
+import { TimeseriesChart, resolveColor } from './TimeseriesChart'
 
-// uPlot reads plain strings, not CSS vars, so we resolve the live design
-// tokens from the document at construction time and rebuild the plot when
-// the theme changes.
-type PlotColors = {
-  line: string
-  lineSoft: string
-  faint: string
-  accent: string
-  ok: string
-}
-function readPlotColors(): PlotColors {
-  const cs = getComputedStyle(document.documentElement)
-  const v = (name: string) => cs.getPropertyValue(name).trim()
-  return {
-    line: v('--color-line'),
-    lineSoft: v('--color-line-soft'),
-    faint: v('--color-faint'),
-    accent: v('--color-accent'),
-    ok: v('--color-ok'),
-  }
-}
-
+// Per-interface ingress/egress line chart on the Devices tab. The
+// data shaping + section chrome stays here; the actual rendering
+// (uPlot wrapper, drag-to-zoom, theme awareness, reset affordance)
+// lives in the shared TimeseriesChart primitive.
 export function InterfaceChart({
   exporter,
   ifindex,
@@ -60,6 +40,21 @@ export function InterfaceChart({
     meta?.sys_name ? `${meta.sys_name} · ${meta.exporter}` : (meta?.exporter ?? exporter)
   const ifaceLabel = meta?.if_descr ? meta.if_descr : `ifindex ${ifindex}`
   const aliasLabel = meta?.if_alias ?? ''
+
+  const xs = points.map((p) => Math.floor(new Date(p.ts).getTime() / 1000))
+  const inSeries = {
+    label: 'in',
+    color: resolveColor('--color-accent', '#8aa8c8'),
+    values: points.map((p) => p.in_bps),
+    format: (v: number) => fmt.bps(v),
+  }
+  const outSeries = {
+    label: 'out',
+    color: resolveColor('--color-ok', '#7fa67f'),
+    values: points.map((p) => p.out_bps),
+    format: (v: number) => fmt.bps(v),
+  }
+
   return (
     <div className="border-b border-line">
       <SectionHead
@@ -68,161 +63,20 @@ export function InterfaceChart({
         right={<SourceBadge>SOURCE · COUNTERS · 1s SAMPLE</SourceBadge>}
       />
       <div className="px-4 py-3 bg-surface">
-        <UPlotChart points={points} loading={ts.isLoading} error={ts.error as Error | undefined} />
+        <TimeseriesChart
+          xs={xs}
+          series={[inSeries, outSeries]}
+          height={200}
+          yMin={0}
+          yFormat={(v) => fmt.bps(v)}
+          loading={ts.isLoading}
+          error={ts.error as Error | undefined}
+          emptyLabel="no points yet · waiting for the next sample interval"
+        />
         <Legend points={points} />
       </div>
     </div>
   )
-}
-
-function UPlotChart({
-  points,
-  loading,
-  error,
-}: {
-  points: InterfaceTimeseriesPoint[]
-  loading: boolean
-  error?: Error
-}) {
-  const wrapRef = useRef<HTMLDivElement | null>(null)
-  const plotRef = useRef<uPlot | null>(null)
-  const themeRef = useRef<string>('')
-  const { resolved } = useTheme()
-
-  useEffect(() => {
-    const wrap = wrapRef.current
-    if (!wrap) return
-
-    const xs = points.map((p) => Math.floor(new Date(p.ts).getTime() / 1000))
-    const ins = points.map((p) => p.in_bps)
-    const outs = points.map((p) => p.out_bps)
-    const data: uPlot.AlignedData = [xs, ins, outs]
-
-    const width = wrap.clientWidth || 800
-    const height = 200
-
-    // Tear down + rebuild on theme change so uPlot picks up the new
-    // design tokens (its color strings are baked at construction).
-    if (plotRef.current && themeRef.current !== resolved) {
-      plotRef.current.destroy()
-      plotRef.current = null
-    }
-    themeRef.current = resolved
-
-    if (!plotRef.current) {
-      plotRef.current = new uPlot(buildOpts(width, height, readPlotColors()), data, wrap)
-    } else {
-      plotRef.current.setSize({ width, height })
-      plotRef.current.setData(data)
-    }
-  }, [points, resolved])
-
-  useEffect(() => {
-    const wrap = wrapRef.current
-    if (!wrap) return
-    const ro = new ResizeObserver(() => {
-      if (plotRef.current && wrap.clientWidth > 0) {
-        plotRef.current.setSize({ width: wrap.clientWidth, height: 200 })
-      }
-    })
-    ro.observe(wrap)
-    return () => {
-      ro.disconnect()
-      plotRef.current?.destroy()
-      plotRef.current = null
-    }
-  }, [])
-
-  return (
-    <div className="relative">
-      <div
-        ref={wrapRef}
-        className="w-full h-[200px] bg-ink border border-line uplot-host"
-      />
-      {loading && points.length === 0 && (
-        <Overlay>loading…</Overlay>
-      )}
-      {error && (
-        <Overlay tone="error">timeseries: {error.message}</Overlay>
-      )}
-      {!loading && !error && points.length === 0 && (
-        <Overlay>no points yet · waiting for the next sample interval</Overlay>
-      )}
-    </div>
-  )
-}
-
-function Overlay({
-  children,
-  tone,
-}: {
-  children: ReactNode
-  tone?: 'error'
-}) {
-  return (
-    <div
-      className={`absolute inset-0 flex items-center justify-center font-mono text-[11px] pointer-events-none ${
-        tone === 'error' ? 'text-crit' : 'text-dim'
-      }`}
-    >
-      {children}
-    </div>
-  )
-}
-
-function buildOpts(width: number, height: number, c: PlotColors): uPlot.Options {
-  return {
-    width,
-    height,
-    padding: [12, 16, 6, 8],
-    cursor: {
-      drag: { x: false, y: false },
-      points: { size: 6 },
-    },
-    legend: { show: false },
-    scales: {
-      x: { time: true },
-      y: {
-        range: (_u, _min, max) => [0, Math.max(1, max)],
-      },
-    },
-    axes: [
-      {
-        stroke: c.faint,
-        grid: { stroke: c.lineSoft, width: 1 },
-        ticks: { stroke: c.line, width: 1, size: 4 },
-        font: '10px ui-monospace, "IBM Plex Mono", monospace',
-        size: 28,
-      },
-      {
-        stroke: c.faint,
-        grid: { stroke: c.lineSoft, width: 1 },
-        ticks: { stroke: c.line, width: 1, size: 4 },
-        font: '10px ui-monospace, "IBM Plex Mono", monospace',
-        size: 56,
-        values: (_u, splits) => splits.map((v) => fmt.bps(v)),
-      },
-    ],
-    series: [
-      {
-        value: (_u, v) => (v == null ? '—' : new Date(v * 1000).toLocaleTimeString()),
-      },
-      {
-        label: 'in',
-        stroke: c.accent,
-        width: 1.5,
-        points: { show: false },
-        value: (_u, v) => (v == null ? '—' : fmt.bps(v)),
-      },
-      {
-        label: 'out',
-        stroke: c.ok,
-        width: 1.5,
-        points: { show: false },
-        value: (_u, v) => (v == null ? '—' : fmt.bps(v)),
-      },
-    ],
-  }
 }
 
 function Legend({ points }: { points: InterfaceTimeseriesPoint[] }) {

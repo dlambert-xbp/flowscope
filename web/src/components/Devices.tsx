@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Fragment, useCallback, useEffect, useState, type ReactNode } from 'react'
 import { api, fmt, labelExporter, labelInterface } from '../api'
 import type {
@@ -12,6 +12,7 @@ import type {
   TopTalker,
 } from '../api'
 import { InterfaceChart } from './InterfaceChart'
+import { TimeseriesChart } from './TimeseriesChart'
 import { ServiceLabel } from './ServiceLabel'
 import {
   rangeLabel,
@@ -412,6 +413,7 @@ function FeatureHeader({
         <span className="font-mono text-[10.5px] text-faint normal-case tracking-[0.02em]">
           last seen {d ? fmt.time(d.last_seen).slice(11, 19) + 'Z' : '—'}
         </span>
+        <WalkNowButton exporter={exporter} />
         <span className="font-mono text-[10.5px] text-faint normal-case tracking-[0.02em]">
           first seen {d ? fmt.time(d.first_seen).slice(11, 19) + 'Z' : '—'}
         </span>
@@ -455,13 +457,84 @@ function FeatureHeader({
         ) : (
           <>
             Exporter inferred from observed flow records. SNMP has not yet walked
-            this device — the snmp service polls every 15 min once an exporter
+            this device — the snmp service polls every 60s once an exporter
             shows up in flows.
           </>
         )}
       </p>
       <SpecRow d={d} i={i} range={range} />
     </header>
+  )
+}
+
+// WalkNowButton enqueues an operator-triggered SNMP walk for this
+// exporter and animates the queued → walking → fresh transition next
+// to "last seen" in the FeatureHeader. The backend already supports
+// POST /api/devices/{exporter}/snmp/walk; this just exposes it where
+// an operator staring at a device would expect it (instead of buried
+// in Settings → SNMP).
+//
+// State machine:
+//   idle    → button reads "walk now"
+//   queued  → button reads "queued · scanning"; ~30s window during
+//             which we proactively re-fetch inventory + resources so
+//             the new polled_at appears as soon as the walk lands.
+//   error   → button reads "walk failed", auto-resets in 4s
+function WalkNowButton({ exporter }: { exporter: string }) {
+  const qc = useQueryClient()
+  const [state, setState] = useState<'idle' | 'queued' | 'error'>('idle')
+  const runWalk = async () => {
+    setState('queued')
+    try {
+      await api.requestSnmpWalk(exporter)
+    } catch {
+      setState('error')
+      setTimeout(() => setState('idle'), 4000)
+      return
+    }
+    // Trigger a few invalidations spaced over ~30s so the fresh
+    // polled_at, inventory, and resource samples flow into the UI as
+    // soon as the snmp service finishes the walk.
+    const refresh = () => {
+      qc.invalidateQueries({ queryKey: ['device-inventory', exporter] })
+      qc.invalidateQueries({ queryKey: ['device-resources', exporter] })
+    }
+    const t1 = setTimeout(refresh, 5_000)
+    const t2 = setTimeout(refresh, 15_000)
+    const t3 = setTimeout(() => {
+      refresh()
+      setState('idle')
+    }, 30_000)
+    // Best-effort cleanup; if the user navigates away the stale
+    // timers just no-op against an unmounted React tree.
+    return () => {
+      clearTimeout(t1)
+      clearTimeout(t2)
+      clearTimeout(t3)
+    }
+  }
+  const label =
+    state === 'queued'
+      ? 'queued · scanning'
+      : state === 'error'
+        ? 'walk failed'
+        : 'walk now'
+  const tone =
+    state === 'queued'
+      ? 'border-accent text-accent'
+      : state === 'error'
+        ? 'border-crit text-crit'
+        : 'border-line text-dim hover:border-accent hover:text-text'
+  return (
+    <button
+      type="button"
+      onClick={runWalk}
+      disabled={state === 'queued'}
+      aria-label="Trigger an SNMP walk on this exporter"
+      className={`font-mono text-[10px] uppercase tracking-[0.1em] px-2 py-0.5 border ${tone} disabled:cursor-wait`}
+    >
+      {label}
+    </button>
   )
 }
 
@@ -580,7 +653,7 @@ function InventoryPanel({ exporter }: { exporter: string }) {
   if (!i) {
     return (
       <p className="text-dim font-mono text-[12px]">
-        no SNMP data yet · the snmp service polls every 15 min after the
+        no SNMP data yet · the snmp service polls every 60s after the
         exporter first appears in flows · check{' '}
         <code className="bg-raise px-1 text-text">FLOWSCOPE_SNMP_COMMUNITY</code> on the snmp service if a real network is reachable
       </p>
@@ -623,7 +696,7 @@ function InventoryPanel({ exporter }: { exporter: string }) {
 // next to other CPU rows. Tile = headline number, secondary context
 // (bytes for memory/storage), tiny sparkline of percent over the
 // trailing 24h. Refreshes every 15s — slower than flow data because
-// SNMP polls on a 15-min cadence.
+// SNMP polls every 60s by default.
 function ResourcesPanel({ exporter }: { exporter: string }) {
   const q = useQuery({
     queryKey: ['device-resources', exporter],
@@ -656,7 +729,22 @@ function ResourcesPanel({ exporter }: { exporter: string }) {
     g.push(r)
     groups[r.kind] = g
   }
-  const order: DeviceResourceKind[] = ['cpu', 'memory', 'storage', 'temperature', 'fan']
+  const order: DeviceResourceKind[] = [
+    'cpu',
+    'memory',
+    'storage',
+    'temperature',
+    'fan',
+    'power',
+    'voltage',
+    'current',
+  ]
+  // selected is the (kind, component) pair the operator clicked to
+  // expand into a full-size chart. Stored as a string key for cheap
+  // equality. Click the same tile again to dismiss.
+  const [selected, setSelected] = useState<string | null>(null)
+  const selectedRow =
+    selected != null ? rows.find((r) => `${r.kind}_${r.component}` === selected) : undefined
   return (
     <div className="space-y-3">
       {order
@@ -667,22 +755,126 @@ function ResourcesPanel({ exporter }: { exporter: string }) {
               {kind}
             </div>
             <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2">
-              {groups[kind]!.map((r, i) => (
-                <ResourceTile key={`${r.component}_${i}`} r={r} />
-              ))}
+              {groups[kind]!.map((r, i) => {
+                const key = `${r.kind}_${r.component}`
+                return (
+                  <ResourceTile
+                    key={`${r.component}_${i}`}
+                    r={r}
+                    active={selected === key}
+                    onClick={() => setSelected((s) => (s === key ? null : key))}
+                  />
+                )
+              })}
             </div>
           </div>
         ))}
+      {selectedRow && (
+        <ExpandedResourceChart
+          r={selectedRow}
+          onClose={() => setSelected(null)}
+        />
+      )}
     </div>
   )
 }
 
-function ResourceTile({ r }: { r: DeviceResource }) {
-  const pct = r.latest_percent
-  const tone = utilizationTone(pct)
-  const ageS = secondsSince(r.latest_ts)
+// ExpandedResourceChart renders the selected tile's full sparkline
+// data as a regular time-series chart with drag-to-zoom. Reads
+// value_numeric for sensor kinds (temperature, fan, voltage, current,
+// power-watts) and value_percent for utilization kinds (cpu, memory,
+// storage). Header explains which kind / source you're looking at and
+// gives a close affordance.
+function ExpandedResourceChart({
+  r,
+  onClose,
+}: {
+  r: DeviceResource
+  onClose: () => void
+}) {
+  const usesNumeric = !isUtilizationKind(r.kind)
+  const xs = r.points.map((p) =>
+    Math.floor(new Date(p.ts).getTime() / 1000),
+  )
+  const values = r.points.map((p) =>
+    usesNumeric ? p.value_numeric : p.value_percent,
+  )
+  const tone = resourceTone(r)
+  const decimals = r.kind === 'fan' ? 0 : 1
+  const yFormat = (v: number) => {
+    if (!usesNumeric) return `${v.toFixed(0)}%`
+    if (r.unit) return `${v.toFixed(decimals)} ${r.unit}`
+    return v.toFixed(decimals)
+  }
   return (
-    <div className="border border-line bg-ink px-3 py-2.5 min-w-0">
+    <div className="mt-1 border border-line bg-surface">
+      <div className="flex items-baseline gap-3 px-4 py-2 border-b border-line">
+        <span className="text-[11px] uppercase tracking-[0.1em] text-dim font-semibold">
+          {r.kind} · {r.component}
+        </span>
+        <span className="font-mono text-[10.5px] text-faint">via {r.source}</span>
+        <button
+          type="button"
+          onClick={onClose}
+          className="ml-auto font-mono text-[10.5px] text-dim hover:text-text"
+          aria-label="Close expanded chart"
+        >
+          × close
+        </button>
+      </div>
+      <div className="px-4 py-3">
+        <TimeseriesChart
+          xs={xs}
+          series={[
+            {
+              label: r.component,
+              color: tone.stroke,
+              values,
+              format: yFormat,
+            },
+          ]}
+          height={200}
+          yMin={usesNumeric ? undefined : 0}
+          yMax={usesNumeric ? undefined : 100}
+          yFormat={yFormat}
+          emptyLabel="no readings in this window"
+        />
+      </div>
+    </div>
+  )
+}
+
+function ResourceTile({
+  r,
+  active,
+  onClick,
+}: {
+  r: DeviceResource
+  active: boolean
+  onClick: () => void
+}) {
+  const tone = resourceTone(r)
+  const ageS = secondsSince(r.latest_ts)
+  const headline = resourceHeadline(r)
+  const context = resourceContext(r)
+  // Sparkline reads value_percent for utilization kinds and
+  // value_numeric for sensor kinds; the Sparkline component does its
+  // own auto-range when not anchored to 0–100, so a temperature
+  // sparkline scales nicely between, say, 28 and 47 °C.
+  const usesNumeric = !isUtilizationKind(r.kind)
+  const points = r.points.map((p) =>
+    usesNumeric ? p.value_numeric : p.value_percent,
+  )
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      title="Expand chart"
+      className={`text-left border bg-ink px-3 py-2.5 min-w-0 hover:border-accent ${
+        active ? 'border-accent' : 'border-line'
+      }`}
+    >
       <div
         className="font-mono text-[11px] text-dim truncate"
         title={`${r.component} · via ${r.source}`}
@@ -691,18 +883,17 @@ function ResourceTile({ r }: { r: DeviceResource }) {
       </div>
       <div className="flex items-baseline gap-2 mt-1">
         <span className={`font-mono text-[20px] tabular leading-none ${tone.text}`}>
-          {pct.toFixed(0)}
-          <span className="text-[12px] text-faint">%</span>
+          {headline.value}
+          {headline.unit && (
+            <span className="text-[12px] text-faint">{headline.unit}</span>
+          )}
         </span>
         <span className="ml-auto font-mono text-[10.5px] text-faint tabular truncate">
-          {byteContext(r)}
+          {context}
         </span>
       </div>
       <div className="mt-1.5">
-        <Sparkline
-          points={r.points.map((p) => p.value_percent)}
-          stroke={tone.stroke}
-        />
+        <Sparkline points={points} stroke={tone.stroke} fixedRange={!usesNumeric} />
       </div>
       <div className="font-mono text-[10px] text-faint mt-1">
         {ageS < 60
@@ -711,39 +902,88 @@ function ResourceTile({ r }: { r: DeviceResource }) {
             ? `polled ${(ageS / 60).toFixed(0)}m ago`
             : `polled ${(ageS / 3600).toFixed(0)}h ago`}
       </div>
-    </div>
+    </button>
   )
 }
 
-// utilizationTone picks the colour for the headline percent + the
-// sparkline stroke. Thresholds match the Overview tab's "warn at 60,
-// crit at 80" convention — uses CSS classes that already exist in the
-// design system so theme switching keeps working.
-function utilizationTone(pct: number): { text: string; stroke: string } {
-  if (pct >= 80) return { text: 'text-crit', stroke: 'var(--color-crit, #d97757)' }
-  if (pct >= 60) return { text: 'text-warn', stroke: 'var(--color-warn, #d4a72c)' }
-  return { text: 'text-text', stroke: 'var(--color-accent, #8aa8c8)' }
+function isUtilizationKind(k: DeviceResourceKind): boolean {
+  return k === 'cpu' || k === 'memory' || k === 'storage'
 }
 
-// byteContext composes the small secondary string under the headline
-// percent. Empty for CPU (percent already tells the story); "X of Y"
-// for memory/storage when max_bytes is known.
-function byteContext(r: DeviceResource): string {
-  if (r.kind === 'cpu') return ''
-  if (r.max_bytes > 0) {
-    return `${fmt.bytes(r.latest_bytes)} / ${fmt.bytes(r.max_bytes)}`
+// resourceHeadline picks the right value + unit string for the tile
+// headline. PSU rows from CISCO-ENTITY-FRU-CONTROL get a special
+// ON/FAULT readout because the raw enum (1–12) isn't operator-useful.
+function resourceHeadline(r: DeviceResource): { value: string; unit: string } {
+  if (r.kind === 'power' && r.unit === 'state') {
+    return { value: r.latest_numeric === 2 ? 'ON' : 'FAULT', unit: '' }
   }
-  if (r.latest_bytes > 0) {
-    return fmt.bytes(r.latest_bytes)
+  if (isUtilizationKind(r.kind)) {
+    return { value: r.latest_percent.toFixed(0), unit: '%' }
+  }
+  // Sensor kinds — temperature, fan, voltage, current, power (watts).
+  const v = r.latest_numeric
+  const decimals = r.kind === 'fan' ? 0 : v >= 100 ? 0 : 1
+  return { value: v.toFixed(decimals), unit: r.unit ? ` ${r.unit}` : '' }
+}
+
+// resourceContext composes the small secondary string at the right
+// of the headline. Memory/storage get "X / Y"; PSU rows surface the
+// raw operState enum so an operator sees `state 8` next to FAULT.
+function resourceContext(r: DeviceResource): string {
+  if (isUtilizationKind(r.kind)) {
+    if (r.kind === 'cpu') return ''
+    if (r.max_bytes > 0) {
+      return `${fmt.bytes(r.latest_bytes)} / ${fmt.bytes(r.max_bytes)}`
+    }
+    if (r.latest_bytes > 0) return fmt.bytes(r.latest_bytes)
+    return ''
+  }
+  if (r.kind === 'power' && r.unit === 'state') {
+    return `state ${r.latest_numeric.toFixed(0)}`
   }
   return ''
 }
 
-// Sparkline draws a 0–100 polyline in an inline SVG so we don't need
-// to pull a chart library in for a 20-pixel-tall trend. Y axis is
-// fixed at [0, 100] so adjacent tiles read on the same scale. Last
-// point gets a small dot so the eye lands on "now".
-function Sparkline({ points, stroke }: { points: number[]; stroke: string }) {
+// resourceTone picks tile foreground + sparkline stroke. Utilization
+// kinds use the same 60/80 warn/crit thresholds as before;
+// temperature lights up at warm/hot temps; PSU faults go straight to
+// crit; fan / voltage / current stay neutral (the operator's threshold
+// is too vendor-specific to bake in here).
+function resourceTone(r: DeviceResource): { text: string; stroke: string } {
+  const dim = { text: 'text-text', stroke: 'var(--color-accent, #8aa8c8)' }
+  const warn = { text: 'text-warn', stroke: 'var(--color-warn, #d4a72c)' }
+  const crit = { text: 'text-crit', stroke: 'var(--color-crit, #d97757)' }
+  if (isUtilizationKind(r.kind)) {
+    if (r.latest_percent >= 80) return crit
+    if (r.latest_percent >= 60) return warn
+    return dim
+  }
+  if (r.kind === 'temperature') {
+    if (r.latest_numeric >= 75) return crit
+    if (r.latest_numeric >= 60) return warn
+    return dim
+  }
+  if (r.kind === 'power' && r.unit === 'state') {
+    return r.latest_numeric === 2 ? dim : crit
+  }
+  return dim
+}
+
+// Sparkline draws a polyline of values in inline SVG. When
+// `fixedRange` is true the Y axis is clamped to [0, 100] (utilization
+// metrics) so tiles read on a common scale; when false the axis
+// auto-ranges with a small headroom (sensor metrics like 28–47 °C)
+// so subtle variation is still visible. Last point gets a small dot
+// so the eye lands on "now".
+function Sparkline({
+  points,
+  stroke,
+  fixedRange,
+}: {
+  points: number[]
+  stroke: string
+  fixedRange?: boolean
+}) {
   const w = 100
   const h = 22
   if (points.length === 0) {
@@ -753,8 +993,27 @@ function Sparkline({ points, stroke }: { points: number[]; stroke: string }) {
       </svg>
     )
   }
+  let lo = 0
+  let hi = 100
+  if (!fixedRange) {
+    lo = Math.min(...points)
+    hi = Math.max(...points)
+    if (hi === lo) {
+      // Constant series — synthesize a band so the line doesn't sit
+      // exactly on the bottom edge and disappear.
+      hi = lo + 1
+    } else {
+      const pad = (hi - lo) * 0.1
+      lo -= pad
+      hi += pad
+    }
+  }
+  const project = (v: number) => {
+    const t = (v - lo) / (hi - lo)
+    return h - Math.max(0, Math.min(1, t)) * (h - 2) - 1
+  }
   if (points.length === 1) {
-    const y = h - (Math.max(0, Math.min(100, points[0])) / 100) * (h - 2) - 1
+    const y = project(points[0])
     return (
       <svg viewBox={`0 0 ${w} ${h}`} className="w-full h-[22px]" preserveAspectRatio="none">
         <line x1={0} y1={y} x2={w} y2={y} stroke={stroke} strokeWidth={1} />
@@ -766,12 +1025,11 @@ function Sparkline({ points, stroke }: { points: number[]; stroke: string }) {
   const path = points
     .map((p, i) => {
       const x = i * stepX
-      const y = h - (Math.max(0, Math.min(100, p)) / 100) * (h - 2) - 1
+      const y = project(p)
       return `${i === 0 ? 'M' : 'L'} ${x.toFixed(2)} ${y.toFixed(2)}`
     })
     .join(' ')
-  const last = points[points.length - 1]
-  const lastY = h - (Math.max(0, Math.min(100, last)) / 100) * (h - 2) - 1
+  const lastY = project(points[points.length - 1])
   return (
     <svg viewBox={`0 0 ${w} ${h}`} className="w-full h-[22px]" preserveAspectRatio="none">
       <path d={path} fill="none" stroke={stroke} strokeWidth={1} />

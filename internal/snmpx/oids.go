@@ -5,8 +5,10 @@
 //
 // VISION.md §3.1 — SNMP is reserved for fallback enrichment and
 // triggered walks. The scheduler in this package walks each bound
-// device on a configurable cadence (default 15 min). It does not
-// fleet-poll every five minutes.
+// device on a configurable cadence (default 60s, per-credential
+// override via interval_sec). It does not fleet-poll every five
+// minutes; bounded concurrency + per-device in-flight dedup keeps a
+// slow target from stacking work on the pool.
 package snmpx
 
 // Standard SNMP OIDs we read. All scalar OIDs end in `.0` and are
@@ -82,8 +84,31 @@ const (
 	OIDCiscoMemoryPoolFree = "1.3.6.1.4.1.9.9.48.1.1.1.6"
 
 	// ENTITY-MIB — used to resolve the cpmCPUTotalPhysicalIndex to a
-	// human-readable component name.
-	OIDEntPhysicalName = "1.3.6.1.2.1.47.1.1.1.1.7"
+	// human-readable component name. Also drives the PSU walk below
+	// when entPhysicalClass = 6 (powerSupply).
+	OIDEntPhysicalName        = "1.3.6.1.2.1.47.1.1.1.1.7"
+	OIDEntPhysicalClass       = "1.3.6.1.2.1.47.1.1.1.1.5"
+	OIDEntPhysicalDescr       = "1.3.6.1.2.1.47.1.1.1.1.2"
+
+	// ENTITY-SENSOR-MIB (RFC 3433) — standardised per-sensor readings
+	// for temperature, fan speed, voltage, current, watts on most
+	// vendors. Sensors are indexed by entPhysicalIndex (same table as
+	// entPhysicalName), so the same physIndex → human-name map covers
+	// labels for sensors and for CPU rows.
+	OIDEntPhySensorType         = "1.3.6.1.2.1.99.1.1.1.1" // enum: 8=celsius, 9=truthvalue, 10=rpm, 4=volts, 5=amps, 6=watts, ...
+	OIDEntPhySensorScale        = "1.3.6.1.2.1.99.1.1.1.2" // enum: 9=units, 8=milli, 7=micro, ...
+	OIDEntPhySensorPrecision    = "1.3.6.1.2.1.99.1.1.1.3" // integer: digits after the implied decimal
+	OIDEntPhySensorValue        = "1.3.6.1.2.1.99.1.1.1.4" // INT32 raw reading
+	OIDEntPhySensorOperStatus   = "1.3.6.1.2.1.99.1.1.1.5" // enum: 1=ok, 2=unavailable, 3=nonoperational
+	OIDEntPhySensorUnitsDisplay = "1.3.6.1.2.1.99.1.1.1.6" // operator-readable unit string when present
+
+	// CISCO-ENTITY-FRU-CONTROL-MIB — per-PSU operational status.
+	// cefcFRUPowerOperStatus values: 1=offEnvOther, 2=on, 3=offAdmin,
+	// 4=offDenied, 5=offEnvPower, 6=offEnvTemp, 7=offEnvFan, 8=failed,
+	// 9=onButFanFail, 10=offCooling, 11=offConnectorRating, 12=onButInlinePowerFail.
+	// Indexed by entPhysicalIndex, so the entPhysicalName map labels
+	// the row.
+	OIDCefcFRUPowerOperStatus = "1.3.6.1.4.1.9.9.117.1.1.2.1.2"
 )
 
 // ifAdminStatusName / ifOperStatusName render IF-MIB integer codes
