@@ -13,6 +13,7 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/go-chi/chi/v5"
 
+	"github.com/dlambert-xbp/flowscope/internal/notifier"
 	"github.com/dlambert-xbp/flowscope/internal/rdns"
 	"github.com/dlambert-xbp/flowscope/internal/snmpx"
 	"github.com/dlambert-xbp/flowscope/internal/store"
@@ -23,10 +24,14 @@ import (
 // admin endpoints; when nil those endpoints return 503. settings
 // carries the broader Settings/Services collaborators added in the
 // 000005 settings slice — store, audit writer, audit reader, and
-// the in-process service-name resolver.
+// the in-process service-name resolver. crypter and testDispatcher
+// are wired only when FLOWSCOPE_SNMP_KEY is set; the webhook test
+// endpoint returns 503 otherwise.
 type handlers struct {
 	conn             driver.Conn
 	creds            snmpx.CredentialStore
+	crypter          *snmpx.Crypter
+	testDispatcher   *notifier.Dispatcher
 	settings         settingsDeps
 	ingestHealthURL  string
 	ingestHealthHTTP *http.Client

@@ -16,6 +16,7 @@ import (
 	"github.com/dlambert-xbp/flowscope/internal/alerteng"
 	"github.com/dlambert-xbp/flowscope/internal/audit"
 	"github.com/dlambert-xbp/flowscope/internal/authz"
+	"github.com/dlambert-xbp/flowscope/internal/notifier"
 	"github.com/dlambert-xbp/flowscope/internal/services"
 	"github.com/dlambert-xbp/flowscope/internal/settings"
 )
@@ -688,6 +689,101 @@ func (h *handlers) deleteWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 	h.recordAudit(r, audit.ActionDelete, audit.ResourceWebhook, id, before, nil)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": id})
+}
+
+// testWebhook fires a synthetic alert through the dispatcher path so
+// the operator can verify a freshly-configured endpoint before
+// enabling it for real alerts. Requires h.testDispatcher (Dispatcher)
+// to have been wired in cmd/api/main.go; returns 503 otherwise so
+// the UI can render a clear "test feature unavailable" instead of
+// failing opaquely.
+//
+//	POST /api/settings/integrations/webhooks/{id}/test
+func (h *handlers) testWebhook(w http.ResponseWriter, r *http.Request) {
+	if h.settings.store == nil {
+		writeError(w, http.StatusServiceUnavailable, "settings store unavailable")
+		return
+	}
+	if h.testDispatcher == nil {
+		writeError(w, http.StatusServiceUnavailable,
+			"webhook tester unavailable (FLOWSCOPE_SNMP_KEY required to decrypt endpoint secrets)")
+		return
+	}
+	id := chi.URLParam(r, "id")
+	rec, err := h.settings.store.Webhooks.Get(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, settings.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "webhook not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// The list/get path returns has_secret but not the plaintext; we
+	// reach directly into the underlying row to pull secret_ct and
+	// decrypt it the same way the dispatcher would for production
+	// traffic. Keeping that translation here (vs. in the store)
+	// preserves the rule that secrets never leak through the public
+	// store API.
+	secret, err := h.resolveWebhookSecret(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "decrypt secret: "+err.Error())
+		return
+	}
+
+	ep := notifier.Endpoint{
+		ID:             rec.ID.String(),
+		Name:           rec.Name,
+		Kind:           rec.Kind,
+		URL:            rec.URL,
+		Secret:         secret,
+		Headers:        rec.HeaderTemplate,
+		SeverityFilter: rec.SeverityFilter,
+	}
+	res, dispErr := h.testDispatcher.SendTest(r.Context(), ep)
+
+	// Audit the test attempt so an operator can later trace "who
+	// pinged this endpoint when".
+	h.recordAudit(r, audit.ActionUpdate, audit.ResourceWebhook, id, nil, map[string]any{
+		"action":      "test",
+		"http_status": res.HTTPStatus,
+		"ok":          res.OK,
+		"error":       res.Error,
+	})
+
+	status := http.StatusOK
+	if dispErr != nil {
+		status = http.StatusBadGateway
+	}
+	writeJSON(w, status, res)
+}
+
+// resolveWebhookSecret reaches into webhook_endpoints to pull and
+// decrypt the secret. Kept in cmd/api (not settings.Store) to
+// guarantee that the public store API never returns plaintext —
+// callers that need plaintext must go through this dedicated path
+// and only the test handler does.
+func (h *handlers) resolveWebhookSecret(ctx context.Context, id string) (string, error) {
+	if h.crypter == nil {
+		return "", nil
+	}
+	uid, err := uuid.Parse(id)
+	if err != nil {
+		return "", err
+	}
+	const q = `SELECT secret_ct FROM webhook_endpoints FINAL WHERE id = ?`
+	var secretCT string
+	if err := h.conn.QueryRow(ctx, q, uid).Scan(&secretCT); err != nil {
+		if err.Error() == "sql: no rows in result set" {
+			return "", nil
+		}
+		return "", err
+	}
+	if secretCT == "" {
+		return "", nil
+	}
+	return h.crypter.Decrypt(secretCT)
 }
 
 /* =============================================================================

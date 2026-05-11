@@ -142,3 +142,33 @@ var (
 		[]string{"emitter"},
 	)
 )
+
+// Webhook dispatcher metrics. Labeled by kind ('slack' | 'teams' |
+// 'pagerduty' | 'http') so the Overview panel can show which channel
+// type is silent / flapping. result is 'ok' for production sends and
+// 'test' for the /webhooks/{id}/test endpoint.
+var (
+	WebhookDispatchTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "flowscope_webhook_dispatch_total",
+			Help: "Successful webhook POSTs by kind and result.",
+		},
+		[]string{"kind", "result"},
+	)
+
+	WebhookDispatchFailuresTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "flowscope_webhook_dispatch_failures_total",
+			Help: "Webhook dispatch failures by kind and reason ('format', 'decrypt', 'client_error', 'exhausted', 'test_network', 'test_status', 'no_crypter').",
+		},
+		[]string{"kind", "reason"},
+	)
+
+	WebhookDispatchRetriesTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "flowscope_webhook_dispatch_retries_total",
+			Help: "Webhook dispatch retry attempts (every non-final failed attempt increments this).",
+		},
+		[]string{"kind"},
+	)
+)
