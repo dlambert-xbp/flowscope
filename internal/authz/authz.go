@@ -57,10 +57,23 @@ type Config struct {
 	Tokens      settings.APITokensStore
 }
 
+// RequireRead returns middleware that gates a handler behind any valid
+// token — read, write, or admin scope all pass. It is the right wrap
+// for /api/* GET endpoints (and the alert ack/close POSTs, which the
+// product treats as read-tier mutations because they don't change
+// auth or configuration state). The unauth-bypass behaviour is
+// identical to RequireWrite / RequireAdmin: when neither SharedToken
+// nor Tokens is configured the middleware lets requests through and
+// stamps Subject.Source = "unauth-bypass" so audit rows make the gap
+// visible. Phase 2 makes the gate strict for every scope.
+func (c Config) RequireRead() func(http.Handler) http.Handler {
+	return c.requireScope("read")
+}
+
 // RequireWrite returns middleware that allows the request through
 // when at least one credential matches a write-or-admin grant. It is
 // suitable for PUT / POST / DELETE on /api/settings/*. GET handlers
-// should not wrap with this.
+// should wrap with RequireRead, not this.
 func (c Config) RequireWrite() func(http.Handler) http.Handler {
 	return c.requireScope("write")
 }

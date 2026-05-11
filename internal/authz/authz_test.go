@@ -181,3 +181,75 @@ func TestMissingTokenRejectedWhenAuthConfigured(t *testing.T) {
 		t.Errorf("status = %d, want 401", w.Code)
 	}
 }
+
+// readReq builds a GET request the way a /api/* read handler would
+// see it. The read-route tests below mirror the write-route tests but
+// against RequireRead.
+func readReq(token string) *http.Request {
+	r := httptest.NewRequest(http.MethodGet, "/api/summary", nil)
+	if token != "" {
+		r.Header.Set("X-Auth-Token", token)
+	}
+	return r
+}
+
+func TestRequireReadNoAuthFallsThrough(t *testing.T) {
+	cfg := Config{}
+	mw := cfg.RequireRead()(okHandler(t, "unauth-bypass"))
+	w := httptest.NewRecorder()
+	mw.ServeHTTP(w, readReq(""))
+	if w.Code != http.StatusNoContent {
+		t.Errorf("status = %d, want 204", w.Code)
+	}
+}
+
+func TestRequireReadSharedTokenAccepts(t *testing.T) {
+	cfg := Config{SharedToken: "shared-secret"}
+	mw := cfg.RequireRead()(okHandler(t, "shared"))
+	w := httptest.NewRecorder()
+	mw.ServeHTTP(w, readReq("shared-secret"))
+	if w.Code != http.StatusNoContent {
+		t.Errorf("status = %d, want 204", w.Code)
+	}
+}
+
+func TestRequireReadMissingTokenRejects401(t *testing.T) {
+	cfg := Config{SharedToken: "shared-secret"}
+	mw := cfg.RequireRead()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("handler should not be called")
+	}))
+	w := httptest.NewRecorder()
+	mw.ServeHTTP(w, readReq(""))
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", w.Code)
+	}
+}
+
+func TestRequireReadWrongTokenRejects401(t *testing.T) {
+	cfg := Config{SharedToken: "shared-secret"}
+	mw := cfg.RequireRead()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("handler should not be called")
+	}))
+	w := httptest.NewRecorder()
+	mw.ServeHTTP(w, readReq("nope"))
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", w.Code)
+	}
+}
+
+// All three scopes (read / write / admin) must satisfy a read route —
+// the scope ladder is admin > write > read.
+func TestRequireReadAcceptsAllScopes(t *testing.T) {
+	for _, scope := range []string{"read", "write", "admin"} {
+		t.Run(scope, func(t *testing.T) {
+			tk := &fakeTokens{plain: "fls_" + scope, scope: scope, id: uuid.New()}
+			cfg := Config{Tokens: tk}
+			mw := cfg.RequireRead()(okHandler(t, "token"))
+			w := httptest.NewRecorder()
+			mw.ServeHTTP(w, readReq("fls_"+scope))
+			if w.Code != http.StatusNoContent {
+				t.Errorf("scope=%s: status = %d, want 204", scope, w.Code)
+			}
+		})
+	}
+}

@@ -131,34 +131,64 @@ func run() error {
 		},
 		rdns: rdns.New(rdns.Options{}),
 	}
+	// /healthz is the k8s liveness probe — never gated. Same for the
+	// static dashboard mount and the /metrics scrape endpoint below.
 	r.Get("/healthz", h.health)
-	r.Get("/api/summary", h.summary)
-	r.Get("/api/health/streams", h.healthStreams)
-	r.Get("/api/health/storage", h.healthStorage)
-	r.Get("/api/health/exporters", h.healthExporters)
-	r.Get("/api/health/ingest", h.healthIngest)
-	r.Get("/api/dns/lookup", h.dnsLookup)
-	r.Get("/api/flows/recent", h.recentFlows)
-	r.Get("/api/flows/list", h.flowsList)
-	r.Get("/api/flows/timeseries", h.flowsTimeseries)
-	r.Get("/api/flows/flags-timeseries", h.flowsFlagsTimeseries)
-	r.Get("/api/devices", h.devices)
-	r.Get("/api/devices/{exporter}", h.device)
-	r.Get("/api/devices/{exporter}/inventory", h.deviceInventory)
-	r.Get("/api/interfaces", h.interfaces)
-	r.Get("/api/interfaces/{exporter}/{ifindex}/timeseries", h.interfaceTimeseries)
-	r.Get("/api/top/talkers", h.topTalkers)
-	r.Get("/api/top/services", h.topServices)
-	r.Get("/api/top/protocols", h.topProtocols)
-	r.Get("/api/top/conversations", h.topConversations)
-	r.Get("/api/top/asn", h.topASN)
-	r.Get("/api/alerts", h.alerts)
-	r.Get("/api/alerts/summary", h.alertSummary)
-	r.Get("/api/alerts/{id}", h.alertDetail)
-	r.Post("/api/alerts/{id}/ack", h.ackAlert)
-	r.Post("/api/alerts/{id}/close", h.closeAlert)
-	r.Get("/api/snmp/credentials", h.listCredentials)
-	r.Get("/api/snmp/credentials/{exporter}", h.getCredential)
+
+	// /api/config/effective is the unauthenticated bootstrap call the
+	// SPA makes before it has a chance to attach the X-Auth-Token
+	// header (the token is loaded from localStorage on first render).
+	// It returns brand / theme defaults only, no flow data.
+	r.Get("/api/config/effective", h.effectiveConfig)
+
+	// Phase 1 read gate. Every GET that exposes flow / topology /
+	// alert / SNMP-derived data — plus the /api/health/* operator
+	// views and /api/dns/lookup, which surface flow-derived counters
+	// and reverse-DNS for in-flight addresses — is wrapped in
+	// RequireRead so the X-Auth-Token check is enforced when a
+	// SharedToken (or a per-token store) is configured. When neither
+	// is configured the middleware lets the request through and
+	// stamps subject "unauth-bypass" for audit visibility — same
+	// behaviour as the write group below.
+	r.Group(func(r chi.Router) {
+		r.Use(authCfg.RequireRead())
+		r.Get("/api/summary", h.summary)
+		r.Get("/api/health/streams", h.healthStreams)
+		r.Get("/api/health/storage", h.healthStorage)
+		r.Get("/api/health/exporters", h.healthExporters)
+		r.Get("/api/health/ingest", h.healthIngest)
+		r.Get("/api/dns/lookup", h.dnsLookup)
+		r.Get("/api/flows/recent", h.recentFlows)
+		r.Get("/api/flows/list", h.flowsList)
+		r.Get("/api/flows/timeseries", h.flowsTimeseries)
+		r.Get("/api/flows/flags-timeseries", h.flowsFlagsTimeseries)
+		r.Get("/api/devices", h.devices)
+		r.Get("/api/devices/{exporter}", h.device)
+		r.Get("/api/devices/{exporter}/inventory", h.deviceInventory)
+		r.Get("/api/interfaces", h.interfaces)
+		r.Get("/api/interfaces/{exporter}/{ifindex}/timeseries", h.interfaceTimeseries)
+		r.Get("/api/top/talkers", h.topTalkers)
+		r.Get("/api/top/services", h.topServices)
+		r.Get("/api/top/protocols", h.topProtocols)
+		r.Get("/api/top/conversations", h.topConversations)
+		r.Get("/api/top/asn", h.topASN)
+		r.Get("/api/alerts", h.alerts)
+		r.Get("/api/alerts/summary", h.alertSummary)
+		r.Get("/api/alerts/{id}", h.alertDetail)
+		// Alert ack/close are POSTs but treated as read-tier
+		// mutations — they flip alert state for the operator
+		// viewing the dashboard, they don't change auth or
+		// configuration. A read-scoped token is enough; a write-
+		// or admin-scoped token also works (admin > write > read).
+		r.Post("/api/alerts/{id}/ack", h.ackAlert)
+		r.Post("/api/alerts/{id}/close", h.closeAlert)
+		r.Get("/api/snmp/credentials", h.listCredentials)
+		r.Get("/api/snmp/credentials/{exporter}", h.getCredential)
+		r.Get("/api/services/lookup", h.servicesLookup)
+		r.Get("/api/services/library", h.servicesLibrary)
+		r.Get("/api/services/custom", h.listCustomServices)
+	})
+
 	r.Group(func(r chi.Router) {
 		r.Use(authCfg.RequireWrite())
 		r.Put("/api/snmp/credentials/{exporter}", h.putCredential)
@@ -167,13 +197,11 @@ func run() error {
 		r.Post("/api/devices/{exporter}/snmp/walk", h.requestSnmpWalk)
 	})
 
-	// Settings & Services. Reads are open (proxy-trust, Phase 1);
-	// writes go through the X-Auth-Token middleware. Token CRUD is
-	// admin-only because creating a token grants new auth state.
-	r.Get("/api/config/effective", h.effectiveConfig)
-	r.Get("/api/services/lookup", h.servicesLookup)
-	r.Get("/api/services/library", h.servicesLibrary)
-	r.Get("/api/services/custom", h.listCustomServices)
+	// Settings reads stay on the proxy-trust path for now — the
+	// Settings UI is operator-only and the writes (below) already
+	// require X-Auth-Token. Folding settings GETs under RequireRead
+	// is a follow-up so this PR stays scoped to flow / alert / topo
+	// reads.
 	r.Get("/api/settings/general", h.listGeneralSettings)
 	r.Get("/api/settings/exporters/allowlist", h.listAllowlist)
 	r.Get("/api/settings/tokens", h.listTokens)
