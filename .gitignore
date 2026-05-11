@@ -21,3 +21,9 @@ bin/
 
 # Claude Code agent worktrees (transient, recreated per agent run)
 .claude/worktrees/
+
+# Local docker-compose secrets. Only the *.example template is checked
+# in; the real ./secrets/snmp_master file is created by the operator
+# (see secrets/snmp_master.example for instructions) and never committed.
+/secrets/*
+!/secrets/*.example

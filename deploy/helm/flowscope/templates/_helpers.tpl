@@ -72,3 +72,62 @@ both block on migrations + retention TTL before serving traffic.
   resources:
     {{- toYaml .Values.init.resources | nindent 4 }}
 {{- end }}
+
+{{/*
+serviceAccountName picks the SA the consumer pods use. When
+secrets.backend=kv we always need a dedicated SA (the federated token
+projection is annotated on it). Otherwise we honour the explicit
+serviceAccount.create / serviceAccount.name knob, and fall back to
+the cluster default.
+*/}}
+{{- define "flowscope.serviceAccountName" -}}
+{{- if or (eq .Values.secrets.backend "kv") .Values.serviceAccount.create -}}
+{{ default (printf "%s-%s" (include "flowscope.fullname" .) "snmp-consumer") .Values.serviceAccount.name }}
+{{- else -}}
+default
+{{- end -}}
+{{- end }}
+
+{{/*
+Env entries for FLOWSCOPE_SNMP_KEY_REF on consumer pods (snmp, alert,
+api). The ref string is identical across backends; only the
+underlying delivery mechanism differs. For backend=env we also wire
+the legacy FLOWSCOPE_SNMP_KEY var from a Secret so the env: ref has
+something to point at.
+*/}}
+{{- define "flowscope.snmpKeyEnv" -}}
+- name: FLOWSCOPE_SNMP_KEY_REF
+  value: {{ .Values.secrets.snmpMasterRef | quote }}
+{{- if eq .Values.secrets.backend "env" }}
+- name: FLOWSCOPE_SNMP_KEY
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.secrets.env.secretName | quote }}
+      key: {{ .Values.secrets.env.secretKey | quote }}
+{{- end }}
+{{- end }}
+
+{{/*
+Optional volume + mount for backend=file. The Secret is projected
+read-only into the consumer pod at .secrets.file.path. The Deployment
+points FLOWSCOPE_SNMP_KEY_REF at the same path.
+*/}}
+{{- define "flowscope.snmpKeyVolume" -}}
+{{- if eq .Values.secrets.backend "file" }}
+- name: snmp-master
+  secret:
+    secretName: {{ .Values.secrets.file.secretName | quote }}
+    items:
+      - key: {{ .Values.secrets.file.secretKey | quote }}
+        path: snmp_master
+    defaultMode: 0400
+{{- end }}
+{{- end }}
+
+{{- define "flowscope.snmpKeyVolumeMount" -}}
+{{- if eq .Values.secrets.backend "file" }}
+- name: snmp-master
+  mountPath: {{ dir .Values.secrets.file.path | quote }}
+  readOnly: true
+{{- end }}
+{{- end }}

@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/dlambert-xbp/flowscope/internal/obs"
+	"github.com/dlambert-xbp/flowscope/internal/secrets"
 	"github.com/dlambert-xbp/flowscope/internal/snmpx"
 	"github.com/dlambert-xbp/flowscope/internal/store"
 )
@@ -77,7 +78,19 @@ func run() error {
 		}
 	}()
 
-	masterKey := os.Getenv("FLOWSCOPE_SNMP_KEY")
+	// Resolve the SNMP master key through internal/secrets. Source
+	// precedence (see internal/secrets.ResolveSNMPMaster):
+	//   1. FLOWSCOPE_SNMP_KEY_REF  → env: / file: / kv: dispatch
+	//   2. FLOWSCOPE_SNMP_KEY      → legacy plaintext, logs a
+	//                                deprecation warning
+	// A botched _REF is fatal (no silent fallback) — corrupting the
+	// at-rest credential store by loading a different key than the
+	// operator intended is exactly the failure mode CLAUDE.md's
+	// master-key invariant exists to prevent.
+	masterKey, err := secrets.ResolveSNMPMaster(ctx)
+	if err != nil {
+		return fmt.Errorf("snmp master key: %w", err)
+	}
 	var creds snmpx.CredentialStore
 	if masterKey != "" {
 		crypter, err := snmpx.NewCrypter(masterKey)
@@ -85,9 +98,11 @@ func run() error {
 			return fmt.Errorf("snmp crypter: %w", err)
 		}
 		creds = snmpx.NewClickHouseCredentialStore(conn, crypter)
-		slog.Info("snmp: per-exporter credential store enabled")
+		slog.Info("snmp: per-exporter credential store enabled",
+			"master_fp", secrets.Fingerprint(masterKey),
+		)
 	} else {
-		slog.Warn("FLOWSCOPE_SNMP_KEY not set — per-exporter credentials disabled, falling back to env-var community / mock")
+		slog.Warn("FLOWSCOPE_SNMP_KEY_REF / FLOWSCOPE_SNMP_KEY not set — per-exporter credentials disabled, falling back to env-var community / mock")
 	}
 
 	var fallback snmpx.Client
