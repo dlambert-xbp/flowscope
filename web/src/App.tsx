@@ -233,12 +233,93 @@ function Bar({ tab, onTab }: { tab: Tab; onTab: (t: Tab) => void }) {
       <div className="flex items-center justify-end gap-3 px-4 h-full border-l border-line">
         <ThemeToggle />
         <a className="text-faint text-[11px] hover:text-text" href="/metrics">/metrics</a>
-        <span className="flex items-center gap-2 px-2 py-1 border border-line text-[12px]">
-          <span className="font-medium">DL</span>
-          <span className="text-dim">·</span>
-          <span className="text-dim font-normal">exelao</span>
-        </span>
+        <UserChip />
       </div>
+    </div>
+  )
+}
+
+/* ----------------------------- User chip ----------------------------- */
+
+// UserChip fetches /auth/me on app boot. When an OIDC session exists
+// it renders the operator's initials + email; otherwise it falls back
+// to the unauthenticated marker. Clicking the chip when signed-in
+// opens a small logout menu; when signed-out it doesn't render the
+// menu at all (the Settings page is where you wire OIDC and click
+// "Sign in with SSO").
+function UserChip() {
+  const me = useQuery({
+    queryKey: ['auth-me'],
+    queryFn: () => api.authMe(),
+    // The /auth/me endpoint is cheap and stateless; refetching on
+    // window focus keeps the chip honest if the operator just logged
+    // out in another tab.
+    refetchOnWindowFocus: true,
+    staleTime: 30_000,
+  })
+  const [open, setOpen] = useState(false)
+  if (me.isLoading) {
+    return (
+      <span className="flex items-center gap-2 px-2 py-1 border border-line text-[12px] text-faint">
+        …
+      </span>
+    )
+  }
+  if (!me.data) {
+    return (
+      <span className="flex items-center gap-2 px-2 py-1 border border-line text-[12px] text-dim">
+        <span className="font-normal">signed out</span>
+      </span>
+    )
+  }
+  const email = me.data.email || me.data.subject
+  const initials = email
+    .split(/[.@]/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((s) => s[0]?.toUpperCase())
+    .join('') || '·'
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex items-center gap-2 px-2 py-1 border border-line text-[12px] hover:bg-surface"
+        aria-expanded={open}
+      >
+        <span className="font-medium">{initials}</span>
+        <span className="text-dim">·</span>
+        <span className="text-dim font-normal truncate max-w-[16ch]" title={email}>{email}</span>
+      </button>
+      {open && (
+        <div className="absolute right-0 mt-1 w-56 border border-line bg-surface z-10">
+          <div className="px-3 py-2 border-b border-line/60 text-[11px] text-faint font-mono">
+            scope · {me.data.scope}
+          </div>
+          <button
+            type="button"
+            // Render-on-state-change rule: close the menu first, then
+            // perform the async work. Otherwise the menu lingers
+            // while the logout request flies and the dashboard feels
+            // unresponsive.
+            onClick={async () => {
+              setOpen(false)
+              try {
+                await api.authLogout()
+              } catch {
+                /* clearing the cookie is best-effort */
+              }
+              // Reload so every cached query refetches without a stale
+              // session in flight. The brand bar re-resolves /auth/me
+              // and switches back to "signed out".
+              window.location.assign('/')
+            }}
+            className="block w-full text-left px-3 py-2 text-[12px] hover:bg-raise"
+          >
+            sign out
+          </button>
+        </div>
+      )}
     </div>
   )
 }

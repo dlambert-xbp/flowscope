@@ -146,6 +146,35 @@ func Fingerprint(plaintext string) string {
 	return hex.EncodeToString(h[:8])
 }
 
+// ResolveSessionKey is the convenience entry point for cmd/api's
+// Phase 2 OIDC login flow. It mirrors ResolveSNMPMaster: prefers
+// FLOWSCOPE_SESSION_KEY_REF (any backend), falls back to plaintext
+// FLOWSCOPE_SESSION_KEY with a deprecation warning, returns ("", nil)
+// when neither is set (api then disables the /auth/* endpoints and
+// runs with the legacy shared/per-token paths only).
+//
+// Distinct from FLOWSCOPE_SNMP_KEY by design: rotating the session
+// key invalidates outstanding signed cookies (operators sign back in)
+// but does NOT corrupt the SNMP credential store. The two roots
+// independent so an operator can rotate one without disturbing the
+// other.
+func ResolveSessionKey(ctx context.Context) (string, error) {
+	if ref := os.Getenv("FLOWSCOPE_SESSION_KEY_REF"); ref != "" {
+		v, err := Resolve(ctx, ref)
+		if err != nil {
+			return "", fmt.Errorf("FLOWSCOPE_SESSION_KEY_REF resolve: %w", err)
+		}
+		return v, nil
+	}
+	if v := os.Getenv("FLOWSCOPE_SESSION_KEY"); v != "" {
+		slog.Warn("FLOWSCOPE_SESSION_KEY is set as plaintext; prefer FLOWSCOPE_SESSION_KEY_REF=env:FLOWSCOPE_SESSION_KEY (or file:/path, kv:https://...) in production",
+			"fp", Fingerprint(v),
+		)
+		return v, nil
+	}
+	return "", nil
+}
+
 // ResolveSNMPMaster is the convenience entry point for cmd/snmp,
 // cmd/alert and cmd/api. It implements the documented fallback order:
 //

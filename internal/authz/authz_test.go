@@ -253,6 +253,79 @@ func TestRequireReadWrongTokenRejects401(t *testing.T) {
 	}
 }
 
+/* ----------------------------- SessionSource ----------------------------- */
+
+// fakeSession is a tiny SessionSource for middleware tests. It returns
+// what the test sets up (subject + err) regardless of request shape.
+type fakeSession struct {
+	sub Subject
+	err error
+}
+
+func (f *fakeSession) Verify(_ *http.Request) (Subject, error) {
+	return f.sub, f.err
+}
+
+func TestSessionAcceptedAndPreemptsToken(t *testing.T) {
+	// Configure all three; the session path must win.
+	sess := &fakeSession{sub: Subject{Source: "session", Actor: "alice@example.com", Scope: "admin", Email: "alice@example.com"}}
+	tk := &fakeTokens{plain: "fls_real", scope: "write", id: uuid.New()}
+	cfg := Config{SharedToken: "shared", Tokens: tk, Sessions: sess}
+	mw := cfg.RequireWrite()(okHandler(t, "session"))
+	w := httptest.NewRecorder()
+	// No token attached — session source still wins because it's
+	// checked first and returns a valid subject.
+	mw.ServeHTTP(w, req(""))
+	if w.Code != http.StatusNoContent {
+		t.Errorf("status = %d, want 204", w.Code)
+	}
+	if tk.used != 0 {
+		t.Errorf("token path was consulted (used=%d) but session should have won", tk.used)
+	}
+}
+
+func TestSessionExpiredReturns401WithWWWAuthenticateOIDC(t *testing.T) {
+	sess := &fakeSession{err: ErrSessionExpired}
+	cfg := Config{SharedToken: "shared", Sessions: sess}
+	mw := cfg.RequireWrite()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("handler should not be called for expired session")
+	}))
+	w := httptest.NewRecorder()
+	mw.ServeHTTP(w, req(""))
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", w.Code)
+	}
+	if !strings.Contains(w.Header().Get("WWW-Authenticate"), "oidc") {
+		t.Errorf("WWW-Authenticate = %q, want oidc", w.Header().Get("WWW-Authenticate"))
+	}
+}
+
+func TestSessionInvalidFallsThroughToSharedToken(t *testing.T) {
+	sess := &fakeSession{err: ErrSessionInvalid}
+	cfg := Config{SharedToken: "shared", Sessions: sess}
+	mw := cfg.RequireWrite()(okHandler(t, "shared"))
+	w := httptest.NewRecorder()
+	mw.ServeHTTP(w, req("shared"))
+	if w.Code != http.StatusNoContent {
+		t.Errorf("status = %d, want 204", w.Code)
+	}
+}
+
+func TestSessionInsufficientScopeReturns403(t *testing.T) {
+	sess := &fakeSession{sub: Subject{Source: "session", Actor: "bob", Scope: "read"}}
+	cfg := Config{Sessions: sess, SharedToken: "anything"}
+	mw := cfg.RequireAdmin()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("handler should not be called for read scope on admin route")
+	}))
+	w := httptest.NewRecorder()
+	mw.ServeHTTP(w, req(""))
+	if w.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", w.Code)
+	}
+}
+
+/* ----------------------------- Read group with sessions ----------------------------- */
+
 // All three scopes (read / write / admin) must satisfy a read route —
 // the scope ladder is admin > write > read.
 func TestRequireReadAcceptsAllScopes(t *testing.T) {

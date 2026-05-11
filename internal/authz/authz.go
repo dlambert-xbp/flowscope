@@ -1,5 +1,11 @@
 // Package authz provides the X-Auth-Token middleware that gates
-// settings write endpoints. Two parallel auth modes are accepted:
+// settings write endpoints. Three parallel auth modes are accepted:
+//
+//   - Session cookie (Phase 2): HMAC-SHA256 signed cookie minted by
+//     the OIDC callback handler (see cmd/api/auth.go and
+//     internal/sessionsign). Highest priority — checked first when a
+//     SessionSource is wired in Config. Expired cookies return 401
+//     with WWW-Authenticate: oidc so the UI can auto-redirect.
 //
 //   - Shared token (legacy / Phase 1): a single value sourced from
 //     FLOWSCOPE_AUTH_TOKEN, applied uniformly. Useful for bootstrap
@@ -10,9 +16,10 @@
 //     handlers receive token metadata via Subject(ctx) so the audit
 //     log can record who acted.
 //
-// Either mode counts as authenticated. When neither is configured the
-// middleware permits all requests but stamps subject="unauth-bypass"
-// so audit rows make the gap visible. Phase 2 makes the gate strict.
+// Any mode counts as authenticated. When none of the three is
+// configured the middleware permits all requests but stamps
+// subject="unauth-bypass" so audit rows make the gap visible. Phase 2
+// makes the gate strict.
 package authz
 
 import (
@@ -27,12 +34,17 @@ import (
 
 // Subject carries the authenticated identity into request handlers.
 // Source is "shared" for the legacy single-token path, "token" for
-// the per-token path, and "unauth-bypass" when no auth is configured.
+// the per-token path, "session" for the Phase 2 OIDC signed-cookie
+// path, and "unauth-bypass" when no auth is configured.
 type Subject struct {
-	Source    string
-	Actor     string
-	Scope     string
-	TokenID   string
+	Source  string
+	Actor   string
+	Scope   string
+	TokenID string
+	// Email is populated for session subjects so audit rows can
+	// record both the IdP sub claim (Actor) and the human-readable
+	// email when present. Per-token / shared paths leave it empty.
+	Email string
 }
 
 type ctxKey struct{}
@@ -50,12 +62,44 @@ func SubjectFrom(ctx context.Context) Subject {
 	return v
 }
 
+// SessionSource verifies a signed session cookie on a request. nil
+// disables session auth entirely — the legacy shared/per-token paths
+// still work. Returning ErrSessionExpired (vs. ErrSessionInvalid)
+// lets the middleware respond 401 with WWW-Authenticate: oidc so the
+// UI can auto-redirect to /auth/login.
+//
+// The interface stays in this package (not internal/oidc) so authz
+// doesn't take a dependency on the OIDC implementation — cmd/api
+// wires a small adapter that implements this interface using the
+// sessionsign.Signer.
+type SessionSource interface {
+	Verify(r *http.Request) (Subject, error)
+}
+
+// ErrSessionExpired is returned by SessionSource.Verify when the
+// cookie is well-formed and well-signed but past its expiry. The
+// middleware translates this to 401 + WWW-Authenticate: oidc.
+var ErrSessionExpired = errors.New("authz: session expired")
+
+// ErrSessionInvalid is returned by SessionSource.Verify when the
+// cookie is absent, malformed, or fails the signature check. The
+// middleware falls through to shared/per-token/bypass on this error,
+// preserving backward compatibility when OIDC is configured but a
+// given request authenticates via a different mechanism (curl with
+// X-Auth-Token, ansible scripts, etc.).
+var ErrSessionInvalid = errors.New("authz: session invalid")
+
 // Config carries the credentials the middleware checks against.
-// Either or both fields may be set; Tokens may be nil (e.g. when the
-// crypter / DB is unavailable on api boot).
+// Any field may be unset; Tokens may be nil (e.g. when the crypter /
+// DB is unavailable on api boot); Sessions may be nil (OIDC not
+// configured).
 type Config struct {
 	SharedToken string
 	Tokens      settings.APITokensStore
+	// Sessions is the optional OIDC session-cookie verifier. When set
+	// it is checked FIRST on every gated request. nil disables session
+	// auth — shared/per-token paths still work.
+	Sessions SessionSource
 }
 
 // RequireRead returns middleware that gates a handler behind any valid
@@ -64,9 +108,9 @@ type Config struct {
 // product treats as read-tier mutations because they don't change
 // auth or configuration state). The unauth-bypass behaviour is
 // identical to RequireWrite / RequireAdmin: when neither SharedToken
-// nor Tokens is configured the middleware lets requests through and
-// stamps Subject.Source = "unauth-bypass" so audit rows make the gap
-// visible. Phase 2 makes the gate strict for every scope.
+// nor Tokens nor Sessions is configured the middleware lets requests
+// through and stamps Subject.Source = "unauth-bypass" so audit rows
+// make the gap visible. Phase 2 makes the gate strict for every scope.
 func (c Config) RequireRead() func(http.Handler) http.Handler {
 	return c.requireScope("read")
 }
@@ -89,6 +133,41 @@ func (c Config) RequireAdmin() func(http.Handler) http.Handler {
 func (c Config) requireScope(min string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Session cookie first — highest priority when OIDC is
+			// configured. Three outcomes:
+			//
+			//   1. valid session → stamp Subject, proceed (after scope
+			//      check)
+			//   2. expired       → 401 + WWW-Authenticate: oidc so the
+			//      UI can auto-redirect
+			//   3. invalid/absent → fall through to the legacy paths;
+			//      lets curl users keep working with X-Auth-Token
+			//      while OIDC is the primary path for humans
+			if c.Sessions != nil {
+				sub, err := c.Sessions.Verify(r)
+				if err == nil {
+					if !scopeAtLeast(sub.Scope, min) {
+						slog.Info("session scope insufficient",
+							"subject", sub.Actor,
+							"have", sub.Scope,
+							"need", min,
+							"path", r.URL.Path,
+						)
+						http.Error(w, "session scope insufficient", http.StatusForbidden)
+						return
+					}
+					next.ServeHTTP(w, r.WithContext(WithSubject(r.Context(), sub)))
+					return
+				}
+				if errors.Is(err, ErrSessionExpired) {
+					slog.Info("session expired", "path", r.URL.Path)
+					w.Header().Set("WWW-Authenticate", `oidc realm="flowscope"`)
+					http.Error(w, "session expired", http.StatusUnauthorized)
+					return
+				}
+				// ErrSessionInvalid (and anything else) → fall through.
+			}
+
 			plain := readToken(r)
 
 			// No auth configured at all — let it through with a
