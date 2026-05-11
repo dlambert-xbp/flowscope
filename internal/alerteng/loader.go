@@ -105,6 +105,37 @@ func applyOverride(base Rule, o settings.AlertRuleSetting, hasOverride bool) Rul
 			return severityWrap{Rule: r, severity: o.Severity}
 		}
 		return r
+	case DeviceCPUHigh:
+		r.ThresholdPct = paramInt(params, "threshold_pct", r.ThresholdPct)
+		r.CriticalBumpPct = paramInt(params, "critical_bump_pct", r.CriticalBumpPct)
+		r.LookbackSeconds = paramInt(params, "lookback_seconds", r.LookbackSeconds)
+		if o.Severity != "" {
+			return severityWrap{Rule: r, severity: o.Severity}
+		}
+		return r
+	case DeviceMemoryHigh:
+		r.ThresholdPct = paramInt(params, "threshold_pct", r.ThresholdPct)
+		r.CriticalBumpPct = paramInt(params, "critical_bump_pct", r.CriticalBumpPct)
+		r.LookbackSeconds = paramInt(params, "lookback_seconds", r.LookbackSeconds)
+		if o.Severity != "" {
+			return severityWrap{Rule: r, severity: o.Severity}
+		}
+		return r
+	case DeviceStorageHigh:
+		r.ThresholdPct = paramInt(params, "threshold_pct", r.ThresholdPct)
+		r.CriticalBumpPct = paramInt(params, "critical_bump_pct", r.CriticalBumpPct)
+		r.LookbackSeconds = paramInt(params, "lookback_seconds", r.LookbackSeconds)
+		if o.Severity != "" {
+			return severityWrap{Rule: r, severity: o.Severity}
+		}
+		return r
+	case DeviceUnreachable:
+		r.StaleSeconds = paramInt(params, "stale_seconds", r.StaleSeconds)
+		r.LookbackHours = paramInt(params, "lookback_hours", r.LookbackHours)
+		if o.Severity != "" {
+			return severityWrap{Rule: r, severity: o.Severity}
+		}
+		return r
 	default:
 		if o.Severity != "" {
 			return severityWrap{Rule: base, severity: o.Severity}
@@ -184,6 +215,29 @@ func describe(r Rule) map[string]any {
 		return map[string]any{"window_seconds": x.WindowSeconds, "errors_per_min": x.ErrorsPerMin}
 	case TopTalkerBaselineAnomaly:
 		return map[string]any{"multiplier": x.Multiplier, "min_baseline_bytes": x.MinBaselineBytes}
+	case DeviceCPUHigh:
+		return map[string]any{
+			"threshold_pct":     x.ThresholdPct,
+			"critical_bump_pct": x.CriticalBumpPct,
+			"lookback_seconds":  x.LookbackSeconds,
+		}
+	case DeviceMemoryHigh:
+		return map[string]any{
+			"threshold_pct":     x.ThresholdPct,
+			"critical_bump_pct": x.CriticalBumpPct,
+			"lookback_seconds":  x.LookbackSeconds,
+		}
+	case DeviceStorageHigh:
+		return map[string]any{
+			"threshold_pct":     x.ThresholdPct,
+			"critical_bump_pct": x.CriticalBumpPct,
+			"lookback_seconds":  x.LookbackSeconds,
+		}
+	case DeviceUnreachable:
+		return map[string]any{
+			"stale_seconds":  x.StaleSeconds,
+			"lookback_hours": x.LookbackHours,
+		}
 	case severityWrap:
 		return describe(x.Rule)
 	}

@@ -591,7 +591,10 @@ func (h *handlers) putAlertRule(w http.ResponseWriter, r *http.Request) {
 
 // availableRules describes the Go-coded rules in internal/alerteng so
 // the UI can render the editor (label + parameter spec). Static for
-// v1; future rules add an entry here as they ship.
+// v1; future rules add an entry here as they ship. Keep the entries in
+// the same order as DefaultRules() so the Settings panel reads top-to-
+// bottom in the order an operator would learn about them: flow-level,
+// then interface-level (SNMP), then chassis-level (SNMP).
 func availableRules() any {
 	return []map[string]any{
 		{
@@ -614,12 +617,100 @@ func availableRules() any {
 			},
 			"default_severity": "warning",
 		},
+		{
+			"rule_id":     "interface_oper_status_change",
+			"label":       "Interface oper-status change",
+			"description": "Fires when an interface's SNMP if_oper_status transitions between successive polls.",
+			"params": []map[string]any{
+				{"name": "debounce_seconds", "kind": "int", "default": 60, "min": 10, "max": 3600},
+				{"name": "lookback_hours", "kind": "int", "default": 24, "min": 1, "max": 168},
+			},
+			"default_severity": "warning",
+		},
+		{
+			"rule_id":     "interface_utilization_high",
+			"label":       "Interface utilization high",
+			"description": "Fires when an interface's recent throughput exceeds the configured percentage of ifSpeed.",
+			"params": []map[string]any{
+				{"name": "threshold_pct", "kind": "int", "default": 80, "min": 1, "max": 100},
+				{"name": "critical_bump_pct", "kind": "int", "default": 15, "min": 0, "max": 50},
+				{"name": "window_seconds", "kind": "int", "default": 300, "min": 60, "max": 3600},
+			},
+			"default_severity": "warning",
+		},
+		{
+			"rule_id":     "interface_errors_rate",
+			"label":       "Interface errors/discards rate",
+			"description": "Fires when combined errors+discards per minute on an interface exceeds the threshold.",
+			"params": []map[string]any{
+				{"name": "window_seconds", "kind": "int", "default": 300, "min": 60, "max": 3600},
+				{"name": "errors_per_min", "kind": "int", "default": 10, "min": 1, "max": 100000},
+			},
+			"default_severity": "warning",
+		},
+		{
+			"rule_id":     "top_talker_baseline_anomaly",
+			"label":       "Top-talker baseline anomaly",
+			"description": "Fires when a (src, dst) pair's last-hour bytes exceed the multiplier of its same-hour-of-day 7-day baseline.",
+			"params": []map[string]any{
+				{"name": "multiplier", "kind": "float", "default": 3.0, "min": 1.5, "max": 100.0},
+				{"name": "min_baseline_bytes", "kind": "int", "default": 1000000000, "min": 1048576, "max": 1099511627776},
+			},
+			"default_severity": "warning",
+		},
+		{
+			"rule_id":     "device_cpu_high",
+			"label":       "Device CPU high",
+			"description": "Fires when an SNMP-polled CPU is at or above the configured percentage.",
+			"params": []map[string]any{
+				{"name": "threshold_pct", "kind": "int", "default": 80, "min": 1, "max": 100},
+				{"name": "critical_bump_pct", "kind": "int", "default": 15, "min": 0, "max": 50},
+				{"name": "lookback_seconds", "kind": "int", "default": 1800, "min": 60, "max": 86400},
+			},
+			"default_severity": "warning",
+		},
+		{
+			"rule_id":     "device_memory_high",
+			"label":       "Device memory high",
+			"description": "Fires when an SNMP-polled memory pool exceeds the configured percentage of its capacity.",
+			"params": []map[string]any{
+				{"name": "threshold_pct", "kind": "int", "default": 85, "min": 1, "max": 100},
+				{"name": "critical_bump_pct", "kind": "int", "default": 10, "min": 0, "max": 50},
+				{"name": "lookback_seconds", "kind": "int", "default": 1800, "min": 60, "max": 86400},
+			},
+			"default_severity": "warning",
+		},
+		{
+			"rule_id":     "device_storage_high",
+			"label":       "Device storage high",
+			"description": "Fires per-filesystem when used bytes cross the configured percentage of total capacity.",
+			"params": []map[string]any{
+				{"name": "threshold_pct", "kind": "int", "default": 85, "min": 1, "max": 100},
+				{"name": "critical_bump_pct", "kind": "int", "default": 10, "min": 0, "max": 50},
+				{"name": "lookback_seconds", "kind": "int", "default": 3600, "min": 60, "max": 86400},
+			},
+			"default_severity": "warning",
+		},
+		{
+			"rule_id":     "device_unreachable",
+			"label":       "Device unreachable",
+			"description": "Fires when SNMP polling for a previously-seen device is failing or has gone stale.",
+			"params": []map[string]any{
+				{"name": "stale_seconds", "kind": "int", "default": 2700, "min": 60, "max": 86400},
+				{"name": "lookback_hours", "kind": "int", "default": 24, "min": 1, "max": 168},
+			},
+			"default_severity": "critical",
+		},
 	}
 }
 
 func knownRule(id string) bool {
 	switch id {
-	case "exporter_silent", "heavy_talker":
+	case "exporter_silent", "heavy_talker",
+		"interface_oper_status_change", "interface_utilization_high",
+		"interface_errors_rate", "top_talker_baseline_anomaly",
+		"device_cpu_high", "device_memory_high", "device_storage_high",
+		"device_unreachable":
 		return true
 	}
 	return false
