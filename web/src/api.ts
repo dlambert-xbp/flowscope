@@ -1018,13 +1018,22 @@ export const api = {
 
   /* --------------------- Auth (Phase 2 OIDC) --------------------- */
   authMe: async (): Promise<AuthMe | null> => {
-    // /auth/me returns 401 when no session — we treat that as "signed
-    // out" without throwing. Anything else (200 with a body, or a
-    // genuine error like 500) propagates the usual way.
-    const r = await fetch('/auth/me', { cache: 'no-store', credentials: 'same-origin' })
-    if (r.status === 401) return null
-    if (!r.ok) throw new Error(`/auth/me → ${r.status} ${r.statusText}`)
-    return (await r.json()) as AuthMe
+    // /auth/me semantics:
+    //   200 → signed-in payload
+    //   401 → signed out (the common case before login)
+    //   anything else (404 from a proxy, 5xx, network error) → also
+    //     treat as signed out. Throwing here triggers TanStack's
+    //     retry + the global 2s refetchInterval, which makes the
+    //     brand-bar chip flicker between "signed out" and "…".
+    //     There is no useful retry for "I don't know if you're
+    //     logged in" — signed-out is the safe rendering.
+    try {
+      const r = await fetch('/auth/me', { cache: 'no-store', credentials: 'same-origin' })
+      if (!r.ok) return null
+      return (await r.json()) as AuthMe
+    } catch {
+      return null
+    }
   },
   authLogout: async (): Promise<{ ok: boolean }> => {
     const r = await fetch('/auth/logout', {

@@ -253,8 +253,12 @@ function UserChip() {
     queryFn: () => api.authMe(),
     // The /auth/me endpoint is cheap and stateless; refetching on
     // window focus keeps the chip honest if the operator just logged
-    // out in another tab.
+    // out in another tab. The 2s default refetchInterval (set on the
+    // QueryClient) is overkill for an identity check and causes a
+    // visible chip flicker on retry — disable it here.
     refetchOnWindowFocus: true,
+    refetchInterval: false,
+    retry: false,
     staleTime: 30_000,
   })
   const [open, setOpen] = useState(false)

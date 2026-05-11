@@ -12,7 +12,7 @@ import type {
   TopTalker,
 } from '../api'
 import { InterfaceChart } from './InterfaceChart'
-import { TimeseriesChart } from './TimeseriesChart'
+import { TimeseriesChart, resolveColor } from './TimeseriesChart'
 import { ServiceLabel } from './ServiceLabel'
 import {
   rangeLabel,
@@ -703,12 +703,11 @@ function ResourcesPanel({ exporter }: { exporter: string }) {
     queryFn: () => api.deviceResources(exporter, '24h'),
     refetchInterval: 15_000,
   })
-  // selected is the (kind, component) pair the operator clicked to
-  // expand into a full-size chart. Stored as a string key for cheap
-  // equality. Hooks must run before any early returns — Rules of
-  // Hooks — so this lives at the top of the function even though
-  // the data isn't grouped yet.
-  const [selected, setSelected] = useState<string | null>(null)
+  // Selected kind is what the operator clicked to expand into a
+  // multi-series chart. One rollup tile per kind; click to expand,
+  // click again or × close to collapse. Stored as the kind enum
+  // because each kind has at most one rollup tile in the grid.
+  const [selected, setSelected] = useState<DeviceResourceKind | null>(null)
   if (q.isLoading) {
     return <p className="text-dim font-mono text-[12px]">loading…</p>
   }
@@ -728,7 +727,9 @@ function ResourcesPanel({ exporter }: { exporter: string }) {
       </p>
     )
   }
-  // Group rows by kind so CPU tiles sit together, then memory, etc.
+  // Group rows by kind so the rollup tile can aggregate across
+  // components (CPU0 + CPU1 → "Overall CPU", Inlet + Hotspot →
+  // "Overall Temperature", etc.).
   const groups: Partial<Record<DeviceResourceKind, DeviceResource[]>> = {}
   for (const r of rows) {
     const g = groups[r.kind] ?? []
@@ -745,35 +746,27 @@ function ResourcesPanel({ exporter }: { exporter: string }) {
     'voltage',
     'current',
   ]
-  const selectedRow =
-    selected != null ? rows.find((r) => `${r.kind}_${r.component}` === selected) : undefined
+  const presentKinds = order.filter((k) => groups[k] && groups[k]!.length > 0)
+  const selectedComps = selected ? groups[selected] : undefined
   return (
     <div className="space-y-3">
-      {order
-        .filter((k) => groups[k] && groups[k]!.length > 0)
-        .map((kind) => (
-          <div key={kind}>
-            <div className="text-[10px] uppercase tracking-[0.12em] text-faint font-semibold mb-1.5">
-              {kind}
-            </div>
-            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2">
-              {groups[kind]!.map((r, i) => {
-                const key = `${r.kind}_${r.component}`
-                return (
-                  <ResourceTile
-                    key={`${r.component}_${i}`}
-                    r={r}
-                    active={selected === key}
-                    onClick={() => setSelected((s) => (s === key ? null : key))}
-                  />
-                )
-              })}
-            </div>
-          </div>
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2">
+        {presentKinds.map((kind) => (
+          <RollupTile
+            key={kind}
+            kind={kind}
+            comps={groups[kind]!}
+            active={selected === kind}
+            onClick={() =>
+              setSelected((s) => (s === kind ? null : kind))
+            }
+          />
         ))}
-      {selectedRow && (
-        <ExpandedResourceChart
-          r={selectedRow}
+      </div>
+      {selected && selectedComps && selectedComps.length > 0 && (
+        <ExpandedKindChart
+          kind={selected}
+          comps={selectedComps}
           onClose={() => setSelected(null)}
         />
       )}
@@ -781,40 +774,129 @@ function ResourcesPanel({ exporter }: { exporter: string }) {
   )
 }
 
-// ExpandedResourceChart renders the selected tile's full sparkline
-// data as a regular time-series chart with drag-to-zoom. Reads
-// value_numeric for sensor kinds (temperature, fan, voltage, current,
-// power-watts) and value_percent for utilization kinds (cpu, memory,
-// storage). Header explains which kind / source you're looking at and
-// gives a close affordance.
-function ExpandedResourceChart({
-  r,
+// RollupTile renders one tile per kind, summarising every component
+// of that kind into a single headline number. Sparkline shows the
+// aggregated metric over time (max temp, min fan rpm, etc.). Click
+// to expand into a multi-series chart showing each component as a
+// separate line.
+function RollupTile({
+  kind,
+  comps,
+  active,
+  onClick,
+}: {
+  kind: DeviceResourceKind
+  comps: DeviceResource[]
+  active: boolean
+  onClick: () => void
+}) {
+  const rollup = rollupOf(kind, comps)
+  const sparkline = aggregateSparkline(kind, comps)
+  const fixedRange = isUtilizationKind(kind)
+  const ageS = comps.reduce(
+    (lo, c) => Math.min(lo, secondsSince(c.latest_ts)),
+    Infinity,
+  )
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      title={active ? 'Collapse' : `Expand ${kind} chart`}
+      className={`text-left border bg-ink px-3 py-2.5 min-w-0 hover:border-accent ${
+        active ? 'border-accent' : 'border-line'
+      }`}
+    >
+      <div className="font-mono text-[11px] text-dim flex items-center gap-1.5">
+        <span className="uppercase tracking-[0.08em]">{kind}</span>
+        <span className="text-faint">·</span>
+        <span className="text-faint truncate">{rollup.context}</span>
+        <span className="ml-auto text-faint" aria-hidden>
+          {active ? '▾' : '▸'}
+        </span>
+      </div>
+      <div className="flex items-baseline gap-2 mt-1">
+        <span className={`font-mono text-[20px] tabular leading-none ${rollup.tone.text}`}>
+          {rollup.headline}
+          {rollup.unit && (
+            <span className="text-[12px] text-faint">{rollup.unit}</span>
+          )}
+        </span>
+      </div>
+      <div className="mt-1.5">
+        <Sparkline
+          points={sparkline.values}
+          stroke={rollup.tone.stroke}
+          fixedRange={fixedRange}
+        />
+      </div>
+      <div className="font-mono text-[10px] text-faint mt-1">
+        {Number.isFinite(ageS)
+          ? ageS < 60
+            ? `polled ${ageS.toFixed(0)}s ago`
+            : ageS < 3600
+              ? `polled ${(ageS / 60).toFixed(0)}m ago`
+              : `polled ${(ageS / 3600).toFixed(0)}h ago`
+          : 'never polled'}
+      </div>
+    </button>
+  )
+}
+
+// ExpandedKindChart renders every component of a kind as its own
+// series on a single time-series chart. Operator picked option (B):
+// one chart, legend lists each component (e.g. Inlet + Hotspot for
+// temperature, PSU 1 + PSU 2 for power). Drag-to-zoom works the
+// same as everywhere else.
+function ExpandedKindChart({
+  kind,
+  comps,
   onClose,
 }: {
-  r: DeviceResource
+  kind: DeviceResourceKind
+  comps: DeviceResource[]
   onClose: () => void
 }) {
-  const usesNumeric = !isUtilizationKind(r.kind)
-  const xs = r.points.map((p) =>
+  const usesNumeric = !isUtilizationKind(kind)
+  // Pick the longest component as the timestamp source. Components
+  // from the same walk should agree on timestamps, but a sensor that
+  // came online mid-window will have fewer points; the chart aligns
+  // by index so taking the longest gives the most informative axis.
+  const xRef = comps.reduce(
+    (acc, c) => (c.points.length > acc.points.length ? c : acc),
+    comps[0],
+  )
+  const xs = xRef.points.map((p) =>
     Math.floor(new Date(p.ts).getTime() / 1000),
   )
-  const values = r.points.map((p) =>
-    usesNumeric ? p.value_numeric : p.value_percent,
-  )
-  const tone = resourceTone(r)
-  const decimals = r.kind === 'fan' ? 0 : 1
+  const decimals = kind === 'fan' ? 0 : 1
+  const unitSuffix = comps[0]?.unit ? ` ${comps[0].unit}` : ''
   const yFormat = (v: number) => {
     if (!usesNumeric) return `${v.toFixed(0)}%`
-    if (r.unit) return `${v.toFixed(decimals)} ${r.unit}`
-    return v.toFixed(decimals)
+    return `${v.toFixed(decimals)}${unitSuffix}`
   }
+  const palette = MULTI_SERIES_PALETTE.map((name, i) =>
+    resolveColor(name, MULTI_SERIES_FALLBACKS[i]),
+  )
+  const series = comps.map((c, i) => ({
+    label: c.component,
+    color: palette[i % palette.length],
+    values: c.points.map((p) =>
+      usesNumeric ? p.value_numeric : p.value_percent,
+    ),
+    format: yFormat,
+  }))
   return (
     <div className="mt-1 border border-line bg-surface">
       <div className="flex items-baseline gap-3 px-4 py-2 border-b border-line">
         <span className="text-[11px] uppercase tracking-[0.1em] text-dim font-semibold">
-          {r.kind} · {r.component}
+          {kind}
         </span>
-        <span className="font-mono text-[10.5px] text-faint">via {r.source}</span>
+        <span className="font-mono text-[10.5px] text-faint">
+          {comps.length} {comps.length === 1 ? 'component' : 'components'}
+          {' · '}
+          via {Array.from(new Set(comps.map((c) => c.source))).join(', ')}
+        </span>
         <button
           type="button"
           onClick={onClose}
@@ -827,148 +909,240 @@ function ExpandedResourceChart({
       <div className="px-4 py-3">
         <TimeseriesChart
           xs={xs}
-          series={[
-            {
-              label: r.component,
-              color: tone.stroke,
-              values,
-              format: yFormat,
-            },
-          ]}
-          height={200}
+          series={series}
+          height={220}
           yMin={usesNumeric ? undefined : 0}
           yMax={usesNumeric ? undefined : 100}
           yFormat={yFormat}
           emptyLabel="no readings in this window"
+        />
+        <MultiSeriesLegend
+          series={series}
+          comps={comps}
+          unitSuffix={unitSuffix}
+          isPercent={!usesNumeric ? false : true}
+          decimals={decimals}
         />
       </div>
     </div>
   )
 }
 
-function ResourceTile({
-  r,
-  active,
-  onClick,
+// MultiSeriesLegend lists each plotted component with its colour
+// swatch + last reading. Keeps the chart legend honest when a device
+// has 4–8 sensors of the same kind and the lines blur together.
+function MultiSeriesLegend({
+  series,
+  comps,
+  unitSuffix,
+  isPercent,
+  decimals,
 }: {
-  r: DeviceResource
-  active: boolean
-  onClick: () => void
+  series: { label: string; color: string }[]
+  comps: DeviceResource[]
+  unitSuffix: string
+  isPercent: boolean
+  decimals: number
 }) {
-  const tone = resourceTone(r)
-  const ageS = secondsSince(r.latest_ts)
-  const headline = resourceHeadline(r)
-  const context = resourceContext(r)
-  // Sparkline reads value_percent for utilization kinds and
-  // value_numeric for sensor kinds; the Sparkline component does its
-  // own auto-range when not anchored to 0–100, so a temperature
-  // sparkline scales nicely between, say, 28 and 47 °C.
-  const usesNumeric = !isUtilizationKind(r.kind)
-  const points = r.points.map((p) =>
-    usesNumeric ? p.value_numeric : p.value_percent,
-  )
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      aria-pressed={active}
-      title="Expand chart"
-      className={`text-left border bg-ink px-3 py-2.5 min-w-0 hover:border-accent ${
-        active ? 'border-accent' : 'border-line'
-      }`}
-    >
-      <div
-        className="font-mono text-[11px] text-dim truncate"
-        title={`${r.component} · via ${r.source}`}
-      >
-        {r.component}
-      </div>
-      <div className="flex items-baseline gap-2 mt-1">
-        <span className={`font-mono text-[20px] tabular leading-none ${tone.text}`}>
-          {headline.value}
-          {headline.unit && (
-            <span className="text-[12px] text-faint">{headline.unit}</span>
-          )}
-        </span>
-        <span className="ml-auto font-mono text-[10.5px] text-faint tabular truncate">
-          {context}
-        </span>
-      </div>
-      <div className="mt-1.5">
-        <Sparkline points={points} stroke={tone.stroke} fixedRange={!usesNumeric} />
-      </div>
-      <div className="font-mono text-[10px] text-faint mt-1">
-        {ageS < 60
-          ? `polled ${ageS.toFixed(0)}s ago`
-          : ageS < 3600
-            ? `polled ${(ageS / 60).toFixed(0)}m ago`
-            : `polled ${(ageS / 3600).toFixed(0)}h ago`}
-      </div>
-    </button>
+    <div className="mt-2 grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-x-4 gap-y-1 font-mono text-[11px] text-dim">
+      {series.map((s, i) => {
+        const c = comps[i]
+        const latest = isPercent
+          ? `${c.latest_percent.toFixed(0)}%`
+          : `${c.latest_numeric.toFixed(decimals)}${unitSuffix}`
+        return (
+          <span key={s.label} className="flex items-center gap-2 min-w-0">
+            <span
+              className="inline-block w-3 h-0.5 shrink-0"
+              style={{ backgroundColor: s.color }}
+            />
+            <span className="truncate">{s.label}</span>
+            <span className="ml-auto text-text tabular shrink-0">{latest}</span>
+          </span>
+        )
+      })}
+    </div>
   )
+}
+
+// Palette names (CSS vars) and their hard-coded fallbacks, resolved
+// at call time so theme switches re-pick the right hex. The five
+// entries cover most real devices (≤4–5 sensors per kind); a sixth+
+// sensor of the same kind cycles back to accent.
+const MULTI_SERIES_PALETTE = [
+  '--color-accent',
+  '--color-ok',
+  '--color-warn',
+  '--color-crit',
+  '--color-faint',
+] as const
+const MULTI_SERIES_FALLBACKS = ['#8aa8c8', '#7fa67f', '#d4a72c', '#d97757', '#888'] as const
+
+// rollupOf computes the per-kind headline number plus context label
+// + tone. Each kind has its own "what does overall mean" rule:
+//   cpu / memory / storage / temperature → max
+//   fan                                  → min (slowest = alarm)
+//   voltage / current                    → average (min–max in context)
+//   power (state-overloaded)             → count of FAULT vs OK
+function rollupOf(
+  kind: DeviceResourceKind,
+  comps: DeviceResource[],
+): {
+  headline: string
+  unit: string
+  context: string
+  tone: { text: string; stroke: string }
+} {
+  // Power is a special case: value_percent is 0 (OK) or 100 (FAULT).
+  if (kind === 'power') {
+    const faults = comps.filter((c) => c.latest_percent >= 50).length
+    const total = comps.length
+    if (faults === 0) {
+      return {
+        headline: 'ALL OK',
+        unit: '',
+        context: `${total} ${total === 1 ? 'supply' : 'supplies'}`,
+        tone: { text: 'text-ok', stroke: 'var(--color-ok, #7fa67f)' },
+      }
+    }
+    return {
+      headline: `${faults} FAULT`,
+      unit: '',
+      context: `${faults} of ${total} faulted`,
+      tone: { text: 'text-crit', stroke: 'var(--color-crit, #d97757)' },
+    }
+  }
+
+  if (isUtilizationKind(kind)) {
+    const values = comps.map((c) => c.latest_percent)
+    const agg = Math.max(...values)
+    return {
+      headline: agg.toFixed(0),
+      unit: '%',
+      context:
+        comps.length === 1
+          ? truncate(comps[0].component, 28)
+          : `max of ${comps.length}`,
+      tone: utilizationToneAt(agg),
+    }
+  }
+
+  // Sensor kinds.
+  const values = comps.map((c) => c.latest_numeric)
+  const decimals = kind === 'fan' ? 0 : 1
+  const unit = comps[0]?.unit || ''
+  let agg: number
+  let contextLabel: string
+  switch (kind) {
+    case 'temperature':
+      agg = Math.max(...values)
+      contextLabel =
+        comps.length === 1
+          ? truncate(comps[0].component, 28)
+          : `max of ${comps.length}`
+      break
+    case 'fan':
+      agg = Math.min(...values)
+      contextLabel =
+        comps.length === 1
+          ? truncate(comps[0].component, 28)
+          : `slowest of ${comps.length}`
+      break
+    case 'voltage':
+    case 'current': {
+      agg = values.reduce((a, b) => a + b, 0) / values.length
+      if (comps.length === 1) {
+        contextLabel = truncate(comps[0].component, 28)
+      } else {
+        const lo = Math.min(...values)
+        const hi = Math.max(...values)
+        contextLabel = `${lo.toFixed(decimals)}–${hi.toFixed(decimals)}${unit ? ` ${unit}` : ''}`
+      }
+      break
+    }
+    default:
+      agg = values[0] ?? 0
+      contextLabel = truncate(comps[0]?.component ?? '', 28)
+  }
+  return {
+    headline: agg.toFixed(decimals),
+    unit: unit ? ` ${unit}` : '',
+    context: contextLabel,
+    tone: sensorToneFor(kind, agg),
+  }
+}
+
+// aggregateSparkline produces the tile sparkline series: one
+// number per timestamp, aggregated across components with the same
+// reducer as the headline. Aligned by point index (all components of
+// a kind come from the same walk, so polled_at agrees by index).
+function aggregateSparkline(
+  kind: DeviceResourceKind,
+  comps: DeviceResource[],
+): { xs: number[]; values: number[] } {
+  const minLen = comps.reduce(
+    (n, c) => Math.min(n, c.points.length),
+    Number.POSITIVE_INFINITY,
+  )
+  if (!Number.isFinite(minLen) || minLen === 0) {
+    return { xs: [], values: [] }
+  }
+  const reducer = reducerFor(kind)
+  const usesNumeric = !isUtilizationKind(kind) && kind !== 'power'
+  const xs: number[] = []
+  const values: number[] = []
+  for (let i = 0; i < minLen; i++) {
+    const valsAtI = comps.map((c) =>
+      usesNumeric ? c.points[i].value_numeric : c.points[i].value_percent,
+    )
+    values.push(reducer(valsAtI))
+    xs.push(Math.floor(new Date(comps[0].points[i].ts).getTime() / 1000))
+  }
+  return { xs, values }
+}
+
+function reducerFor(kind: DeviceResourceKind): (xs: number[]) => number {
+  switch (kind) {
+    case 'fan':
+      return (xs) => (xs.length === 0 ? 0 : Math.min(...xs))
+    case 'voltage':
+    case 'current':
+      return (xs) => (xs.length === 0 ? 0 : xs.reduce((a, b) => a + b, 0) / xs.length)
+    case 'cpu':
+    case 'memory':
+    case 'storage':
+    case 'temperature':
+    case 'power':
+    default:
+      return (xs) => (xs.length === 0 ? 0 : Math.max(...xs))
+  }
+}
+
+function utilizationToneAt(pct: number): { text: string; stroke: string } {
+  if (pct >= 80) return { text: 'text-crit', stroke: 'var(--color-crit, #d97757)' }
+  if (pct >= 60) return { text: 'text-warn', stroke: 'var(--color-warn, #d4a72c)' }
+  return { text: 'text-text', stroke: 'var(--color-accent, #8aa8c8)' }
+}
+
+function sensorToneFor(
+  kind: DeviceResourceKind,
+  value: number,
+): { text: string; stroke: string } {
+  if (kind === 'temperature') {
+    if (value >= 75) return { text: 'text-crit', stroke: 'var(--color-crit, #d97757)' }
+    if (value >= 60) return { text: 'text-warn', stroke: 'var(--color-warn, #d4a72c)' }
+  }
+  return { text: 'text-text', stroke: 'var(--color-accent, #8aa8c8)' }
+}
+
+function truncate(s: string, n: number): string {
+  if (s.length <= n) return s
+  return s.slice(0, n - 1) + '…'
 }
 
 function isUtilizationKind(k: DeviceResourceKind): boolean {
   return k === 'cpu' || k === 'memory' || k === 'storage'
-}
-
-// resourceHeadline picks the right value + unit string for the tile
-// headline. PSU rows from CISCO-ENTITY-FRU-CONTROL get a special
-// ON/FAULT readout because the raw enum (1–12) isn't operator-useful.
-function resourceHeadline(r: DeviceResource): { value: string; unit: string } {
-  if (r.kind === 'power' && r.unit === 'state') {
-    return { value: r.latest_numeric === 2 ? 'ON' : 'FAULT', unit: '' }
-  }
-  if (isUtilizationKind(r.kind)) {
-    return { value: r.latest_percent.toFixed(0), unit: '%' }
-  }
-  // Sensor kinds — temperature, fan, voltage, current, power (watts).
-  const v = r.latest_numeric
-  const decimals = r.kind === 'fan' ? 0 : v >= 100 ? 0 : 1
-  return { value: v.toFixed(decimals), unit: r.unit ? ` ${r.unit}` : '' }
-}
-
-// resourceContext composes the small secondary string at the right
-// of the headline. Memory/storage get "X / Y"; PSU rows surface the
-// raw operState enum so an operator sees `state 8` next to FAULT.
-function resourceContext(r: DeviceResource): string {
-  if (isUtilizationKind(r.kind)) {
-    if (r.kind === 'cpu') return ''
-    if (r.max_bytes > 0) {
-      return `${fmt.bytes(r.latest_bytes)} / ${fmt.bytes(r.max_bytes)}`
-    }
-    if (r.latest_bytes > 0) return fmt.bytes(r.latest_bytes)
-    return ''
-  }
-  if (r.kind === 'power' && r.unit === 'state') {
-    return `state ${r.latest_numeric.toFixed(0)}`
-  }
-  return ''
-}
-
-// resourceTone picks tile foreground + sparkline stroke. Utilization
-// kinds use the same 60/80 warn/crit thresholds as before;
-// temperature lights up at warm/hot temps; PSU faults go straight to
-// crit; fan / voltage / current stay neutral (the operator's threshold
-// is too vendor-specific to bake in here).
-function resourceTone(r: DeviceResource): { text: string; stroke: string } {
-  const dim = { text: 'text-text', stroke: 'var(--color-accent, #8aa8c8)' }
-  const warn = { text: 'text-warn', stroke: 'var(--color-warn, #d4a72c)' }
-  const crit = { text: 'text-crit', stroke: 'var(--color-crit, #d97757)' }
-  if (isUtilizationKind(r.kind)) {
-    if (r.latest_percent >= 80) return crit
-    if (r.latest_percent >= 60) return warn
-    return dim
-  }
-  if (r.kind === 'temperature') {
-    if (r.latest_numeric >= 75) return crit
-    if (r.latest_numeric >= 60) return warn
-    return dim
-  }
-  if (r.kind === 'power' && r.unit === 'state') {
-    return r.latest_numeric === 2 ? dim : crit
-  }
-  return dim
 }
 
 // Sparkline draws a polyline of values in inline SVG. When
