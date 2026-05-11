@@ -22,8 +22,53 @@ type Inventory struct {
 	SysContact     string
 	SysLocation    string
 	Interfaces     []Interface
+	Resources      []ResourceSample
 	PollDurationMs uint32
 	Status         string // ok | partial | error
+}
+
+// ResourceKind enumerates the metric families surfaced on the Devices
+// tab. Keep in lockstep with the LowCardinality(String) `kind` column
+// on device_resource_samples.
+type ResourceKind string
+
+const (
+	ResourceKindCPU         ResourceKind = "cpu"
+	ResourceKindMemory      ResourceKind = "memory"
+	ResourceKindStorage     ResourceKind = "storage"
+	ResourceKindTemperature ResourceKind = "temperature"
+	ResourceKindFan         ResourceKind = "fan"
+)
+
+// ResourceSource identifies the MIB the sample came from. Mirrors the
+// LowCardinality(String) `source` column on device_resource_samples
+// and helps the UI explain where a value came from (and lets us pick
+// a vendor reading over a generic HRMIB one when both are present).
+type ResourceSource string
+
+const (
+	ResourceSourceHRMIB           ResourceSource = "hrmib"
+	ResourceSourceCiscoProcess    ResourceSource = "cisco-process"
+	ResourceSourceCiscoMempool    ResourceSource = "cisco-mempool"
+	ResourceSourceCiscoEnhMempool ResourceSource = "cisco-enhmempool"
+	ResourceSourceJuniperJnx      ResourceSource = "juniper-jnx"
+	ResourceSourceAristaEntity    ResourceSource = "arista-entity"
+)
+
+// ResourceSample is one row of device_resource_samples. Use whichever
+// of value_percent / value_bytes / max_bytes makes sense for the kind:
+//   - cpu     → ValuePercent only
+//   - memory  → ValueBytes + MaxBytes (UI derives percent)
+//   - storage → ValueBytes + MaxBytes
+//   - temp    → ValuePercent (carries °C; column is overloaded)
+//   - fan     → ValuePercent (carries RPM)
+type ResourceSample struct {
+	Kind         ResourceKind
+	Component    string // human-readable, e.g. "Processor 1", "Pool: Processor"
+	ValuePercent float32
+	ValueBytes   uint64
+	MaxBytes     uint64
+	Source       ResourceSource
 }
 
 // Interface mirrors the columns of device_snmp_interfaces. Counter
@@ -181,8 +226,256 @@ func (rc *RealClient) Walk(ctx context.Context, target string) (*Inventory, erro
 	}
 	inv.Interfaces = ifaces
 
+	// Resource walks (CPU / memory / storage). All MIBs are optional —
+	// HRMIB on a switch that doesn't implement it just returns nothing,
+	// and CISCO-PROCESS-MIB on a non-Cisco device 404s. Each helper
+	// returns an empty slice on error so a missing MIB never demotes
+	// the walk to "partial".
+	inv.Resources = walkResources(g)
+
 	inv.PollDurationMs = uint32(time.Since(start).Milliseconds())
 	return inv, nil
+}
+
+// walkResources fans out across HOST-RESOURCES-MIB and a small set of
+// vendor MIBs (Cisco classic today; Juniper / Arista are stubs). Each
+// branch is independent — any one MIB missing on the target is fine,
+// the operator just sees fewer rows on the resources tile. Errors are
+// swallowed and logged via the gosnmp client's own logging since this
+// is enrichment, not a hard requirement.
+func walkResources(g *gosnmp.GoSNMP) []ResourceSample {
+	out := make([]ResourceSample, 0, 8)
+	out = append(out, walkHRMIB(g)...)
+	out = append(out, walkCiscoCPU(g)...)
+	out = append(out, walkCiscoMemory(g)...)
+	return out
+}
+
+// walkHRMIB pulls CPU load per processor (hrProcessorLoad) and the
+// hrStorage table for memory + storage breakdown. Device labels come
+// from hrDeviceDescr for CPUs and hrStorageDescr for storage entries.
+// hrStorageType discriminates RAM (.2 / .3) vs disk (.4 / .5 / .7) —
+// RAM rows land under "memory", disks under "storage".
+func walkHRMIB(g *gosnmp.GoSNMP) []ResourceSample {
+	out := make([]ResourceSample, 0, 4)
+
+	// CPU: hrProcessorLoad indexed by hrDeviceIndex. Resolve the label
+	// from hrDeviceDescr for the same index.
+	descrByIdx := map[uint32]string{}
+	_ = g.BulkWalk(OIDHrDeviceDescr, func(pdu gosnmp.SnmpPDU) error {
+		if idx, ok := indexFromOID(pdu.Name, OIDHrDeviceDescr); ok {
+			descrByIdx[idx] = octetString(pdu)
+		}
+		return nil
+	})
+	_ = g.BulkWalk(OIDHrProcessorLoad, func(pdu gosnmp.SnmpPDU) error {
+		idx, ok := indexFromOID(pdu.Name, OIDHrProcessorLoad)
+		if !ok {
+			return nil
+		}
+		load := float32(integerValue(pdu))
+		comp := descrByIdx[idx]
+		if comp == "" {
+			comp = fmt.Sprintf("CPU %d", idx)
+		}
+		out = append(out, ResourceSample{
+			Kind:         ResourceKindCPU,
+			Component:    comp,
+			ValuePercent: load,
+			Source:       ResourceSourceHRMIB,
+		})
+		return nil
+	})
+
+	// Storage: collect type / descr / alloc / size / used per index,
+	// classify, emit.
+	type stor struct {
+		descr string
+		typ   string
+		alloc uint64
+		size  uint64
+		used  uint64
+	}
+	st := map[uint32]*stor{}
+	ensureSt := func(i uint32) *stor {
+		if s, ok := st[i]; ok {
+			return s
+		}
+		s := &stor{}
+		st[i] = s
+		return s
+	}
+	_ = g.BulkWalk(OIDHrStorageType, func(pdu gosnmp.SnmpPDU) error {
+		if idx, ok := indexFromOID(pdu.Name, OIDHrStorageType); ok {
+			ensureSt(idx).typ = oidString(pdu)
+		}
+		return nil
+	})
+	_ = g.BulkWalk(OIDHrStorageDescr, func(pdu gosnmp.SnmpPDU) error {
+		if idx, ok := indexFromOID(pdu.Name, OIDHrStorageDescr); ok {
+			ensureSt(idx).descr = octetString(pdu)
+		}
+		return nil
+	})
+	_ = g.BulkWalk(OIDHrStorageAllocationUnits, func(pdu gosnmp.SnmpPDU) error {
+		if idx, ok := indexFromOID(pdu.Name, OIDHrStorageAllocationUnits); ok {
+			ensureSt(idx).alloc = uint64(integerValue(pdu))
+		}
+		return nil
+	})
+	_ = g.BulkWalk(OIDHrStorageSize, func(pdu gosnmp.SnmpPDU) error {
+		if idx, ok := indexFromOID(pdu.Name, OIDHrStorageSize); ok {
+			ensureSt(idx).size = uint64(integerValue(pdu))
+		}
+		return nil
+	})
+	_ = g.BulkWalk(OIDHrStorageUsed, func(pdu gosnmp.SnmpPDU) error {
+		if idx, ok := indexFromOID(pdu.Name, OIDHrStorageUsed); ok {
+			ensureSt(idx).used = uint64(integerValue(pdu))
+		}
+		return nil
+	})
+	for _, s := range st {
+		if s.alloc == 0 || s.size == 0 {
+			continue
+		}
+		totalBytes := s.alloc * s.size
+		usedBytes := s.alloc * s.used
+		var pct float32
+		if totalBytes > 0 {
+			pct = float32(float64(usedBytes) / float64(totalBytes) * 100)
+		}
+		kind := classifyHRStorage(s.typ)
+		if kind == "" {
+			continue
+		}
+		out = append(out, ResourceSample{
+			Kind:         kind,
+			Component:    s.descr,
+			ValuePercent: pct,
+			ValueBytes:   usedBytes,
+			MaxBytes:     totalBytes,
+			Source:       ResourceSourceHRMIB,
+		})
+	}
+	return out
+}
+
+// classifyHRStorage maps an hrStorageType OID to a ResourceKind, or
+// returns "" for types we deliberately skip (virtual memory, network
+// disk, etc. — useful in theory, noisy on dashboards in practice).
+func classifyHRStorage(typeOID string) ResourceKind {
+	// Strip a leading dot if gosnmp included one.
+	typeOID = strings.TrimPrefix(typeOID, ".")
+	switch typeOID {
+	case OIDHrStorageRAM:
+		return ResourceKindMemory
+	case OIDHrStorageFixedDisk:
+		return ResourceKindStorage
+	default:
+		return ""
+	}
+}
+
+// walkCiscoCPU pulls cpmCPUTotal5minRev (5-min CPU utilization, the
+// most stable read) and resolves a human component name via the
+// cpmCPUTotalPhysicalIndex pointer back into entPhysicalName.
+func walkCiscoCPU(g *gosnmp.GoSNMP) []ResourceSample {
+	// Index → physical index ptr.
+	physIdx := map[uint32]uint32{}
+	_ = g.BulkWalk(OIDCpmCPUTotalPhysicalIndex, func(pdu gosnmp.SnmpPDU) error {
+		if idx, ok := indexFromOID(pdu.Name, OIDCpmCPUTotalPhysicalIndex); ok {
+			physIdx[idx] = uint32(integerValue(pdu))
+		}
+		return nil
+	})
+	// physIndex → human name.
+	physName := map[uint32]string{}
+	if len(physIdx) > 0 {
+		_ = g.BulkWalk(OIDEntPhysicalName, func(pdu gosnmp.SnmpPDU) error {
+			if idx, ok := indexFromOID(pdu.Name, OIDEntPhysicalName); ok {
+				physName[idx] = octetString(pdu)
+			}
+			return nil
+		})
+	}
+	out := make([]ResourceSample, 0, 2)
+	_ = g.BulkWalk(OIDCpmCPUTotal5minRev, func(pdu gosnmp.SnmpPDU) error {
+		idx, ok := indexFromOID(pdu.Name, OIDCpmCPUTotal5minRev)
+		if !ok {
+			return nil
+		}
+		comp := physName[physIdx[idx]]
+		if comp == "" {
+			comp = fmt.Sprintf("CPU %d", idx)
+		}
+		out = append(out, ResourceSample{
+			Kind:         ResourceKindCPU,
+			Component:    comp,
+			ValuePercent: float32(integerValue(pdu)),
+			Source:       ResourceSourceCiscoProcess,
+		})
+		return nil
+	})
+	return out
+}
+
+// walkCiscoMemory pulls each named memory pool's used + free bytes.
+// Pool name comes from ciscoMemoryPoolName; total bytes = used + free.
+func walkCiscoMemory(g *gosnmp.GoSNMP) []ResourceSample {
+	type pool struct {
+		name string
+		used uint64
+		free uint64
+	}
+	pools := map[uint32]*pool{}
+	ensure := func(i uint32) *pool {
+		if p, ok := pools[i]; ok {
+			return p
+		}
+		p := &pool{}
+		pools[i] = p
+		return p
+	}
+	_ = g.BulkWalk(OIDCiscoMemoryPoolName, func(pdu gosnmp.SnmpPDU) error {
+		if idx, ok := indexFromOID(pdu.Name, OIDCiscoMemoryPoolName); ok {
+			ensure(idx).name = octetString(pdu)
+		}
+		return nil
+	})
+	_ = g.BulkWalk(OIDCiscoMemoryPoolUsed, func(pdu gosnmp.SnmpPDU) error {
+		if idx, ok := indexFromOID(pdu.Name, OIDCiscoMemoryPoolUsed); ok {
+			ensure(idx).used = uint64(integerValue(pdu))
+		}
+		return nil
+	})
+	_ = g.BulkWalk(OIDCiscoMemoryPoolFree, func(pdu gosnmp.SnmpPDU) error {
+		if idx, ok := indexFromOID(pdu.Name, OIDCiscoMemoryPoolFree); ok {
+			ensure(idx).free = uint64(integerValue(pdu))
+		}
+		return nil
+	})
+	out := make([]ResourceSample, 0, len(pools))
+	for _, p := range pools {
+		total := p.used + p.free
+		if total == 0 {
+			continue
+		}
+		pct := float32(float64(p.used) / float64(total) * 100)
+		name := p.name
+		if name == "" {
+			name = "Pool"
+		}
+		out = append(out, ResourceSample{
+			Kind:         ResourceKindMemory,
+			Component:    "Pool: " + name,
+			ValuePercent: pct,
+			ValueBytes:   p.used,
+			MaxBytes:     total,
+			Source:       ResourceSourceCiscoMempool,
+		})
+	}
+	return out
 }
 
 // walkInterfaces fetches every column we care about from ifTable +

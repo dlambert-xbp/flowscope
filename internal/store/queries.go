@@ -750,6 +750,99 @@ ORDER BY ifindex`
 	return &inv, rows.Err()
 }
 
+// DeviceResource is one row of the /api/devices/{exporter}/resources
+// response — a SNMP-derived health metric (CPU / memory / storage)
+// for one component on the exporter, with the most recent reading
+// and a trailing-window sparkline of percent values. The UI renders
+// LatestPercent / LatestBytes / MaxBytes in the tile and Points in
+// a small inline chart.
+type DeviceResource struct {
+	Kind           string                `json:"kind"`
+	Component      string                `json:"component"`
+	Source         string                `json:"source"`
+	LatestTs       time.Time             `json:"latest_ts"`
+	LatestPercent  float32               `json:"latest_percent"`
+	LatestBytes    uint64                `json:"latest_bytes"`
+	MaxBytes       uint64                `json:"max_bytes"`
+	Points         []DeviceResourcePoint `json:"points"`
+}
+
+// DeviceResourcePoint is one (ts, percent) data point on the
+// per-component sparkline. Bytes-typed metrics still emit percent
+// here so the chart renders consistently; the headline tile carries
+// the absolute byte count.
+type DeviceResourcePoint struct {
+	Ts           time.Time `json:"ts"`
+	ValuePercent float32   `json:"value_percent"`
+}
+
+// QueryDeviceResources returns the per-component health timeseries
+// for an exporter over the trailing window. One row per
+// (kind, component, source); points are ordered by ts ASC so the UI
+// can feed them straight into a sparkline. The query argMax-picks the
+// latest reading server-side so the response carries the freshness
+// signal the tiles need.
+//
+// Empty result (no rows) is fine — devices that haven't been walked
+// or that don't implement the relevant MIBs simply contribute nothing.
+func QueryDeviceResources(ctx context.Context, conn driver.Conn, exporter netip.Addr, tr TimeRange) ([]DeviceResource, error) {
+	tsPred, args := tr.Predicate("polled_at")
+	args = append([]any{toIPv6(exporter)}, args...)
+	// Parallel arrays (ts_points + pct_points) keep the Go scan
+	// trivial — no nested-tuple driver dance. The inner subquery's
+	// ORDER BY is preserved by groupArray, so the two arrays land
+	// aligned and pre-sorted for the UI.
+	q := `
+SELECT
+    kind,
+    component,
+    argMax(source,        polled_at) AS source,
+    max(polled_at)                    AS latest_ts,
+    argMax(value_percent, polled_at) AS latest_percent,
+    argMax(value_bytes,   polled_at) AS latest_bytes,
+    argMax(max_bytes,     polled_at) AS max_bytes,
+    groupArray(polled_at)             AS ts_points,
+    groupArray(value_percent)         AS pct_points
+FROM (
+    SELECT *
+    FROM device_resource_samples
+    WHERE exporter = ? AND ` + tsPred + `
+    ORDER BY polled_at
+) AS ordered
+GROUP BY kind, component
+ORDER BY kind, component`
+	rows, err := conn.Query(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("store: query device resources: %w", err)
+	}
+	defer rows.Close()
+	out := make([]DeviceResource, 0, 6)
+	for rows.Next() {
+		var (
+			r         DeviceResource
+			tsPoints  []time.Time
+			pctPoints []float32
+		)
+		if err := rows.Scan(
+			&r.Kind, &r.Component, &r.Source, &r.LatestTs,
+			&r.LatestPercent, &r.LatestBytes, &r.MaxBytes,
+			&tsPoints, &pctPoints,
+		); err != nil {
+			return nil, fmt.Errorf("store: scan device resource: %w", err)
+		}
+		n := len(tsPoints)
+		if len(pctPoints) < n {
+			n = len(pctPoints)
+		}
+		r.Points = make([]DeviceResourcePoint, 0, n)
+		for i := 0; i < n; i++ {
+			r.Points = append(r.Points, DeviceResourcePoint{Ts: tsPoints[i], ValuePercent: pctPoints[i]})
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 // Alert is the current state of one alert as derived from the
 // append-only alert_events ledger via argMax aggregation. Fields
 // match the JSON the api returns to the React Alerts tab.

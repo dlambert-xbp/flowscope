@@ -55,6 +55,7 @@ func TestReadEndpointsRequireToken(t *testing.T) {
 		r.Get("/api/devices", mark("devices"))
 		r.Get("/api/devices/{exporter}", mark("device"))
 		r.Get("/api/devices/{exporter}/inventory", mark("device-inventory"))
+		r.Get("/api/devices/{exporter}/resources", mark("device-resources"))
 		r.Get("/api/interfaces", mark("interfaces"))
 		r.Get("/api/interfaces/{exporter}/{ifindex}/timeseries", mark("interface-timeseries"))
 		r.Get("/api/top/talkers", mark("top-talkers"))
@@ -95,6 +96,7 @@ func TestReadEndpointsRequireToken(t *testing.T) {
 		{"GET", "/api/devices"},
 		{"GET", "/api/devices/192.0.2.1"},
 		{"GET", "/api/devices/192.0.2.1/inventory"},
+		{"GET", "/api/devices/192.0.2.1/resources"},
 		{"GET", "/api/interfaces"},
 		{"GET", "/api/interfaces/192.0.2.1/42/timeseries"},
 		{"GET", "/api/top/talkers"},

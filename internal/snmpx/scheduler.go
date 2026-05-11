@@ -340,25 +340,42 @@ func (s *Scheduler) persist(ctx context.Context, inv *Inventory) error {
 		return fmt.Errorf("insert device_inventory: %w", err)
 	}
 
-	if len(inv.Interfaces) == 0 {
-		return nil
-	}
-	batch, err := s.conn.PrepareBatch(ctx, "INSERT INTO device_snmp_interfaces")
-	if err != nil {
-		return fmt.Errorf("prepare iface batch: %w", err)
-	}
-	for _, i := range inv.Interfaces {
-		if err := batch.Append(
-			inv.PolledAt, exp16, i.IfIndex,
-			i.IfDescr, i.IfAlias, i.IfType, i.IfSpeedBps, i.IfMtu,
-			i.AdminStatus, i.OperStatus,
-			i.InErrors, i.OutErrors, i.InDiscards, i.OutDiscards,
-		); err != nil {
-			return fmt.Errorf("append iface: %w", err)
+	if len(inv.Interfaces) > 0 {
+		batch, err := s.conn.PrepareBatch(ctx, "INSERT INTO device_snmp_interfaces")
+		if err != nil {
+			return fmt.Errorf("prepare iface batch: %w", err)
+		}
+		for _, i := range inv.Interfaces {
+			if err := batch.Append(
+				inv.PolledAt, exp16, i.IfIndex,
+				i.IfDescr, i.IfAlias, i.IfType, i.IfSpeedBps, i.IfMtu,
+				i.AdminStatus, i.OperStatus,
+				i.InErrors, i.OutErrors, i.InDiscards, i.OutDiscards,
+			); err != nil {
+				return fmt.Errorf("append iface: %w", err)
+			}
+		}
+		if err := batch.Send(); err != nil {
+			return fmt.Errorf("send iface batch: %w", err)
 		}
 	}
-	if err := batch.Send(); err != nil {
-		return fmt.Errorf("send iface batch: %w", err)
+
+	if len(inv.Resources) > 0 {
+		batch, err := s.conn.PrepareBatch(ctx, "INSERT INTO device_resource_samples")
+		if err != nil {
+			return fmt.Errorf("prepare resource batch: %w", err)
+		}
+		for _, r := range inv.Resources {
+			if err := batch.Append(
+				inv.PolledAt, exp16, string(r.Kind), r.Component,
+				r.ValuePercent, r.ValueBytes, r.MaxBytes, string(r.Source),
+			); err != nil {
+				return fmt.Errorf("append resource: %w", err)
+			}
+		}
+		if err := batch.Send(); err != nil {
+			return fmt.Errorf("send resource batch: %w", err)
+		}
 	}
 	return nil
 }
