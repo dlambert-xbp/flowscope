@@ -703,6 +703,12 @@ function ResourcesPanel({ exporter }: { exporter: string }) {
     queryFn: () => api.deviceResources(exporter, '24h'),
     refetchInterval: 15_000,
   })
+  // selected is the (kind, component) pair the operator clicked to
+  // expand into a full-size chart. Stored as a string key for cheap
+  // equality. Hooks must run before any early returns — Rules of
+  // Hooks — so this lives at the top of the function even though
+  // the data isn't grouped yet.
+  const [selected, setSelected] = useState<string | null>(null)
   if (q.isLoading) {
     return <p className="text-dim font-mono text-[12px]">loading…</p>
   }
@@ -739,10 +745,6 @@ function ResourcesPanel({ exporter }: { exporter: string }) {
     'voltage',
     'current',
   ]
-  // selected is the (kind, component) pair the operator clicked to
-  // expand into a full-size chart. Stored as a string key for cheap
-  // equality. Click the same tile again to dismiss.
-  const [selected, setSelected] = useState<string | null>(null)
   const selectedRow =
     selected != null ? rows.find((r) => `${r.kind}_${r.component}` === selected) : undefined
   return (
