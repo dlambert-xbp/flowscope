@@ -172,3 +172,37 @@ var (
 		[]string{"kind"},
 	)
 )
+
+// Alert leader-election metrics. The lease is ClickHouse-backed (see
+// migration 000010_leader_lease.sql). These counters are observed by
+// the Overview "Receiver health" panel so an operator can spot a
+// flapping lease before users notice silent alerts.
+var (
+	AlertLeaseAcquiredTotal = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "flowscope_alert_lease_acquired_total",
+			Help: "Times this replica won the alert leader lease.",
+		},
+	)
+
+	AlertLeaseLostTotal = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "flowscope_alert_lease_lost_total",
+			Help: "Times this replica lost the alert leader lease (DB reports a different holder).",
+		},
+	)
+
+	AlertLeaseRenewFailedTotal = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "flowscope_alert_lease_renew_failed_total",
+			Help: "Failed lease renew attempts (DB error or lease expired before write). A non-zero rate is a red flag.",
+		},
+	)
+
+	AlertLeaseHeld = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "flowscope_alert_lease_held",
+			Help: "1 if this replica currently holds the alert leader lease, 0 otherwise.",
+		},
+	)
+)
