@@ -198,6 +198,25 @@ FROM api_tokens FINAL WHERE token_prefix = ? AND revoked_at = toDateTime64(0, 3,
 	return nil, ErrNotFound
 }
 
+// CountActive returns the count of api_tokens rows whose revoked_at is
+// the sentinel zero value AND whose expires_at is either the zero
+// sentinel or in the future. The authz middleware reads this on the
+// bypass path to decide whether a fresh install (zero rows) should
+// fall through with subject="unauth-bypass", or whether the operator
+// has minted at least one token and the gate should become strict.
+func (s *chAPITokensStore) CountActive(ctx context.Context) (int, error) {
+	const q = `
+SELECT count()
+FROM api_tokens FINAL
+WHERE revoked_at = toDateTime64(0, 3, 'UTC')
+  AND (expires_at = toDateTime64(0, 3, 'UTC') OR expires_at > now64(3))`
+	var n uint64
+	if err := s.conn.QueryRow(ctx, q).Scan(&n); err != nil {
+		return 0, fmt.Errorf("api_tokens: count active: %w", err)
+	}
+	return int(n), nil
+}
+
 func (s *chAPITokensStore) MarkUsed(ctx context.Context, id string) error {
 	uid, err := uuid.Parse(id)
 	if err != nil {

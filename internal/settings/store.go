@@ -71,6 +71,13 @@ type APITokensStore interface {
 	// MarkUsed bumps last_used_at, throttled to ~1 write per minute
 	// per token by the implementation.
 	MarkUsed(ctx context.Context, id string) error
+	// CountActive returns the number of non-revoked, non-expired rows
+	// in api_tokens. The authz middleware uses this to decide whether
+	// the zero-config "unauth-bypass" fallback fires: when no shared
+	// token is configured and no active tokens have been minted, the
+	// gate lets requests through with subject="unauth-bypass". Once
+	// the operator mints the first token, the gate becomes strict.
+	CountActive(ctx context.Context) (int, error)
 }
 
 type AllowlistStore interface {
