@@ -84,9 +84,82 @@ func (m *MockClient) Walk(_ context.Context, target string) (*Inventory, error) 
 		SysContact:     contact,
 		SysLocation:    location,
 		Interfaces:     ifaces,
+		Resources:      mockResources(seed, model.vendor),
 		PollDurationMs: 12,
 		Status:         "ok",
 	}, nil
+}
+
+// mockResources synthesises a believable CPU/memory snapshot keyed on
+// the per-exporter seed. CPU drifts slowly via time so successive
+// walks produce slightly different readings (the Summary sparkline
+// in the UI has something to draw); memory is stable so the "X GiB
+// of Y GiB" tile reads like a real device. Vendor branches keep
+// Cisco-only or Juniper-only behaviours from leaking into mocks for
+// the wrong platform.
+func mockResources(seed uint64, vendor string) []ResourceSample {
+	// Slow drift component so dashboards animate during local dev.
+	tick := uint64(time.Now().Unix()) / 30 // step every 30s
+	out := make([]ResourceSample, 0, 6)
+
+	// CPU — one or two cores depending on vendor flavour.
+	cpuCount := uint32(2)
+	if vendor == "Cisco" || vendor == "Juniper" {
+		cpuCount = 1
+	}
+	cpuSource := ResourceSourceHRMIB
+	if vendor == "Cisco" {
+		cpuSource = ResourceSourceCiscoProcess
+	}
+	for i := uint32(1); i <= cpuCount; i++ {
+		base := float32(15 + (seed+tick+uint64(i)*13)%55)
+		out = append(out, ResourceSample{
+			Kind:         ResourceKindCPU,
+			Component:    fmt.Sprintf("Processor %d", i),
+			ValuePercent: base,
+			Source:       cpuSource,
+		})
+	}
+
+	// Memory — one pool per vendor flavour. Total varies by model so
+	// the headline tile reads plausibly: 4 GiB on a switch, 16 GiB on
+	// a router-class device.
+	memTotal := uint64(4) << 30
+	memSource := ResourceSourceHRMIB
+	memComponent := "Physical Memory"
+	if vendor == "Cisco" {
+		memTotal = uint64(2) << 30
+		memSource = ResourceSourceCiscoMempool
+		memComponent = "Pool: Processor"
+	}
+	if vendor == "Juniper" {
+		memTotal = uint64(16) << 30
+	}
+	memUsed := uint64(float64(memTotal) * (0.35 + float64(seed%30)/100))
+	memPct := float32(float64(memUsed) / float64(memTotal) * 100)
+	out = append(out, ResourceSample{
+		Kind:         ResourceKindMemory,
+		Component:    memComponent,
+		ValuePercent: memPct,
+		ValueBytes:   memUsed,
+		MaxBytes:     memTotal,
+		Source:       memSource,
+	})
+
+	// Storage — bootflash / system disk so the UI has something in the
+	// "storage" row. HRMIB-derived; Cisco MIBs don't carry this in V1.
+	flashTotal := uint64(1) << 30
+	flashUsed := uint64(float64(flashTotal) * (0.45 + float64(seed%20)/100))
+	out = append(out, ResourceSample{
+		Kind:         ResourceKindStorage,
+		Component:    "bootflash:",
+		ValuePercent: float32(float64(flashUsed) / float64(flashTotal) * 100),
+		ValueBytes:   flashUsed,
+		MaxBytes:     flashTotal,
+		Source:       ResourceSourceHRMIB,
+	})
+
+	return out
 }
 
 func mockAliasFor(i uint32, vendor string) string {

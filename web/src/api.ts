@@ -103,6 +103,31 @@ export type DeviceInventory = {
   interfaces: SNMPInterface[]
 }
 
+export type DeviceResourceKind = 'cpu' | 'memory' | 'storage' | 'temperature' | 'fan'
+
+export type DeviceResourcePoint = {
+  ts: string
+  value_percent: number
+}
+
+export type DeviceResource = {
+  kind: DeviceResourceKind
+  component: string
+  source: string
+  latest_ts: string
+  latest_percent: number
+  latest_bytes: number
+  max_bytes: number
+  points: DeviceResourcePoint[]
+}
+
+export type DeviceResourcesResponse = {
+  exporter: string
+  count: number
+  rows: DeviceResource[]
+  window: string
+}
+
 export type Alert = {
   id: string
   rule_id: string
@@ -747,6 +772,10 @@ export const api = {
   deviceInventory: (exporter: string) =>
     getJSON<DeviceInventory>(
       `/api/devices/${encodeURIComponent(exporter)}/inventory`,
+    ),
+  deviceResources: (exporter: string, range?: TimeRangeArg) =>
+    getJSON<DeviceResourcesResponse>(
+      `/api/devices/${encodeURIComponent(exporter)}/resources?${timeQuery(range, 86400)}`,
     ),
   alerts: (state?: 'open' | 'acknowledged' | 'closed') =>
     getJSON<{ count: number; alerts: Alert[]; state: string }>(

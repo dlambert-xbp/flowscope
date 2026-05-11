@@ -4,6 +4,8 @@ import { api, fmt, labelExporter, labelInterface } from '../api'
 import type {
   Device,
   DeviceInventory,
+  DeviceResource,
+  DeviceResourceKind,
   InterfaceRow,
   RecentFlow,
   TopService,
@@ -548,6 +550,9 @@ function SummaryTab({
       <Section title="Inventory" sub="snmp · v2c" right="SOURCE · SNMP">
         <InventoryPanel exporter={exporter} />
       </Section>
+      <Section title="Health" sub="cpu · memory · storage · last 24h" right="SOURCE · SNMP">
+        <ResourcesPanel exporter={exporter} />
+      </Section>
       <Section
         title="Recent flows reported by this exporter"
         sub="last 60s · forwarded traffic, not addressed to this device"
@@ -610,6 +615,168 @@ function InventoryPanel({ exporter }: { exporter: string }) {
         </div>
       ))}
     </div>
+  )
+}
+
+// ResourcesPanel renders one tile per (kind, component) returned from
+// /api/devices/{exporter}/resources, grouped by kind so CPU rows sit
+// next to other CPU rows. Tile = headline number, secondary context
+// (bytes for memory/storage), tiny sparkline of percent over the
+// trailing 24h. Refreshes every 15s — slower than flow data because
+// SNMP polls on a 15-min cadence.
+function ResourcesPanel({ exporter }: { exporter: string }) {
+  const q = useQuery({
+    queryKey: ['device-resources', exporter],
+    queryFn: () => api.deviceResources(exporter, '24h'),
+    refetchInterval: 15_000,
+  })
+  if (q.isLoading) {
+    return <p className="text-dim font-mono text-[12px]">loading…</p>
+  }
+  if (q.error) {
+    return (
+      <p className="text-crit font-mono text-[12px]">
+        error · {(q.error as Error).message}
+      </p>
+    )
+  }
+  const rows = q.data?.rows ?? []
+  if (rows.length === 0) {
+    return (
+      <p className="text-dim font-mono text-[12px]">
+        no SNMP resource data yet · the snmp service walks HOST-RESOURCES-MIB
+        and CISCO-PROCESS / MEMORY-POOL MIBs on the same cadence as inventory
+      </p>
+    )
+  }
+  // Group rows by kind so CPU tiles sit together, then memory, etc.
+  const groups: Partial<Record<DeviceResourceKind, DeviceResource[]>> = {}
+  for (const r of rows) {
+    const g = groups[r.kind] ?? []
+    g.push(r)
+    groups[r.kind] = g
+  }
+  const order: DeviceResourceKind[] = ['cpu', 'memory', 'storage', 'temperature', 'fan']
+  return (
+    <div className="space-y-3">
+      {order
+        .filter((k) => groups[k] && groups[k]!.length > 0)
+        .map((kind) => (
+          <div key={kind}>
+            <div className="text-[10px] uppercase tracking-[0.12em] text-faint font-semibold mb-1.5">
+              {kind}
+            </div>
+            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2">
+              {groups[kind]!.map((r, i) => (
+                <ResourceTile key={`${r.component}_${i}`} r={r} />
+              ))}
+            </div>
+          </div>
+        ))}
+    </div>
+  )
+}
+
+function ResourceTile({ r }: { r: DeviceResource }) {
+  const pct = r.latest_percent
+  const tone = utilizationTone(pct)
+  const ageS = secondsSince(r.latest_ts)
+  return (
+    <div className="border border-line bg-ink px-3 py-2.5 min-w-0">
+      <div
+        className="font-mono text-[11px] text-dim truncate"
+        title={`${r.component} · via ${r.source}`}
+      >
+        {r.component}
+      </div>
+      <div className="flex items-baseline gap-2 mt-1">
+        <span className={`font-mono text-[20px] tabular leading-none ${tone.text}`}>
+          {pct.toFixed(0)}
+          <span className="text-[12px] text-faint">%</span>
+        </span>
+        <span className="ml-auto font-mono text-[10.5px] text-faint tabular truncate">
+          {byteContext(r)}
+        </span>
+      </div>
+      <div className="mt-1.5">
+        <Sparkline
+          points={r.points.map((p) => p.value_percent)}
+          stroke={tone.stroke}
+        />
+      </div>
+      <div className="font-mono text-[10px] text-faint mt-1">
+        {ageS < 60
+          ? `polled ${ageS.toFixed(0)}s ago`
+          : ageS < 3600
+            ? `polled ${(ageS / 60).toFixed(0)}m ago`
+            : `polled ${(ageS / 3600).toFixed(0)}h ago`}
+      </div>
+    </div>
+  )
+}
+
+// utilizationTone picks the colour for the headline percent + the
+// sparkline stroke. Thresholds match the Overview tab's "warn at 60,
+// crit at 80" convention — uses CSS classes that already exist in the
+// design system so theme switching keeps working.
+function utilizationTone(pct: number): { text: string; stroke: string } {
+  if (pct >= 80) return { text: 'text-crit', stroke: 'var(--color-crit, #d97757)' }
+  if (pct >= 60) return { text: 'text-warn', stroke: 'var(--color-warn, #d4a72c)' }
+  return { text: 'text-text', stroke: 'var(--color-accent, #8aa8c8)' }
+}
+
+// byteContext composes the small secondary string under the headline
+// percent. Empty for CPU (percent already tells the story); "X of Y"
+// for memory/storage when max_bytes is known.
+function byteContext(r: DeviceResource): string {
+  if (r.kind === 'cpu') return ''
+  if (r.max_bytes > 0) {
+    return `${fmt.bytes(r.latest_bytes)} / ${fmt.bytes(r.max_bytes)}`
+  }
+  if (r.latest_bytes > 0) {
+    return fmt.bytes(r.latest_bytes)
+  }
+  return ''
+}
+
+// Sparkline draws a 0–100 polyline in an inline SVG so we don't need
+// to pull a chart library in for a 20-pixel-tall trend. Y axis is
+// fixed at [0, 100] so adjacent tiles read on the same scale. Last
+// point gets a small dot so the eye lands on "now".
+function Sparkline({ points, stroke }: { points: number[]; stroke: string }) {
+  const w = 100
+  const h = 22
+  if (points.length === 0) {
+    return (
+      <svg viewBox={`0 0 ${w} ${h}`} className="w-full h-[22px]" preserveAspectRatio="none">
+        <line x1={0} y1={h - 1} x2={w} y2={h - 1} stroke="var(--color-line, #2a2a2a)" />
+      </svg>
+    )
+  }
+  if (points.length === 1) {
+    const y = h - (Math.max(0, Math.min(100, points[0])) / 100) * (h - 2) - 1
+    return (
+      <svg viewBox={`0 0 ${w} ${h}`} className="w-full h-[22px]" preserveAspectRatio="none">
+        <line x1={0} y1={y} x2={w} y2={y} stroke={stroke} strokeWidth={1} />
+        <circle cx={w - 1} cy={y} r={1.5} fill={stroke} />
+      </svg>
+    )
+  }
+  const stepX = w / (points.length - 1)
+  const path = points
+    .map((p, i) => {
+      const x = i * stepX
+      const y = h - (Math.max(0, Math.min(100, p)) / 100) * (h - 2) - 1
+      return `${i === 0 ? 'M' : 'L'} ${x.toFixed(2)} ${y.toFixed(2)}`
+    })
+    .join(' ')
+  const last = points[points.length - 1]
+  const lastY = h - (Math.max(0, Math.min(100, last)) / 100) * (h - 2) - 1
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} className="w-full h-[22px]" preserveAspectRatio="none">
+      <path d={path} fill="none" stroke={stroke} strokeWidth={1} />
+      <circle cx={w - 0.5} cy={lastY} r={1.5} fill={stroke} />
+    </svg>
   )
 }
 

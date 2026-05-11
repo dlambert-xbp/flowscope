@@ -35,6 +35,55 @@ const (
 	// IF-MIB ifXTable extensions (use these where available).
 	OIDIfHighSpeed = "1.3.6.1.2.1.31.1.1.1.15" // Mbps; preferred over ifSpeed
 	OIDIfAlias     = "1.3.6.1.2.1.31.1.1.1.18" // operator description
+
+	// HOST-RESOURCES-MIB — generic CPU + memory + storage. Works on
+	// Linux/BSD and a subset of enterprise switches; commonly partial
+	// or missing on network gear (which is why we also fall back to
+	// vendor MIBs below).
+	//
+	// hrProcessorTable is indexed by hrDeviceIndex; hrProcessorLoad is
+	// an integer 0–100 averaged over the last minute per CPU.
+	OIDHrDeviceDescr   = "1.3.6.1.2.1.25.3.2.1.3"  // human label for the device row
+	OIDHrProcessorLoad = "1.3.6.1.2.1.25.3.3.1.2"  // 0–100 per CPU
+	// hrStorageTable carries one entry per logical storage (RAM, swap,
+	// each mounted disk). hrStorageType discriminates RAM vs disk so
+	// we can route to the "memory" or "storage" kind. AllocationUnits
+	// (bytes per slot) * Size (slots) = total bytes; * Used (slots) =
+	// used bytes.
+	OIDHrStorageType            = "1.3.6.1.2.1.25.2.3.1.2" // OID; .2 = RAM, .4 = fixed disk, .3 = virtual, etc.
+	OIDHrStorageDescr           = "1.3.6.1.2.1.25.2.3.1.3"
+	OIDHrStorageAllocationUnits = "1.3.6.1.2.1.25.2.3.1.4"
+	OIDHrStorageSize            = "1.3.6.1.2.1.25.2.3.1.5"
+	OIDHrStorageUsed            = "1.3.6.1.2.1.25.2.3.1.6"
+
+	// hrStorageType discriminator values (last digit of the OID
+	// hrStorageType returns). RAM = 2, virtual memory = 3, fixed disk = 4,
+	// removable disk = 5, network disk = 6, network alloc = 7,
+	// flash memory = 8 (rare).
+	OIDHrStorageRAM        = "1.3.6.1.2.1.25.2.1.2"
+	OIDHrStorageVirtualMem = "1.3.6.1.2.1.25.2.1.3"
+	OIDHrStorageFixedDisk  = "1.3.6.1.2.1.25.2.1.4"
+
+	// CISCO-PROCESS-MIB — Cisco-specific CPU. Better than HRMIB on
+	// IOS/IOS-XE because it surfaces per-process-context CPU averaged
+	// over 5sec/1min/5min. We grab the 5-minute average (cpmCPUTotal5minRev)
+	// keyed by cpmCPUTotalIndex (an arbitrary integer).
+	OIDCpmCPUTotal5minRev = "1.3.6.1.4.1.9.9.109.1.1.1.1.8"
+	OIDCpmCPUTotal1minRev = "1.3.6.1.4.1.9.9.109.1.1.1.1.7"
+	// cpmCPUTotalPhysicalIndex points back into entPhysicalTable for
+	// the human label (e.g. "Switch1 Cpu of Module 1"). We resolve it
+	// when present, falling back to "CPU N" with the table index.
+	OIDCpmCPUTotalPhysicalIndex = "1.3.6.1.4.1.9.9.109.1.1.1.1.2"
+
+	// CISCO-MEMORY-POOL-MIB — Cisco-specific memory by named pool
+	// ("Processor", "I/O", etc.). Used + Free in bytes, name string.
+	OIDCiscoMemoryPoolName = "1.3.6.1.4.1.9.9.48.1.1.1.2"
+	OIDCiscoMemoryPoolUsed = "1.3.6.1.4.1.9.9.48.1.1.1.5"
+	OIDCiscoMemoryPoolFree = "1.3.6.1.4.1.9.9.48.1.1.1.6"
+
+	// ENTITY-MIB — used to resolve the cpmCPUTotalPhysicalIndex to a
+	// human-readable component name.
+	OIDEntPhysicalName = "1.3.6.1.2.1.47.1.1.1.1.7"
 )
 
 // ifAdminStatusName / ifOperStatusName render IF-MIB integer codes

@@ -780,6 +780,38 @@ func (h *handlers) devices(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// deviceResources returns the per-component CPU / memory / storage
+// timeseries for one exporter over the requested window. The body
+// shape is one entry per (kind, component), each carrying the
+// freshest reading plus a small sparkline array of percent values.
+// Drives the Devices Summary tab tiles + sparklines.
+//
+//	GET /api/devices/{exporter}/resources?window=24h
+//	GET /api/devices/{exporter}/resources?from=...&to=...
+//
+// Empty rows array is the normal "no SNMP yet" case — the UI shows
+// the "no resource data" empty state instead of an error.
+func (h *handlers) deviceResources(w http.ResponseWriter, r *http.Request) {
+	exporterStr := chi.URLParam(r, "exporter")
+	exporter, err := netip.ParseAddr(exporterStr)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid exporter address")
+		return
+	}
+	tr := parseTimeRange(r, 24*time.Hour)
+	rows, err := store.QueryDeviceResources(r.Context(), h.conn, exporter, tr)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"exporter": exporter.Unmap().String(),
+		"count":    len(rows),
+		"rows":     rows,
+		"window":   tr.WindowDuration().String(),
+	})
+}
+
 // deviceInventory returns the latest SNMP snapshot for one exporter.
 //
 //	GET /api/devices/{exporter}/inventory
