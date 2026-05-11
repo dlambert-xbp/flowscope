@@ -27,6 +27,31 @@ pinned in `clickhouse.go`); subsequent runs reuse the local image cache.
   applies every migration in `internal/store/migrations/`, and returns
   a connected `driver.Conn` plus a `Cleanup()` for `t.Cleanup`. No
   build tag — the helper is reusable from any package.
+- `ClickHouseHandle.Truncate` clears every table FlowScope writes to,
+  including the SNMP inventory tables (`device_snmp_interfaces`) and
+  operator-tunable settings tables (`alert_rule_settings`). Append new
+  tables here when migrations add them so per-test isolation stays
+  honest.
+
+## Fixture seeding
+
+Per-package `_integration_test.go` files own their fixture-row helpers
+to keep the cross-package surface small. The alerteng suite, for
+example, declares:
+
+- `insertFlows` (in `internal/alerteng/evaluator_integration_test.go`)
+  — writes rows into `flows` via `PrepareBatch`, matching the 17-column
+  schema from `000001_init.sql` + `000007_asn.sql`.
+- `insertIfaces` and `insertCounterSamples` (in
+  `internal/alerteng/evaluator_extra_integration_test.go`) — write the
+  `device_snmp_interfaces` and `iface_counter_samples` rows the four
+  P1 rules read. Match the column counts in `000003_snmp.sql` and
+  `000001_init.sql` exactly.
+
+When you add a rule that reads a new column, update the corresponding
+seed helper in the same PR — drift between the helper signature and
+the SQL is the most common cause of `clickhouse: bind error: too few
+values` failures.
 
 ## Conventions
 
