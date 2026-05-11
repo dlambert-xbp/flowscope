@@ -9,9 +9,11 @@ import (
 
 // DefaultRules returns the v0 built-in rule set. The four extra rules
 // added in the P1 push (oper-status change, utilization, errors rate,
-// baseline anomaly) live in rules_extra.go. BGP transitions and
-// device-unreachable are still deferred until bgpPeerTable walks and
-// gNMI ingest land in P3.
+// baseline anomaly) live in rules_extra.go. The four device-health
+// rules (CPU / memory / storage / unreachable) live in rules_device.go;
+// they read the snmp service's tables and require no new ingest path.
+// BGP transitions and gNMI-driven unreachability remain deferred until
+// bgpPeerTable walks and gNMI ingest land.
 func DefaultRules() []Rule {
 	return []Rule{
 		ExporterSilent{
@@ -38,6 +40,25 @@ func DefaultRules() []Rule {
 		TopTalkerBaselineAnomaly{
 			Multiplier:       3.0,
 			MinBaselineBytes: 1_000_000_000, // 1 GB
+		},
+		DeviceCPUHigh{
+			ThresholdPct:    80,
+			CriticalBumpPct: 15,
+			LookbackSeconds: 1800,
+		},
+		DeviceMemoryHigh{
+			ThresholdPct:    85,
+			CriticalBumpPct: 10,
+			LookbackSeconds: 1800,
+		},
+		DeviceStorageHigh{
+			ThresholdPct:    85,
+			CriticalBumpPct: 10,
+			LookbackSeconds: 3600,
+		},
+		DeviceUnreachable{
+			StaleSeconds:  2700,
+			LookbackHours: 24,
 		},
 	}
 }
