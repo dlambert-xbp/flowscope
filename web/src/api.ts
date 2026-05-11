@@ -510,9 +510,30 @@ export type AuditEntry = {
 }
 
 async function getJSON<T>(url: string): Promise<T> {
-  const r = await fetch(url, { cache: 'no-store' })
+  // Phase 1 auth: when the operator has saved an X-Auth-Token in
+  // localStorage (Settings page), attach it to every read so the
+  // backend's RequireRead middleware lets the request through. When
+  // no token is saved we still send the request — the backend allows
+  // unauth-bypass when no auth is configured server-side, and returns
+  // 401 when it is. The caller's existing error path surfaces that.
+  const headers: Record<string, string> = {}
+  const tok = settingsAuthToken()
+  if (tok) headers['X-Auth-Token'] = tok
+  const r = await fetch(url, { cache: 'no-store', headers })
   if (!r.ok) throw new Error(`${url} → ${r.status} ${r.statusText}`)
   return (await r.json()) as T
+}
+
+// authHeaders builds the headers a read-tier POST (alert ack/close,
+// SNMP test/walk) needs: optional Content-Type plus the saved
+// X-Auth-Token if present. Centralised so every fetch in this file
+// behaves the same way after the Phase 1 read gate landed.
+function authHeaders(hasBody: boolean): Record<string, string> {
+  const headers: Record<string, string> = {}
+  if (hasBody) headers['Content-Type'] = 'application/json'
+  const tok = settingsAuthToken()
+  if (tok) headers['X-Auth-Token'] = tok
+  return headers
 }
 
 // TimeRangeArg is the API-facing slice of a TimeRange — either a
@@ -667,12 +688,18 @@ export const api = {
   alertDetail: (id: string) =>
     getJSON<AlertDetail>(`/api/alerts/${encodeURIComponent(id)}`),
   ackAlert: (id: string) =>
-    fetch(`/api/alerts/${encodeURIComponent(id)}/ack`, { method: 'POST' }).then((r) => {
+    fetch(`/api/alerts/${encodeURIComponent(id)}/ack`, {
+      method: 'POST',
+      headers: authHeaders(false),
+    }).then((r) => {
       if (!r.ok) throw new Error(`ack ${id} → ${r.status}`)
       return r.json()
     }),
   closeAlert: (id: string) =>
-    fetch(`/api/alerts/${encodeURIComponent(id)}/close`, { method: 'POST' }).then((r) => {
+    fetch(`/api/alerts/${encodeURIComponent(id)}/close`, {
+      method: 'POST',
+      headers: authHeaders(false),
+    }).then((r) => {
       if (!r.ok) throw new Error(`close ${id} → ${r.status}`)
       return r.json()
     }),
