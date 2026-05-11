@@ -461,6 +461,20 @@ export type Webhook = {
   updated_by?: string
 }
 
+// WebhookTestResult is the response from POST /api/settings/integrations/
+// webhooks/{id}/test. OK = endpoint accepted the synthetic alert
+// (HTTP 2xx). Skipped = severity_filter excluded the test (rare). On
+// failure http_status + error carry the diagnostic so the UI can
+// render "401 Unauthorized — check the token".
+export type WebhookTestResult = {
+  ok: boolean
+  skipped?: boolean
+  reason?: string
+  http_status?: number
+  duration_ms?: number
+  error?: string
+}
+
 export type OIDCConfig = {
   enabled: boolean
   issuer?: string
@@ -842,6 +856,11 @@ export const api = {
     ),
   deleteWebhook: (id: string) =>
     settingsWrite(`/api/settings/integrations/webhooks/${encodeURIComponent(id)}`, 'DELETE'),
+  testWebhook: (id: string) =>
+    settingsWrite<WebhookTestResult>(
+      `/api/settings/integrations/webhooks/${encodeURIComponent(id)}/test`,
+      'POST',
+    ),
 
   /* --------------------- OIDC --------------------- */
   getOIDC: () => getJSON<OIDCConfig>(`/api/settings/oidc`),

@@ -3,13 +3,17 @@
 // the alert_events table. The api service reads from that table to
 // serve /api/alerts; this binary writes only.
 //
+// In the same process the webhook dispatcher polls alert_events for
+// opened / closed transitions and fans out to enabled
+// webhook_endpoints (Slack / Teams / PagerDuty / HTTP). Co-locating
+// the dispatcher with the engine keeps the deploy footprint at one
+// binary; it inherits the single-replica constraint until leader
+// election (P0 #5) lands and is documented as a known tradeoff.
+//
 // VISION.md §6 calls for the alert service to run as a singleton
 // (leader-elected against ClickHouse Keeper). Slice 14 ships a
 // single-replica engine and assumes one instance — production
 // readiness adds the lease lock in a follow-up.
-//
-// Webhook / email / syslog notification channels also arrive in a
-// follow-up slice. For now alerts surface via the api + Alerts tab.
 package main
 
 import (
@@ -19,12 +23,16 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/dlambert-xbp/flowscope/internal/alerteng"
+	"github.com/dlambert-xbp/flowscope/internal/audit"
+	"github.com/dlambert-xbp/flowscope/internal/notifier"
 	"github.com/dlambert-xbp/flowscope/internal/obs"
 	"github.com/dlambert-xbp/flowscope/internal/settings"
+	"github.com/dlambert-xbp/flowscope/internal/snmpx"
 	"github.com/dlambert-xbp/flowscope/internal/store"
 )
 
@@ -92,7 +100,44 @@ func run() error {
 	engine := alerteng.New(conn, rules, tick).
 		WithSettingsSource(settingsStore.AlertRules, version).
 		WithStabilityWindow(stability)
-	return engine.Run(ctx)
+
+	// Webhook dispatcher runs alongside the engine. It is independent
+	// — the engine writes events; the dispatcher reads them and fans
+	// out. Both share the same ClickHouse connection. When
+	// FLOWSCOPE_SNMP_KEY is unset the dispatcher logs a warning and
+	// skips endpoints that store secrets, since secret_ct can't be
+	// decrypted without the master.
+	var crypter *snmpx.Crypter
+	if mk := os.Getenv("FLOWSCOPE_SNMP_KEY"); mk != "" {
+		c, err := snmpx.NewCrypter(mk)
+		if err != nil {
+			return fmt.Errorf("snmp crypter: %w", err)
+		}
+		crypter = c
+	} else {
+		slog.Warn("FLOWSCOPE_SNMP_KEY not set — webhook dispatcher will skip endpoints with secrets (PagerDuty / authenticated HTTP)")
+	}
+
+	dispTickStr := envOr("FLOWSCOPE_NOTIFIER_TICK", "5s")
+	dispTick, err := time.ParseDuration(dispTickStr)
+	if err != nil {
+		return fmt.Errorf("invalid FLOWSCOPE_NOTIFIER_TICK %q: %w", dispTickStr, err)
+	}
+	auditW := audit.NewClickHouseWriter(conn)
+	disp := notifier.New(conn, crypter, auditW).WithTick(dispTick)
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := disp.Run(ctx); err != nil {
+			slog.Error("notifier: dispatcher exited with error", "err", err)
+		}
+	}()
+
+	engineErr := engine.Run(ctx)
+	wg.Wait()
+	return engineErr
 }
 
 func envOr(key, def string) string {

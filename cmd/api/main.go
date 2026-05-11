@@ -25,6 +25,7 @@ import (
 
 	"github.com/dlambert-xbp/flowscope/internal/audit"
 	"github.com/dlambert-xbp/flowscope/internal/authz"
+	"github.com/dlambert-xbp/flowscope/internal/notifier"
 	"github.com/dlambert-xbp/flowscope/internal/obs"
 	"github.com/dlambert-xbp/flowscope/internal/rdns"
 	"github.com/dlambert-xbp/flowscope/internal/services"
@@ -103,9 +104,21 @@ func run() error {
 	r.Use(middleware.Recoverer)
 	r.Use(requestLogger)
 
+	// Webhook test endpoint reuses the dispatcher's delivery pipeline.
+	// Only available when crypter is configured because endpoint
+	// secrets are sealed. The dispatcher itself runs in cmd/alert, not
+	// here — this is a lightweight, never-Run() instance used only for
+	// SendTest.
+	var testDispatcher *notifier.Dispatcher
+	if crypter != nil {
+		testDispatcher = notifier.New(conn, crypter, auditWriter)
+	}
+
 	h := &handlers{
-		conn:  conn,
-		creds: creds,
+		conn:           conn,
+		creds:          creds,
+		crypter:        crypter,
+		testDispatcher: testDispatcher,
 		settings: settingsDeps{
 			store:    settingsStore,
 			resolver: resolver,
@@ -181,6 +194,7 @@ func run() error {
 		r.Put("/api/settings/integrations/webhooks", h.putWebhook)
 		r.Put("/api/settings/integrations/webhooks/{id}", h.putWebhook)
 		r.Delete("/api/settings/integrations/webhooks/{id}", h.deleteWebhook)
+		r.Post("/api/settings/integrations/webhooks/{id}/test", h.testWebhook)
 		r.Put("/api/settings/oidc", h.putOIDC)
 	})
 	r.Group(func(r chi.Router) {
