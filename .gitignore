@@ -27,3 +27,5 @@ bin/
 # (see secrets/snmp_master.example for instructions) and never committed.
 /secrets/*
 !/secrets/*.example
+
+.claude
