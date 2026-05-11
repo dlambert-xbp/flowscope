@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -13,14 +14,22 @@ import (
 )
 
 // fakeTokens is a tiny in-memory APITokensStore for middleware
-// tests. Only Verify is exercised; the rest of the methods return
-// "not implemented" errors so a slip in the middleware that calls
-// into them gets caught.
+// tests. Only Verify and CountActive are exercised; the rest of the
+// methods return "not implemented" errors so a slip in the middleware
+// that calls into them gets caught.
+//
+// activeCount controls what CountActive returns. countErr forces
+// CountActive to surface an error so the fail-closed branch can be
+// tested. When the test wants the historical "store provisioned but
+// empty" shape, leave activeCount at zero and countErr nil.
 type fakeTokens struct {
-	plain string
-	scope string
-	id    uuid.UUID
-	used  int
+	plain       string
+	scope       string
+	id          uuid.UUID
+	used        int
+	activeCount int
+	countErr    error
+	countCalls  int
 }
 
 func (f *fakeTokens) List(context.Context) ([]settings.APIToken, error) {
@@ -48,6 +57,13 @@ func (f *fakeTokens) Verify(_ context.Context, plaintext string) (*settings.APIT
 func (f *fakeTokens) MarkUsed(context.Context, string) error {
 	f.used++
 	return nil
+}
+func (f *fakeTokens) CountActive(context.Context) (int, error) {
+	f.countCalls++
+	if f.countErr != nil {
+		return 0, f.countErr
+	}
+	return f.activeCount, nil
 }
 
 func okHandler(t *testing.T, wantSubject string) http.Handler {
@@ -101,7 +117,7 @@ func TestSharedTokenWrongValueRejects(t *testing.T) {
 }
 
 func TestPerTokenWriteAccepts(t *testing.T) {
-	tk := &fakeTokens{plain: "fls_real", scope: "write", id: uuid.New()}
+	tk := &fakeTokens{plain: "fls_real", scope: "write", id: uuid.New(), activeCount: 1}
 	cfg := Config{Tokens: tk}
 	mw := cfg.RequireWrite()(okHandler(t, "token"))
 	w := httptest.NewRecorder()
@@ -115,7 +131,7 @@ func TestPerTokenWriteAccepts(t *testing.T) {
 }
 
 func TestReadScopeRejectedFromWriteRoute(t *testing.T) {
-	tk := &fakeTokens{plain: "fls_readonly", scope: "read", id: uuid.New()}
+	tk := &fakeTokens{plain: "fls_readonly", scope: "read", id: uuid.New(), activeCount: 1}
 	cfg := Config{Tokens: tk}
 	mw := cfg.RequireWrite()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Error("handler should not be called for read scope on write route")
@@ -128,7 +144,7 @@ func TestReadScopeRejectedFromWriteRoute(t *testing.T) {
 }
 
 func TestWriteScopeRejectedFromAdminRoute(t *testing.T) {
-	tk := &fakeTokens{plain: "fls_writer", scope: "write", id: uuid.New()}
+	tk := &fakeTokens{plain: "fls_writer", scope: "write", id: uuid.New(), activeCount: 1}
 	cfg := Config{Tokens: tk}
 	mw := cfg.RequireAdmin()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Error("handler should not be called for write scope on admin route")
@@ -141,7 +157,7 @@ func TestWriteScopeRejectedFromAdminRoute(t *testing.T) {
 }
 
 func TestAdminTokenSatisfiesWriteAndAdmin(t *testing.T) {
-	tk := &fakeTokens{plain: "fls_admin", scope: "admin", id: uuid.New()}
+	tk := &fakeTokens{plain: "fls_admin", scope: "admin", id: uuid.New(), activeCount: 1}
 	cfg := Config{Tokens: tk}
 	for _, label := range []struct {
 		name string
@@ -242,7 +258,7 @@ func TestRequireReadWrongTokenRejects401(t *testing.T) {
 func TestRequireReadAcceptsAllScopes(t *testing.T) {
 	for _, scope := range []string{"read", "write", "admin"} {
 		t.Run(scope, func(t *testing.T) {
-			tk := &fakeTokens{plain: "fls_" + scope, scope: scope, id: uuid.New()}
+			tk := &fakeTokens{plain: "fls_" + scope, scope: scope, id: uuid.New(), activeCount: 1}
 			cfg := Config{Tokens: tk}
 			mw := cfg.RequireRead()(okHandler(t, "token"))
 			w := httptest.NewRecorder()
@@ -251,5 +267,112 @@ func TestRequireReadAcceptsAllScopes(t *testing.T) {
 				t.Errorf("scope=%s: status = %d, want 204", scope, w.Code)
 			}
 		})
+	}
+}
+
+/* ------------------ zero-rows bypass behaviour (the fix) ------------------ */
+
+// When SharedToken is empty AND the api_tokens store has zero active
+// rows, the middleware MUST let requests through with the bypass
+// subject — that's the zero-config dev / bootstrap UX. Pre-fix, this
+// failed: c.Tokens != nil was sufficient to disable bypass, so a
+// fresh install with no shared token and no minted tokens returned
+// 401 on every request.
+func TestBypassFiresWhenTokensStoreIsEmpty(t *testing.T) {
+	tk := &fakeTokens{activeCount: 0}
+	cfg := Config{Tokens: tk}
+	mw := cfg.RequireRead()(okHandler(t, "unauth-bypass"))
+	w := httptest.NewRecorder()
+	mw.ServeHTTP(w, readReq(""))
+	if w.Code != http.StatusNoContent {
+		t.Errorf("status = %d, want 204", w.Code)
+	}
+	if tk.countCalls == 0 {
+		t.Errorf("CountActive should have been consulted on the bypass branch")
+	}
+}
+
+// Once an operator mints a token (activeCount > 0), the gate becomes
+// strict: a request with no header must get 401, not the bypass.
+func TestBypassDoesNotFireWhenTokensExist(t *testing.T) {
+	tk := &fakeTokens{activeCount: 1}
+	cfg := Config{Tokens: tk}
+	mw := cfg.RequireRead()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("handler should not be called when tokens exist and no header was sent")
+	}))
+	w := httptest.NewRecorder()
+	mw.ServeHTTP(w, readReq(""))
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", w.Code)
+	}
+	if got := w.Body.String(); !strings.Contains(got, "missing X-Auth-Token") {
+		t.Errorf("body = %q, want it to mention missing X-Auth-Token", got)
+	}
+}
+
+// Wrong header with a non-empty store: still 401, but the "invalid"
+// branch — distinct from "missing" — so the operator can tell the
+// difference.
+func TestWrongTokenWithPopulatedStoreReturnsInvalid(t *testing.T) {
+	tk := &fakeTokens{plain: "fls_real", scope: "read", id: uuid.New(), activeCount: 1}
+	cfg := Config{Tokens: tk}
+	mw := cfg.RequireRead()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("handler should not be called for a bad token")
+	}))
+	w := httptest.NewRecorder()
+	mw.ServeHTTP(w, readReq("fls_wrong"))
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", w.Code)
+	}
+	if got := w.Body.String(); !strings.Contains(got, "invalid X-Auth-Token") {
+		t.Errorf("body = %q, want it to mention invalid X-Auth-Token", got)
+	}
+}
+
+// SharedToken set + store empty + correct shared header → accepted as
+// "shared". The bypass branch must NOT short-circuit ahead of the
+// shared-token check (it's predicated on SharedToken == "").
+func TestSharedTokenStillUsedWhenStoreEmpty(t *testing.T) {
+	tk := &fakeTokens{activeCount: 0}
+	cfg := Config{SharedToken: "sh-secret", Tokens: tk}
+	mw := cfg.RequireRead()(okHandler(t, "shared"))
+	w := httptest.NewRecorder()
+	mw.ServeHTTP(w, readReq("sh-secret"))
+	if w.Code != http.StatusNoContent {
+		t.Errorf("status = %d, want 204", w.Code)
+	}
+	if tk.countCalls != 0 {
+		t.Errorf("CountActive must not be called when SharedToken is set; called %d times", tk.countCalls)
+	}
+}
+
+// Fail-closed: if CountActive errors, the bypass MUST NOT fire. A
+// missing X-Auth-Token is rejected, the audit log is left to record
+// the failure (we don't open the door on a transient DB outage).
+func TestBypassFailsClosedOnCountError(t *testing.T) {
+	tk := &fakeTokens{countErr: errors.New("clickhouse: connection refused")}
+	cfg := Config{Tokens: tk}
+	mw := cfg.RequireRead()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("handler should not be called when CountActive errors")
+	}))
+	w := httptest.NewRecorder()
+	mw.ServeHTTP(w, readReq(""))
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401 (fail-closed)", w.Code)
+	}
+}
+
+// Tokens==nil (e.g. api booted in a mode where the store isn't wired)
+// must continue to fire the bypass alongside SharedToken=="". This
+// preserves the historical behaviour and the existing
+// TestNoAuthConfiguredFallsThrough case explicitly with the new code
+// path going through bypassActive.
+func TestBypassFiresWhenTokensStoreIsNil(t *testing.T) {
+	cfg := Config{} // both fields zero
+	mw := cfg.RequireRead()(okHandler(t, "unauth-bypass"))
+	w := httptest.NewRecorder()
+	mw.ServeHTTP(w, readReq(""))
+	if w.Code != http.StatusNoContent {
+		t.Errorf("status = %d, want 204", w.Code)
 	}
 }

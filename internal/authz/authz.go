@@ -18,6 +18,7 @@ package authz
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -92,7 +93,22 @@ func (c Config) requireScope(min string) func(http.Handler) http.Handler {
 
 			// No auth configured at all — let it through with a
 			// stamped Subject so audit rows record the gap.
-			if c.SharedToken == "" && c.Tokens == nil {
+			//
+			// "No auth" means: no shared token AND no active rows
+			// in api_tokens. c.Tokens is always non-nil in
+			// production (it's a store handle assigned at boot
+			// from settings.New(...)), so a nil-only check was the
+			// original bug — the bypass never fired on a fresh
+			// install. We probe the store directly so a freshly
+			// minted token flips the gate to strict on the next
+			// request.
+			//
+			// Fail-closed semantics: if CountActive errors we log
+			// and treat the store as non-empty. That keeps the
+			// gate strict (callers will get a 401 missing/invalid
+			// header) rather than opening the door on a transient
+			// DB blip. Per CLAUDE.md §"No silent failures".
+			if c.SharedToken == "" && c.bypassActive(r.Context()) {
 				ctx := WithSubject(r.Context(), Subject{
 					Source: "unauth-bypass",
 					Actor:  "anonymous",
@@ -164,4 +180,25 @@ func readToken(r *http.Request) string {
 func scopeAtLeast(have, min string) bool {
 	rank := map[string]int{"read": 1, "write": 2, "admin": 3}
 	return rank[have] >= rank[min]
+}
+
+// bypassActive reports whether the "no auth configured" fallback
+// should fire. It is only consulted on the SharedToken==""  branch,
+// so the DB hit is paid only on dev / bootstrap stacks. A nil Tokens
+// store is treated as "no per-token mode wired" and counts as empty.
+// A non-nil store is queried for its active-row count; an error from
+// the store is logged and treated as "non-empty" so the gate fails
+// closed rather than opening on a transient outage.
+func (c Config) bypassActive(ctx context.Context) bool {
+	if c.Tokens == nil {
+		return true
+	}
+	n, err := c.Tokens.CountActive(ctx)
+	if err != nil {
+		slog.Warn("authz: api_tokens CountActive failed; treating store as non-empty (fail-closed)",
+			"err", err,
+		)
+		return false
+	}
+	return n == 0
 }
