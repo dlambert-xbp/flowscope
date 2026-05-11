@@ -4,6 +4,10 @@
 # service. As more services land (api, alert, snmp, gnmi, web), they
 # extend this file.
 #
+# First-time setup: run `make bootstrap-secrets` to create
+# ./secrets/snmp_master (gitignored). Without it, docker compose up
+# fails on a missing bind-mount source.
+#
 # The Python-era stack lives on the `v1` branch.
 
 services:

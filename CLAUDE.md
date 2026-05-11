@@ -67,6 +67,7 @@ cd web && npm run test                      # Vitest
 cd web && npm run e2e                       # Playwright (requires backend running)
 
 # Local stack via docker compose (ClickHouse + all services)
+make bootstrap-secrets                      # First-time: creates ./secrets/snmp_master
 docker compose up --build
 
 # OpenAPI client regen (after editing api/openapi.yaml)
