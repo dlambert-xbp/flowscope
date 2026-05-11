@@ -12,6 +12,7 @@ import type {
   TopTalker,
 } from '../api'
 import { InterfaceChart } from './InterfaceChart'
+import { TimeseriesChart } from './TimeseriesChart'
 import { ServiceLabel } from './ServiceLabel'
 import {
   rangeLabel,
@@ -738,6 +739,12 @@ function ResourcesPanel({ exporter }: { exporter: string }) {
     'voltage',
     'current',
   ]
+  // selected is the (kind, component) pair the operator clicked to
+  // expand into a full-size chart. Stored as a string key for cheap
+  // equality. Click the same tile again to dismiss.
+  const [selected, setSelected] = useState<string | null>(null)
+  const selectedRow =
+    selected != null ? rows.find((r) => `${r.kind}_${r.component}` === selected) : undefined
   return (
     <div className="space-y-3">
       {order
@@ -748,17 +755,104 @@ function ResourcesPanel({ exporter }: { exporter: string }) {
               {kind}
             </div>
             <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2">
-              {groups[kind]!.map((r, i) => (
-                <ResourceTile key={`${r.component}_${i}`} r={r} />
-              ))}
+              {groups[kind]!.map((r, i) => {
+                const key = `${r.kind}_${r.component}`
+                return (
+                  <ResourceTile
+                    key={`${r.component}_${i}`}
+                    r={r}
+                    active={selected === key}
+                    onClick={() => setSelected((s) => (s === key ? null : key))}
+                  />
+                )
+              })}
             </div>
           </div>
         ))}
+      {selectedRow && (
+        <ExpandedResourceChart
+          r={selectedRow}
+          onClose={() => setSelected(null)}
+        />
+      )}
     </div>
   )
 }
 
-function ResourceTile({ r }: { r: DeviceResource }) {
+// ExpandedResourceChart renders the selected tile's full sparkline
+// data as a regular time-series chart with drag-to-zoom. Reads
+// value_numeric for sensor kinds (temperature, fan, voltage, current,
+// power-watts) and value_percent for utilization kinds (cpu, memory,
+// storage). Header explains which kind / source you're looking at and
+// gives a close affordance.
+function ExpandedResourceChart({
+  r,
+  onClose,
+}: {
+  r: DeviceResource
+  onClose: () => void
+}) {
+  const usesNumeric = !isUtilizationKind(r.kind)
+  const xs = r.points.map((p) =>
+    Math.floor(new Date(p.ts).getTime() / 1000),
+  )
+  const values = r.points.map((p) =>
+    usesNumeric ? p.value_numeric : p.value_percent,
+  )
+  const tone = resourceTone(r)
+  const decimals = r.kind === 'fan' ? 0 : 1
+  const yFormat = (v: number) => {
+    if (!usesNumeric) return `${v.toFixed(0)}%`
+    if (r.unit) return `${v.toFixed(decimals)} ${r.unit}`
+    return v.toFixed(decimals)
+  }
+  return (
+    <div className="mt-1 border border-line bg-surface">
+      <div className="flex items-baseline gap-3 px-4 py-2 border-b border-line">
+        <span className="text-[11px] uppercase tracking-[0.1em] text-dim font-semibold">
+          {r.kind} · {r.component}
+        </span>
+        <span className="font-mono text-[10.5px] text-faint">via {r.source}</span>
+        <button
+          type="button"
+          onClick={onClose}
+          className="ml-auto font-mono text-[10.5px] text-dim hover:text-text"
+          aria-label="Close expanded chart"
+        >
+          × close
+        </button>
+      </div>
+      <div className="px-4 py-3">
+        <TimeseriesChart
+          xs={xs}
+          series={[
+            {
+              label: r.component,
+              color: tone.stroke,
+              values,
+              format: yFormat,
+            },
+          ]}
+          height={200}
+          yMin={usesNumeric ? undefined : 0}
+          yMax={usesNumeric ? undefined : 100}
+          yFormat={yFormat}
+          emptyLabel="no readings in this window"
+        />
+      </div>
+    </div>
+  )
+}
+
+function ResourceTile({
+  r,
+  active,
+  onClick,
+}: {
+  r: DeviceResource
+  active: boolean
+  onClick: () => void
+}) {
   const tone = resourceTone(r)
   const ageS = secondsSince(r.latest_ts)
   const headline = resourceHeadline(r)
@@ -772,7 +866,15 @@ function ResourceTile({ r }: { r: DeviceResource }) {
     usesNumeric ? p.value_numeric : p.value_percent,
   )
   return (
-    <div className="border border-line bg-ink px-3 py-2.5 min-w-0">
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      title="Expand chart"
+      className={`text-left border bg-ink px-3 py-2.5 min-w-0 hover:border-accent ${
+        active ? 'border-accent' : 'border-line'
+      }`}
+    >
       <div
         className="font-mono text-[11px] text-dim truncate"
         title={`${r.component} · via ${r.source}`}
@@ -800,7 +902,7 @@ function ResourceTile({ r }: { r: DeviceResource }) {
             ? `polled ${(ageS / 60).toFixed(0)}m ago`
             : `polled ${(ageS / 3600).toFixed(0)}h ago`}
       </div>
-    </div>
+    </button>
   )
 }
 
