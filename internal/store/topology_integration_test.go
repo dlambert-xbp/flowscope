@@ -77,6 +77,14 @@ func insertNeighbors(ctx context.Context, t *testing.T, conn driver.Conn, rows [
 
 func insertInventoryT(ctx context.Context, t *testing.T, conn driver.Conn, exporter, sysName, sysDescr string) {
 	t.Helper()
+	insertInventoryAtT(ctx, t, conn, exporter, sysName, sysDescr, "")
+}
+
+// insertInventoryAtT extends insertInventoryT with an explicit
+// sys_location. The topology scope-selector test asserts the
+// QueryTopology join propagates this field to every TopologyNode.
+func insertInventoryAtT(ctx context.Context, t *testing.T, conn driver.Conn, exporter, sysName, sysDescr, sysLocation string) {
+	t.Helper()
 	if err := conn.Exec(ctx,
 		`INSERT INTO device_inventory
 		   (polled_at, exporter, sys_descr, sys_object_id, sys_uptime_ms,
@@ -84,7 +92,7 @@ func insertInventoryT(ctx context.Context, t *testing.T, conn driver.Conn, expor
 		    poll_duration_ms, poll_status)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		time.Now().UTC(), toIPv6BytesT(exporter), sysDescr, "1.3.6.1.4.1.9.1.2370",
-		uint64(0), sysName, "", "", uint32(0), uint32(0), "ok",
+		uint64(0), sysName, sysLocation, "", uint32(0), uint32(0), "ok",
 	); err != nil {
 		t.Fatalf("insert inventory: %v", err)
 	}
@@ -277,6 +285,62 @@ func TestQueryTopology_ReachabilityJoin(t *testing.T) {
 		case "10.0.0.2":
 			if n.Reachable {
 				t.Errorf("10.0.0.2 should be unreachable (stale health row)")
+			}
+		}
+	}
+}
+
+// TestQueryTopology_SysLocation covers the join propagation that
+// powers the SPA's "site" scope filter. Every walked device's
+// sys_location must surface on its TopologyNode; discovered-only
+// nodes must carry an empty string (no inventory row to source it
+// from).
+func TestQueryTopology_SysLocation(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	h := integration.StartClickHouse(t, ctx)
+	t.Cleanup(h.Cleanup)
+
+	now := time.Now().UTC()
+	insertInventoryAtT(ctx, t, h.Conn, "10.0.0.1", "core-01", "Cisco", "Troy, MI / Rack A1")
+	insertInventoryAtT(ctx, t, h.Conn, "10.0.0.2", "core-02", "Cisco", "Troy, MI / Rack A1")
+	insertHealthT(ctx, t, h.Conn, "10.0.0.1", now)
+	insertHealthT(ctx, t, h.Conn, "10.0.0.2", now)
+
+	insertNeighbors(ctx, t, h.Conn, []neighborFixture{
+		// Walked-to-walked edge so the SPA can group both endpoints
+		// by sys_location.
+		{
+			LastSeen: now, LocalExporter: "10.0.0.1", LocalIfIndex: 1,
+			LocalPortName: "Te1/0/1", Proto: "lldp",
+			RemoteChassisID: "aa:bb:cc:00:00:02", RemoteSysName: "core-02",
+			RemotePortID: "Te1/0/1", RemoteManagement: "10.0.0.2",
+		},
+		// Discovered-only neighbor — verify its SysLocation is empty.
+		{
+			LastSeen: now, LocalExporter: "10.0.0.1", LocalIfIndex: 5,
+			LocalPortName: "Te1/0/5", Proto: "cdp",
+			RemoteChassisID: "unknown-ap-99", RemoteSysName: "unknown-ap-99",
+			RemoteSysDesc: "Cisco AP", RemotePortID: "Gi0/0",
+		},
+	})
+
+	resp, err := QueryTopology(ctx, h.Conn)
+	if err != nil {
+		t.Fatalf("QueryTopology: %v", err)
+	}
+	for _, n := range resp.Nodes {
+		switch {
+		case n.ID == "10.0.0.1" || n.ID == "10.0.0.2":
+			if n.SysLocation != "Troy, MI / Rack A1" {
+				t.Errorf("node %s sys_location = %q, want %q",
+					n.ID, n.SysLocation, "Troy, MI / Rack A1")
+			}
+		case n.Discovered:
+			if n.SysLocation != "" {
+				t.Errorf("discovered node %s sys_location = %q, want empty",
+					n.ID, n.SysLocation)
 			}
 		}
 	}

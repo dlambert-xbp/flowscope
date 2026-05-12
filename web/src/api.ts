@@ -178,6 +178,13 @@ export type TopologyNode = {
   label: string
   address: string
   sys_descr: string
+  // sys_location comes from device_inventory.sys_location, joined into
+  // /api/topology server-side. Empty for discovered-only nodes (no
+  // inventory row) and for walked devices that simply haven't had a
+  // location configured. TopologyGraph's "site" scope groups nodes by
+  // this value and falls back to device scope when the selected node
+  // has no sys_location.
+  sys_location: string
   capabilities: string[]
   discovered: boolean
   reachable: boolean

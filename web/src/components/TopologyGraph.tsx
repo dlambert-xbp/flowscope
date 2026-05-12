@@ -24,13 +24,120 @@ import {
 import Dagre from '@dagrejs/dagre'
 import '@xyflow/react/dist/style.css'
 
-import { api, type Neighbor } from '../api'
+import {
+  api,
+  type Neighbor,
+  type TopologyEdge as ApiTopologyEdge,
+  type TopologyNode as ApiTopologyNode,
+} from '../api'
 import { useTheme } from '../theme'
 
 // Style constants — keep dagre-layout dimensions in lockstep with
 // what the custom node renders, otherwise edges hit the wrong side.
 const NODE_WIDTH = 200
 const NODE_HEIGHT = 64
+
+// Scope selector — narrows the rendered subgraph. Default is
+// 'device' when the operator has selected an exporter on the left
+// rail (the Devices → Neighbors call site), otherwise 'fleet' (the
+// standalone Topology view). The choice is persisted in localStorage
+// so a return visit lands on the last-used scope; selection-derived
+// defaults only apply when no saved value exists.
+export type TopologyScope = 'device' | 'site' | 'fleet'
+const SCOPE_STORAGE_KEY = 'flowscope.topology.scope'
+
+function loadScope(): TopologyScope | null {
+  try {
+    const raw = localStorage.getItem(SCOPE_STORAGE_KEY)
+    if (raw === 'device' || raw === 'site' || raw === 'fleet') return raw
+    return null
+  } catch {
+    return null
+  }
+}
+
+function saveScope(s: TopologyScope) {
+  try {
+    localStorage.setItem(SCOPE_STORAGE_KEY, s)
+  } catch {
+    /* ignore — private mode etc. */
+  }
+}
+
+// ScopeResult is what applyScope returns. `effectiveScope` differs
+// from the requested scope only when 'site' falls back to 'device'
+// because the selected node has no sys_location. The UI surfaces an
+// inline notice when that happens.
+export type ScopeResult = {
+  nodes: ApiTopologyNode[]
+  edges: ApiTopologyEdge[]
+  effectiveScope: TopologyScope
+  siteFallback: boolean
+}
+
+// applyScope is the pure filter used before the dagre layout pass.
+// Layout costs scale with node + edge count, so filtering first means
+// dagre doesn't waste effort on hidden nodes and the resulting bounds
+// match what the user actually sees.
+//
+// 'fleet'  → pass-through.
+// 'device' → ego graph: {selected} ∪ {every neighbor sharing an edge
+//            with selected}; edges = edges touching selected.
+// 'site'   → derive siteLocation from the selected node's
+//            sys_location. If empty, fall back to 'device' so the
+//            Uncategorized bucket doesn't get rendered as one giant
+//            site. Otherwise keep nodes with matching sys_location
+//            and edges whose endpoints both survive the filter.
+//
+// Exported for unit tests.
+export function applyScope(
+  allNodes: ApiTopologyNode[],
+  allEdges: ApiTopologyEdge[],
+  selectedExporter: string | null,
+  scope: TopologyScope,
+): ScopeResult {
+  if (scope === 'fleet' || selectedExporter == null) {
+    return { nodes: allNodes, edges: allEdges, effectiveScope: 'fleet', siteFallback: false }
+  }
+
+  if (scope === 'device') {
+    return egoGraph(allNodes, allEdges, selectedExporter)
+  }
+
+  // scope === 'site'
+  const selected = allNodes.find((n) => n.id === selectedExporter)
+  const siteLocation = selected?.sys_location ?? ''
+  if (siteLocation === '') {
+    // No site to filter by — fall back to ego graph and let the UI
+    // surface a small notice explaining why.
+    const ego = egoGraph(allNodes, allEdges, selectedExporter)
+    return { ...ego, effectiveScope: 'device', siteFallback: true }
+  }
+
+  const keep = new Set(
+    allNodes.filter((n) => n.sys_location === siteLocation).map((n) => n.id),
+  )
+  const nodes = allNodes.filter((n) => keep.has(n.id))
+  const edges = allEdges.filter((e) => keep.has(e.source) && keep.has(e.target))
+  return { nodes, edges, effectiveScope: 'site', siteFallback: false }
+}
+
+function egoGraph(
+  allNodes: ApiTopologyNode[],
+  allEdges: ApiTopologyEdge[],
+  selectedExporter: string,
+): ScopeResult {
+  const keep = new Set<string>([selectedExporter])
+  for (const e of allEdges) {
+    if (e.source === selectedExporter) keep.add(e.target)
+    else if (e.target === selectedExporter) keep.add(e.source)
+  }
+  const nodes = allNodes.filter((n) => keep.has(n.id))
+  const edges = allEdges.filter(
+    (e) => e.source === selectedExporter || e.target === selectedExporter,
+  )
+  return { nodes, edges, effectiveScope: 'device', siteFallback: false }
+}
 
 // Capability → icon glyph. Tiny svgs would be nicer; for V1 a single
 // emoji glyph per role keeps the bundle small and the column easy to
@@ -171,13 +278,50 @@ function TopologyGraphInner({ selectedExporter, onSelectExporter }: TopologyGrap
     refetchInterval: 60_000,
   })
 
-  // dagreLayout is pure-of-inputs, so memoise on the topology +
+  // Scope state. Default = saved-in-localStorage OR a
+  // selection-derived guess. Render-on-state-change: setScope below
+  // updates synchronously; the next render computes the filtered
+  // subset and re-runs dagre against that smaller graph.
+  const [scope, setScope] = useState<TopologyScope>(() => {
+    const saved = loadScope()
+    if (saved) return saved
+    return selectedExporter ? 'device' : 'fleet'
+  })
+
+  // When the operator clears the selection (selectedExporter → null),
+  // the 'device' and 'site' scopes are no longer meaningful — drop
+  // back to 'fleet' so the canvas isn't filtered against a stale ID.
+  // When they pick a new device the prior scope sticks (per the
+  // PR brief: device/site stays, fleet stays).
+  useEffect(() => {
+    if (selectedExporter == null && (scope === 'device' || scope === 'site')) {
+      setScope('fleet')
+    }
+  }, [selectedExporter, scope])
+
+  // Persist scope on every change. Cheap; the localStorage write is
+  // wrapped to tolerate private-mode failures.
+  useEffect(() => {
+    saveScope(scope)
+  }, [scope])
+
+  // Filter the API response down to the rendered subset BEFORE
+  // dagre. Layout only sees nodes that will actually paint, so its
+  // bounds match the visible graph and an ego-graph render is cheap.
+  const scoped = useMemo<ScopeResult>(() => {
+    if (!topo.data) {
+      return { nodes: [], edges: [], effectiveScope: scope, siteFallback: false }
+    }
+    return applyScope(topo.data.nodes, topo.data.edges, selectedExporter, scope)
+  }, [topo.data, selectedExporter, scope])
+
+  // dagreLayout is pure-of-inputs, so memoise on the scoped result +
   // selected node. Re-running on every render would re-layout on
   // every prop change and snap manually-nudged nodes back to the
   // dagre coords.
   const layouted = useMemo(() => {
     if (!topo.data) return { nodes: [] as Node[], edges: [] as Edge[] }
-    const nodes: Node[] = topo.data.nodes.map((n) => ({
+    const nodes: Node[] = scoped.nodes.map((n) => ({
       id: n.id,
       type: 'device',
       data: {
@@ -190,7 +334,7 @@ function TopologyGraphInner({ selectedExporter, onSelectExporter }: TopologyGrap
       },
       position: { x: 0, y: 0 },
     }))
-    const edges: Edge[] = topo.data.edges.map((e) => ({
+    const edges: Edge[] = scoped.edges.map((e) => ({
       id: e.id,
       source: e.source,
       target: e.target,
@@ -208,7 +352,7 @@ function TopologyGraphInner({ selectedExporter, onSelectExporter }: TopologyGrap
       labelBgStyle: { fill: 'var(--color-surface, #fff)' },
     }))
     return { nodes: dagreLayout(nodes, edges), edges }
-  }, [topo.data, selectedExporter])
+  }, [topo.data, scoped.nodes, scoped.edges, selectedExporter])
 
   // Local nodes state lets the operator drag-nudge after the dagre
   // pass without losing their layout on the next refetch (we only
@@ -221,13 +365,20 @@ function TopologyGraphInner({ selectedExporter, onSelectExporter }: TopologyGrap
 
   const flow = useReactFlow()
   const { resolved: theme } = useTheme()
-  // When a device is selected (Devices → Neighbors), centre the viewport
-  // on that node so it's visually the focus. Otherwise fitView the whole
-  // graph (the standalone topology view).
+  // Camera placement:
+  //   device / site: centre on the selected node so it's visually the
+  //                  focus (matches the Devices → Neighbors behaviour
+  //                  PR #52 added). If the selected node was filtered
+  //                  out of the visible set, noop instead of crashing
+  //                  setCenter on a missing position.
+  //   fleet:         fitView the whole graph (the standalone view).
   useEffect(() => {
     if (layouted.nodes.length === 0) return
     const id = window.setTimeout(() => {
-      if (selectedExporter) {
+      if (
+        selectedExporter &&
+        (scoped.effectiveScope === 'device' || scoped.effectiveScope === 'site')
+      ) {
         const focus = layouted.nodes.find((n) => n.id === selectedExporter)
         if (focus) {
           const cx = focus.position.x + NODE_WIDTH / 2
@@ -235,11 +386,18 @@ function TopologyGraphInner({ selectedExporter, onSelectExporter }: TopologyGrap
           flow.setCenter(cx, cy, { zoom: 0.85, duration: 400 })
           return
         }
+        // Selected device isn't on the canvas (e.g. the scope filter
+        // ate it). Don't crash setCenter on undefined — fall through
+        // to fitView and log once for diagnosis.
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[topology] selected device ${selectedExporter} not in scoped subgraph; fitView fallback`,
+        )
       }
       flow.fitView({ padding: 0.2 })
     }, 0)
     return () => window.clearTimeout(id)
-  }, [flow, layouted.nodes, selectedExporter])
+  }, [flow, layouted.nodes, selectedExporter, scoped.effectiveScope])
 
   const handleNodeClick: NodeMouseHandler = (_, n) => {
     // Synchronously inform the host (Devices.tsx) BEFORE any async
@@ -262,44 +420,160 @@ function TopologyGraphInner({ selectedExporter, onSelectExporter }: TopologyGrap
     )
   }
   if (!topo.data || topo.data.nodes.length === 0) {
-    return <EmptyState />
+    return (
+      <div data-testid="topology-canvas">
+        <EmptyState />
+      </div>
+    )
   }
 
+  // After scope filtering the visible set may be empty (e.g. an
+  // isolated device with no neighbors picked in 'device' scope). Show
+  // the same empty state the no-data path uses — the user still has
+  // the scope toggle above it so they can climb back out to fleet.
+  const filteredEmpty = layouted.nodes.length === 0
+
   return (
-    <div className="h-[640px] border border-line" data-testid="topology-canvas">
-      <ReactFlow
-        colorMode={theme}
-        nodes={nodes}
-        edges={layouted.edges}
-        nodeTypes={nodeTypes}
-        onNodesChange={(changes) => {
-          // Apply position + selection drags. We don't need add /
-          // remove handling because the topology data is read-only —
-          // adding a device on the wire happens upstream via SNMP.
-          setNodes((prev) => {
-            const next = [...prev]
-            for (const ch of changes) {
-              if (ch.type === 'position' && 'position' in ch && ch.position) {
-                const i = next.findIndex((n) => n.id === ch.id)
-                if (i >= 0) {
-                  next[i] = { ...next[i], position: ch.position }
+    <div className="relative" data-testid="topology-canvas">
+      <ScopeToggle
+        scope={scope}
+        onChange={setScope}
+        selectionEnabled={selectedExporter != null}
+      />
+      {scoped.siteFallback && (
+        <div
+          className="font-mono text-[10.5px] text-faint border-t border-x border-line bg-surface px-3 py-1.5"
+          data-testid="topology-scope-site-fallback"
+        >
+          no sys_location set on selected device; showing connected devices only
+        </div>
+      )}
+      {filteredEmpty ? (
+        // PR brief: reuse the existing empty-state copy when the
+        // scope filter eats all the nodes; the toggle above this
+        // notice is still operable so the operator can climb back
+        // out to fleet.
+        <EmptyState />
+      ) : (
+        <div className="h-[640px] border border-line">
+          <ReactFlow
+            colorMode={theme}
+            nodes={nodes}
+            edges={layouted.edges}
+            nodeTypes={nodeTypes}
+            onNodesChange={(changes) => {
+              // Apply position + selection drags. We don't need add /
+              // remove handling because the topology data is read-only —
+              // adding a device on the wire happens upstream via SNMP.
+              setNodes((prev) => {
+                const next = [...prev]
+                for (const ch of changes) {
+                  if (ch.type === 'position' && 'position' in ch && ch.position) {
+                    const i = next.findIndex((n) => n.id === ch.id)
+                    if (i >= 0) {
+                      next[i] = { ...next[i], position: ch.position }
+                    }
+                  }
                 }
-              }
-            }
-            return next
-          })
-        }}
-        onNodeClick={handleNodeClick}
-        fitView
-        proOptions={{ hideAttribution: true }}
-      >
-        <Background gap={20} />
-        <Controls showInteractive={false} />
-      </ReactFlow>
-      <GraphLegend />
+                return next
+              })
+            }}
+            onNodeClick={handleNodeClick}
+            fitView
+            proOptions={{ hideAttribution: true }}
+          >
+            <Background gap={20} />
+            <Controls showInteractive={false} />
+          </ReactFlow>
+          <GraphLegend />
+        </div>
+      )}
     </div>
   )
 }
+
+// ScopeToggle is the three-segment selector above the canvas. Matches
+// the surrounding minor-control style: font-mono uppercase 10–11px,
+// border-line outline, accent fill on the active segment. The
+// device/site segments are disabled until a device is selected on
+// the left rail (the standalone Topology view has no selection and
+// only the fleet segment is meaningful).
+function ScopeToggle({
+  scope,
+  onChange,
+  selectionEnabled,
+}: {
+  scope: TopologyScope
+  onChange: (s: TopologyScope) => void
+  selectionEnabled: boolean
+}) {
+  return (
+    <div
+      data-testid="topology-scope-toggle"
+      className="flex items-center gap-px border border-line bg-surface mb-2 w-fit font-mono uppercase text-[10.5px] tracking-[0.1em]"
+    >
+      <ScopeSegment
+        scope="device"
+        current={scope}
+        disabled={!selectionEnabled}
+        onChange={onChange}
+        disabledTitle="select a device first"
+      />
+      <ScopeSegment
+        scope="site"
+        current={scope}
+        disabled={!selectionEnabled}
+        onChange={onChange}
+        disabledTitle="select a device first"
+      />
+      <ScopeSegment scope="fleet" current={scope} disabled={false} onChange={onChange} />
+    </div>
+  )
+}
+
+function ScopeSegment({
+  scope,
+  current,
+  disabled,
+  onChange,
+  disabledTitle,
+}: {
+  scope: TopologyScope
+  current: TopologyScope
+  disabled: boolean
+  onChange: (s: TopologyScope) => void
+  disabledTitle?: string
+}) {
+  const active = current === scope
+  // Active = accent border ring + accent text. Disabled = faint text,
+  // no hover. Idle = dim text on bg-surface, hover bumps to accent.
+  const cls = active
+    ? 'px-2.5 py-1 border-accent text-accent bg-surface'
+    : disabled
+      ? 'px-2.5 py-1 text-faint cursor-not-allowed'
+      : 'px-2.5 py-1 text-dim hover:text-accent hover:bg-hover'
+  return (
+    <button
+      type="button"
+      data-testid={`topology-scope-${scope}`}
+      aria-pressed={active}
+      aria-disabled={disabled || undefined}
+      title={disabled ? disabledTitle : undefined}
+      disabled={disabled}
+      onClick={() => {
+        if (disabled || active) return
+        // Render-on-state-change: scope state flips synchronously
+        // here, the next render re-runs applyScope + dagre against
+        // the new scope. No fetch involved.
+        onChange(scope)
+      }}
+      className={cls}
+    >
+      {scope}
+    </button>
+  )
+}
+
 
 function GraphLegend() {
   return (
@@ -318,8 +592,11 @@ function GraphLegend() {
 }
 
 function EmptyState() {
+  // EmptyState renders without its own data-testid because callers
+  // wrap it inside the outer 'topology-canvas' container. Two
+  // elements with the same testid trips Playwright's strict mode.
   return (
-    <div className="p-8 border border-dashed border-line" data-testid="topology-canvas">
+    <div className="p-8 border border-dashed border-line">
       <div className="font-mono text-[14px] text-text mb-2">No LLDP/CDP neighbors discovered yet.</div>
       <div className="font-mono text-[12px] text-dim leading-[1.5]">
         SNMP credentials must be configured on devices before the snmp

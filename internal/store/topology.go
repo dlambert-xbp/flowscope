@@ -90,6 +90,7 @@ type TopologyNode struct {
 	Label         string   `json:"label"`
 	Address       string   `json:"address"`      // canonical IP; empty for discovered-only nodes that haven't been mapped
 	SysDescr      string   `json:"sys_descr"`
+	SysLocation   string   `json:"sys_location"` // device_inventory.sys_location; empty for discovered-only nodes and devices we haven't walked. The UI groups nodes by this value in "site" scope.
 	Capabilities  []string `json:"capabilities"` // ["bridge","router"] etc., empty when unknown
 	Discovered    bool     `json:"discovered"`   // true = not actively monitored
 	Reachable     bool     `json:"reachable"`    // last_seen_at < 5min ago
@@ -196,8 +197,9 @@ FROM lldp_neighbors FINAL`
 	// remote that happens to be a walked device map back to its
 	// canonical ID.
 	type devInfo struct {
-		sysName  string
-		sysDescr string
+		sysName     string
+		sysDescr    string
+		sysLocation string
 	}
 	knownByIP := map[string]devInfo{}
 	knownBySysName := map[string]string{} // sys_name → IP
@@ -206,17 +208,18 @@ FROM lldp_neighbors FINAL`
 SELECT
     IPv6NumToString(exporter),
     argMax(sys_name, polled_at),
-    argMax(sys_descr, polled_at)
+    argMax(sys_descr, polled_at),
+    argMax(sys_location, polled_at)
 FROM device_inventory
 WHERE polled_at >= now() - INTERVAL 30 DAY
 GROUP BY exporter`
 		drows, derr := conn.Query(ctx, q)
 		if derr == nil {
 			for drows.Next() {
-				var ipStr, sn, sd string
-				if err := drows.Scan(&ipStr, &sn, &sd); err == nil {
+				var ipStr, sn, sd, sl string
+				if err := drows.Scan(&ipStr, &sn, &sd, &sl); err == nil {
 					ipStr = unmap4in6(ipStr)
-					knownByIP[ipStr] = devInfo{sysName: sn, sysDescr: sd}
+					knownByIP[ipStr] = devInfo{sysName: sn, sysDescr: sd, sysLocation: sl}
 					if sn != "" {
 						knownBySysName[strings.ToLower(sn)] = ipStr
 					}
@@ -270,6 +273,7 @@ GROUP BY exporter`
 					Label:        firstNonEmpty(dev.sysName, mgmtIP),
 					Address:      mgmtIP,
 					SysDescr:     dev.sysDescr,
+					SysLocation:  dev.sysLocation,
 					Capabilities: splitCaps(caps),
 					Discovered:   false,
 				}
@@ -284,6 +288,7 @@ GROUP BY exporter`
 					Label:        firstNonEmpty(dev.sysName, ipStr),
 					Address:      ipStr,
 					SysDescr:     dev.sysDescr,
+					SysLocation:  dev.sysLocation,
 					Capabilities: splitCaps(caps),
 					Discovered:   false,
 				}
@@ -291,6 +296,10 @@ GROUP BY exporter`
 		}
 		// (3) discovered-only. ID is the chassis ID so multiple
 		// neighbors of the same unknown device collapse correctly.
+		// SysLocation stays empty — we haven't walked the device, so
+		// no inventory row to source it from. The "site" scope filter
+		// on the SPA falls back to device scope when the selected
+		// node has no sys_location.
 		nodeID := "chassis:" + chassisID
 		label := sysName
 		if label == "" {
@@ -330,10 +339,11 @@ GROUP BY exporter`
 	// is what the operator expects.
 	for ip, dev := range knownByIP {
 		addNode(TopologyNode{
-			ID:       ip,
-			Label:    firstNonEmpty(dev.sysName, ip),
-			Address:  ip,
-			SysDescr: dev.sysDescr,
+			ID:          ip,
+			Label:       firstNonEmpty(dev.sysName, ip),
+			Address:     ip,
+			SysDescr:    dev.sysDescr,
+			SysLocation: dev.sysLocation,
 		})
 	}
 
@@ -348,10 +358,11 @@ GROUP BY exporter`
 		// Local end: always a known device (we walked it).
 		localDev := knownByIP[r.localExporter]
 		addNode(TopologyNode{
-			ID:       r.localExporter,
-			Label:    firstNonEmpty(localDev.sysName, r.localExporter),
-			Address:  r.localExporter,
-			SysDescr: localDev.sysDescr,
+			ID:          r.localExporter,
+			Label:       firstNonEmpty(localDev.sysName, r.localExporter),
+			Address:     r.localExporter,
+			SysDescr:    localDev.sysDescr,
+			SysLocation: localDev.sysLocation,
 		})
 
 		remoteID, remoteNode := resolveRemote(r.chassisID, r.remoteSysName, r.remoteSysDesc, r.remoteMgmt, r.remoteCaps)
