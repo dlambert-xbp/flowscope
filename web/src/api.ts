@@ -65,6 +65,11 @@ export type InterfaceTimeseries = {
 export type Device = {
   exporter: string
   sys_name: string // SNMP-resolved hostname; empty when not yet walked
+  // sys_location comes from device_inventory.sys_location, joined into
+  // /api/devices by the latest-inventory CTE. Empty when SNMP has not
+  // walked the exporter; the Devices left-rail uses it to group
+  // exporters by site (see lib/deviceGroups.ts).
+  sys_location: string
   flows: number
   bytes: number
   packets: number
