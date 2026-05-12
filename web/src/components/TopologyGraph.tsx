@@ -25,6 +25,7 @@ import Dagre from '@dagrejs/dagre'
 import '@xyflow/react/dist/style.css'
 
 import { api, type Neighbor } from '../api'
+import { useTheme } from '../theme'
 
 // Style constants — keep dagre-layout dimensions in lockstep with
 // what the custom node renders, otherwise edges hit the wrong side.
@@ -219,17 +220,26 @@ function TopologyGraphInner({ selectedExporter, onSelectExporter }: TopologyGrap
   }, [layouted.nodes])
 
   const flow = useReactFlow()
-  // fitView once the layouted bounds change; without this the canvas
-  // boots at react-flow's default (0,0) viewport which sometimes
-  // shows half the graph off-screen.
+  const { resolved: theme } = useTheme()
+  // When a device is selected (Devices → Neighbors), centre the viewport
+  // on that node so it's visually the focus. Otherwise fitView the whole
+  // graph (the standalone topology view).
   useEffect(() => {
-    if (layouted.nodes.length > 0) {
-      // Slight delay lets react-flow finish measuring before fitView
-      // computes its viewport. 0ms is enough on modern browsers.
-      const id = window.setTimeout(() => flow.fitView({ padding: 0.2 }), 0)
-      return () => window.clearTimeout(id)
-    }
-  }, [flow, layouted.nodes.length])
+    if (layouted.nodes.length === 0) return
+    const id = window.setTimeout(() => {
+      if (selectedExporter) {
+        const focus = layouted.nodes.find((n) => n.id === selectedExporter)
+        if (focus) {
+          const cx = focus.position.x + NODE_WIDTH / 2
+          const cy = focus.position.y + NODE_HEIGHT / 2
+          flow.setCenter(cx, cy, { zoom: 0.85, duration: 400 })
+          return
+        }
+      }
+      flow.fitView({ padding: 0.2 })
+    }, 0)
+    return () => window.clearTimeout(id)
+  }, [flow, layouted.nodes, selectedExporter])
 
   const handleNodeClick: NodeMouseHandler = (_, n) => {
     // Synchronously inform the host (Devices.tsx) BEFORE any async
@@ -258,6 +268,7 @@ function TopologyGraphInner({ selectedExporter, onSelectExporter }: TopologyGrap
   return (
     <div className="h-[640px] border border-line" data-testid="topology-canvas">
       <ReactFlow
+        colorMode={theme}
         nodes={nodes}
         edges={layouted.edges}
         nodeTypes={nodeTypes}
