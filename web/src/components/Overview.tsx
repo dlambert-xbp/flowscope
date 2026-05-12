@@ -11,7 +11,7 @@ import type {
   StreamRow,
   Summary,
 } from '../api'
-import { rangeLabel, rangeSeconds, toApi, type TimeRange } from '../timeRange'
+import { rangeLabel, rangeSeconds, toApi, useLiveInterval, type TimeRange } from '../timeRange'
 
 // Overview — a glance-and-walk-away system-health dashboard.
 //
@@ -37,37 +37,37 @@ export function Overview({
   const summary = useQuery({
     queryKey: ['summary', rangeKey],
     queryFn: () => api.summary(apiRange),
-    refetchInterval: range.kind === 'preset' ? 2000 : false,
+    refetchInterval: useLiveInterval(2000),
   })
   const streams = useQuery({
     queryKey: ['health-streams', rangeKey],
     queryFn: () => api.healthStreams(apiRange),
-    refetchInterval: range.kind === 'preset' ? 5000 : false,
+    refetchInterval: useLiveInterval(5000),
   })
   const devices = useQuery({
     queryKey: ['devices', rangeKey],
     queryFn: () => api.devices(apiRange),
-    refetchInterval: range.kind === 'preset' ? 5000 : false,
+    refetchInterval: useLiveInterval(5000),
   })
   const alertSummary = useQuery({
     queryKey: ['alert-summary'],
     queryFn: () => api.alertSummary(),
-    refetchInterval: 5000,
+    refetchInterval: useLiveInterval(5000),
   })
   const openAlerts = useQuery({
     queryKey: ['alerts-open'],
     queryFn: () => api.alerts('open'),
-    refetchInterval: 5000,
+    refetchInterval: useLiveInterval(5000),
   })
   const storage = useQuery({
     queryKey: ['health-storage'],
     queryFn: () => api.healthStorage(),
-    refetchInterval: 5000,
+    refetchInterval: useLiveInterval(5000),
   })
   const exporterHealth = useQuery({
     queryKey: ['health-exporters', rangeKey],
     queryFn: () => api.healthExporters(apiRange),
-    refetchInterval: range.kind === 'preset' ? 10000 : false,
+    refetchInterval: useLiveInterval(10000),
   })
   // The ingest health endpoint returns 503 when the api service
   // isn't configured with FLOWSCOPE_INGEST_HEALTH_URL. Catch the
@@ -77,7 +77,7 @@ export function Overview({
     queryKey: ['health-ingest'],
     queryFn: () =>
       api.healthIngest().catch((e: Error) => Promise.reject(e)),
-    refetchInterval: 5000,
+    refetchInterval: useLiveInterval(5000),
     retry: false,
   })
 

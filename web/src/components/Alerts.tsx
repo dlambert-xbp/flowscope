@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState, type ReactNode } from 'react'
 import { api, fmt } from '../api'
 import type { Alert, AlertSummary } from '../api'
+import { useLiveInterval } from '../timeRange'
 import { AlertDetail } from './AlertDetail'
 
 type StateFilter = 'open' | 'acknowledged' | 'closed'
@@ -20,12 +21,12 @@ export function Alerts() {
   const summary = useQuery({
     queryKey: ['alerts-summary'],
     queryFn: () => api.alertSummary(),
-    refetchInterval: 5000,
+    refetchInterval: useLiveInterval(5000),
   })
   const list = useQuery({
     queryKey: ['alerts', state],
     queryFn: () => api.alerts(state),
-    refetchInterval: 5000,
+    refetchInterval: useLiveInterval(5000),
   })
   const counts = summary.data
   const totalOpen = counts ? counts.open_critical + counts.open_warning + counts.open_info : 0

@@ -18,6 +18,8 @@ import {
   rangeLabel,
   rangeSeconds,
   toApi,
+  useLiveInterval,
+  useTimeRange,
   type TimeRange,
 } from '../timeRange'
 import { Th, useTableSort, type SortColumns } from './sortable'
@@ -162,7 +164,7 @@ export function Devices({
   const list = useQuery({
     queryKey: ['devices', rangeKey],
     queryFn: () => api.devices(apiRange),
-    refetchInterval: range.kind === 'preset' ? 5000 : false,
+    refetchInterval: useLiveInterval(5000),
   })
   const devices = list.data?.devices ?? []
   // Selected exporter lives in the URL (?device=<ip>) so a refresh or
@@ -341,7 +343,7 @@ function Feature({
         .deviceInventory(exporter as string)
         .catch(() => undefined as DeviceInventory | undefined),
     enabled: !!exporter,
-    refetchInterval: 30_000,
+    refetchInterval: useLiveInterval(30_000),
   })
   if (!exporter) {
     return (
@@ -385,7 +387,7 @@ function FeatureHeader({
   const q = useQuery({
     queryKey: ['device', exporter, rangeKey],
     queryFn: () => api.device(exporter, apiRange),
-    refetchInterval: range.kind === 'preset' ? 5000 : false,
+    refetchInterval: useLiveInterval(5000),
   })
   const inv = useQuery({
     queryKey: ['device-inventory', exporter],
@@ -396,7 +398,7 @@ function FeatureHeader({
       api
         .deviceInventory(exporter)
         .catch(() => undefined as DeviceInventory | undefined),
-    refetchInterval: 30_000,
+    refetchInterval: useLiveInterval(30_000),
   })
   const d = q.data
   const i = inv.data
@@ -640,7 +642,7 @@ function InventoryPanel({ exporter }: { exporter: string }) {
       api
         .deviceInventory(exporter)
         .catch(() => undefined as DeviceInventory | undefined),
-    refetchInterval: 30_000,
+    refetchInterval: useLiveInterval(30_000),
   })
   if (q.isLoading) return <p className="text-dim font-mono text-[12px]">loading…</p>
   const i = q.data
@@ -688,14 +690,18 @@ function InventoryPanel({ exporter }: { exporter: string }) {
 // ResourcesPanel renders one tile per (kind, component) returned from
 // /api/devices/{exporter}/resources, grouped by kind so CPU rows sit
 // next to other CPU rows. Tile = headline number, secondary context
-// (bytes for memory/storage), tiny sparkline of percent over the
-// trailing 24h. Refreshes every 15s — slower than flow data because
-// SNMP polls every 60s by default.
+// (bytes for memory/storage), tiny sparkline. Range follows the
+// global TimeRange so a brush on one chart re-narrows every panel
+// (including this one); refetch cadence pauses entirely in fixed
+// mode so the dashboard reads as a true snapshot until the operator
+// switches preset or hits refresh.
 function ResourcesPanel({ exporter }: { exporter: string }) {
+  const { range, queryKey: rangeKey } = useTimeRange()
+  const apiRange = toApi(range)
   const q = useQuery({
-    queryKey: ['device-resources', exporter],
-    queryFn: () => api.deviceResources(exporter, '24h'),
-    refetchInterval: 15_000,
+    queryKey: ['device-resources', exporter, rangeKey],
+    queryFn: () => api.deviceResources(exporter, apiRange),
+    refetchInterval: useLiveInterval(15_000),
   })
   // Selected kind is what the operator clicked to expand into a
   // multi-series chart. One rollup tile per kind; click to expand,
@@ -1246,7 +1252,7 @@ function InterfacesMini({
   const q = useQuery({
     queryKey: ['device-ifaces', exporter, rangeKey],
     queryFn: () => api.interfaces(apiRange, exporter),
-    refetchInterval: range.kind === 'preset' ? 5000 : false,
+    refetchInterval: useLiveInterval(5000),
   })
   const ifaces = q.data?.interfaces ?? []
   // Mini view shows top 10 by current ingress rate so the user sees
@@ -1342,7 +1348,7 @@ function InterfacesTab({
   const q = useQuery({
     queryKey: ['device-ifaces-full', exporter, rangeKey],
     queryFn: () => api.interfaces(apiRange, exporter),
-    refetchInterval: range.kind === 'preset' ? 5000 : false,
+    refetchInterval: useLiveInterval(5000),
   })
   const ifaces = q.data?.interfaces ?? []
   // Default: sort by interface name asc — gives natural ABC order
@@ -1452,7 +1458,7 @@ function FlowsTab({
   const q = useQuery({
     queryKey: ['device-flows', exporter],
     queryFn: () => api.recentFlows(50, exporter),
-    refetchInterval: 2000,
+    refetchInterval: useLiveInterval(2000),
   })
   const flows = q.data?.flows ?? []
   const { sortedRows, sortKey, sortDir, toggle } = useTableSort(flows, DEVICE_FLOW_COLS, {
@@ -1645,7 +1651,7 @@ function MiniTalkers({
   const q = useQuery({
     queryKey: ['device-mini-talkers', exporter],
     queryFn: () => api.topTalkers(qs, 300, 5, 'bytes'),
-    refetchInterval: 5000,
+    refetchInterval: useLiveInterval(5000),
   })
   return (
     <section className="lg:border-r lg:border-line">
@@ -1688,7 +1694,7 @@ function MiniServices({
   const q = useQuery({
     queryKey: ['device-mini-services', exporter],
     queryFn: () => api.topServices(qs, 300, 5, 'bytes'),
-    refetchInterval: 5000,
+    refetchInterval: useLiveInterval(5000),
   })
   return (
     <section>

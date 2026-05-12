@@ -15,7 +15,10 @@ import { getConfig } from './config'
 export const PRESETS = ['5m', '15m', '1h', '6h', '24h'] as const
 export type Preset = (typeof PRESETS)[number]
 
-export const DEFAULT_PRESET: Preset = '5m'
+// 1h gives ~60 resource samples at the default 60s SNMP cadence, so
+// sparklines + charts have something to draw on first load. Operators
+// can still pin to 5m or stretch to 24h via the TimeRangeSelector.
+export const DEFAULT_PRESET: Preset = '1h'
 
 // configuredPreset returns the operator-configured tenant default
 // (Settings -> General -> default_time_range) when it's a known
@@ -193,8 +196,39 @@ function useTimeRangeState(): TimeRangeAPI {
 // dependent queries refetch with the narrowed window.
 const TimeRangeContext = createContext<TimeRangeAPI | null>(null)
 
+// Module-level live-mode flag. Mirrors `range.kind === 'preset'` so
+// the QueryClient's defaultOptions (set once at app boot, before any
+// React tree exists) can consult the current mode without taking a
+// dependency on the React context. TimeRangeProvider keeps this in
+// sync via the effect below.
+//
+// "live" = trailing-window preset → auto-refresh on each query's
+//          configured cadence
+// "fixed" = absolute (from, to) range → freeze all auto-refreshes;
+//           only manual invalidations (refresh button, Walk now,
+//           etc.) trigger a refetch
+let liveModeFlag = true
+
+export function isLive(): boolean {
+  return liveModeFlag
+}
+
+// useLiveInterval is the helper every useQuery should wrap its
+// refetchInterval in. Returns the supplied cadence when in live
+// mode, false when frozen. Pure function of the range; safe to call
+// in any component that's inside a TimeRangeProvider.
+export function useLiveInterval(ms: number): number | false {
+  const { range } = useTimeRange()
+  return range.kind === 'preset' ? ms : false
+}
+
 export function TimeRangeProvider({ children }: { children: ReactNode }) {
   const value = useTimeRangeState()
+  // Keep the module-level mirror in sync so the QueryClient default
+  // refetchInterval function picks up mode changes.
+  useEffect(() => {
+    liveModeFlag = value.range.kind === 'preset'
+  }, [value.range.kind])
   return createElement(TimeRangeContext.Provider, { value }, children)
 }
 

@@ -6,6 +6,7 @@ import {
   DEFAULT_TIME_RANGE,
   rangeLabel,
   toApi,
+  useLiveInterval,
   type TimeRange,
 } from '../timeRange'
 import { TimeseriesChart, resolveColor } from './TimeseriesChart'
@@ -32,7 +33,7 @@ export function InterfaceChart({
   const ts = useQuery({
     queryKey: ['iface_ts', exporter, ifindex, rangeKey],
     queryFn: () => api.interfaceTimeseries(exporter, ifindex, apiRange),
-    refetchInterval: range.kind === 'preset' ? 5000 : false,
+    refetchInterval: useLiveInterval(5000),
   })
   const points = ts.data?.points ?? []
   const meta = ts.data

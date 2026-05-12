@@ -2,6 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { useEffect, useState } from 'react'
 import { api, fmt } from '../api'
 import type { RecentFlow } from '../api'
+import { useLiveInterval } from '../timeRange'
 import { ServiceLabel } from './ServiceLabel'
 import { Th, useTableSort, type SortColumns } from './sortable'
 import { Hostname } from './Hostname'
@@ -44,7 +45,7 @@ export function LiveTail({
   const recent = useQuery({
     queryKey: ['recent'],
     queryFn: () => api.recentFlows(20),
-    refetchInterval: 2000,
+    refetchInterval: useLiveInterval(2000),
   })
   const flows = recent.data?.flows ?? []
   const { sortedRows, sortKey, sortDir, toggle } = useTableSort(flows, FLOW_COLS, {

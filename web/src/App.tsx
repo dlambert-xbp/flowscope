@@ -7,8 +7,9 @@ import { Flows } from './components/Flows'
 import { Devices } from './components/Devices'
 import { Alerts } from './components/Alerts'
 import { Settings } from './components/Settings'
+import { useQueryClient } from '@tanstack/react-query'
 import { ThemeToggle } from './theme'
-import { useTimeRange, type TimeRange } from './timeRange'
+import { useTimeRange, useLiveInterval, type TimeRange } from './timeRange'
 import { TimeRangeSelector } from './components/TimeRangeSelector'
 import { FILTER_KEYS, type Filter } from './filters'
 
@@ -101,7 +102,8 @@ function PageContext({
         {TAB_LABELS[tab]}
       </span>
       {showRange && (
-        <span className="ml-auto">
+        <span className="ml-auto flex items-center gap-2">
+          <RefreshButton range={range} />
           <TimeRangeSelector range={range} onChange={onRangeChange} />
         </span>
       )}
@@ -109,18 +111,62 @@ function PageContext({
   )
 }
 
+// RefreshButton forces a one-shot refetch across every active query.
+// Useful as a "force now" shortcut in live mode, and the only way to
+// pull fresh data when the operator has pinned an absolute window
+// (the QueryClient defaults pause auto-refresh in that mode).
+function RefreshButton({ range }: { range: TimeRange }) {
+  const qc = useQueryClient()
+  const [spinning, setSpinning] = useState(false)
+  const click = async () => {
+    setSpinning(true)
+    try {
+      await qc.invalidateQueries()
+    } finally {
+      setTimeout(() => setSpinning(false), 400)
+    }
+  }
+  const fixed = range.kind === 'absolute'
+  return (
+    <button
+      type="button"
+      onClick={click}
+      aria-label="Refresh now"
+      title={
+        fixed
+          ? 'Refresh — fixed time range pauses auto-refresh'
+          : 'Refresh now'
+      }
+      className={`font-mono text-[11px] px-2 py-1 border ${
+        fixed
+          ? 'border-accent text-accent hover:bg-accent-wash'
+          : 'border-line text-dim hover:border-accent hover:text-text'
+      }`}
+    >
+      <span
+        className={`inline-block ${spinning ? 'animate-spin' : ''}`}
+        aria-hidden
+      >
+        ↻
+      </span>{' '}
+      refresh
+    </button>
+  )
+}
+
 /* ----------------------------- Top strip ----------------------------- */
 
 function Strip() {
+  const { range } = useTimeRange()
   const summary = useQuery({
     queryKey: ['summary', 'strip'],
     queryFn: () => api.summary(60),
-    refetchInterval: 2000,
+    refetchInterval: useLiveInterval(2000),
   })
   const ifaces = useQuery({
     queryKey: ['interfaces', 'strip'],
     queryFn: () => api.interfaces(60),
-    refetchInterval: 5000,
+    refetchInterval: useLiveInterval(5000),
   })
   const [now, setNow] = useState<string>(() => new Date().toUTCString())
   useEffect(() => {
@@ -131,10 +177,35 @@ function Strip() {
   const flows = summary.data?.flows ?? 0
   const exporters = summary.data?.exporters ?? 0
   const ifaceCount = ifaces.data?.count ?? 0
-  const status = summary.error ? 'error' : summary.isLoading ? 'connecting' : 'live'
-  // Hardcode class pairs so Tailwind sees them in the source.
-  const statusDot = status === 'error' ? 'bg-crit' : status === 'live' ? 'bg-ok' : 'bg-warn'
-  const statusText = status === 'error' ? 'text-crit' : status === 'live' ? 'text-ok' : 'text-warn'
+  // Status dot reflects live-vs-fixed mode plus connection health.
+  // The mode part is what's actionable: in fixed mode the page is a
+  // frozen snapshot and the operator should know nothing is moving
+  // behind their back. "error" stays louder than "paused" because
+  // it's a failure, not a deliberate state.
+  const fixed = range.kind === 'absolute'
+  const status: 'error' | 'connecting' | 'paused' | 'live' = summary.error
+    ? 'error'
+    : summary.isLoading
+      ? 'connecting'
+      : fixed
+        ? 'paused'
+        : 'live'
+  const statusDot =
+    status === 'error'
+      ? 'bg-crit'
+      : status === 'live'
+        ? 'bg-ok'
+        : status === 'paused'
+          ? 'bg-dim'
+          : 'bg-warn'
+  const statusText =
+    status === 'error'
+      ? 'text-crit'
+      : status === 'live'
+        ? 'text-ok'
+        : status === 'paused'
+          ? 'text-dim'
+          : 'text-warn'
 
   return (
     <div className="flex items-center gap-6 px-4 bg-surface border-b border-line font-mono text-[11px] text-dim tabular whitespace-nowrap overflow-hidden">
@@ -171,17 +242,17 @@ function Bar({ tab, onTab }: { tab: Tab; onTab: (t: Tab) => void }) {
   const summary = useQuery({
     queryKey: ['summary', 'bar'],
     queryFn: () => api.summary(60),
-    refetchInterval: 2000,
+    refetchInterval: useLiveInterval(2000),
   })
   const devices = useQuery({
     queryKey: ['devices', 'bar'],
     queryFn: () => api.devices(300),
-    refetchInterval: 10_000,
+    refetchInterval: useLiveInterval(10_000),
   })
   const alertSummary = useQuery({
     queryKey: ['alertSummary', 'bar'],
     queryFn: () => api.alertSummary(),
-    refetchInterval: 5_000,
+    refetchInterval: useLiveInterval(5_000),
   })
 
   const flowCount = summary.isError ? undefined : summary.data?.flows
