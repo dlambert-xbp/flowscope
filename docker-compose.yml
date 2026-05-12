@@ -172,6 +172,10 @@ services:
       # the api uses it to encrypt/decrypt credentials posted to
       # /api/snmp/credentials and to seal webhook + OIDC secrets.
       FLOWSCOPE_SNMP_KEY_REF: "file:/run/secrets/snmp_master"
+      # Same hostname is the default in cmd/api/main.go too; setting
+      # it here makes the convention explicit for operators editing
+      # the compose file.
+      FLOWSCOPE_INGEST_HEALTH_URL: "http://flowscope-ingest:9100/health/ingest"
       FLOWSCOPE_LOG_LEVEL: "info"
     secrets:
       - snmp_master

@@ -78,6 +78,12 @@ spec:
       port: {{ .Values.ingest.service.ipfixPort }}
       targetPort: ipfix
       protocol: UDP
+    # Metrics + /health/ingest exposed over TCP so the api service can
+    # reach it via K8s DNS for the Overview tab's ingest panel.
+    - name: metrics
+      port: 9100
+      targetPort: metrics
+      protocol: TCP
   selector:
     {{- include "flowscope.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: ingest

@@ -41,6 +41,12 @@ spec:
               value: {{ .Values.global.clickhouseDSN | quote }}
             - name: FLOWSCOPE_LOG_LEVEL
               value: {{ .Values.global.logLevel | quote }}
+            # Point the Overview tab's ingest panel at the in-cluster
+            # ingest Service. The Go default is the docker-compose
+            # hostname; here we derive from the chart's release name
+            # so a non-default release name still resolves.
+            - name: FLOWSCOPE_INGEST_HEALTH_URL
+              value: "http://{{ include "flowscope.fullname" . }}-ingest:9100/health/ingest"
             {{- include "flowscope.snmpKeyEnv" . | nindent 12 }}
             {{- range $k, $v := .Values.api.env }}
             - name: {{ $k }}

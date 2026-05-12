@@ -166,7 +166,12 @@ func run() error {
 			audit:    auditWriter,
 			reader:   auditReader,
 		},
-		ingestHealthURL: os.Getenv("FLOWSCOPE_INGEST_HEALTH_URL"),
+		// FLOWSCOPE_INGEST_HEALTH_URL points at the ingest service's
+		// /health/ingest endpoint. Default to the well-known docker-
+		// compose + Helm hostname so the out-of-box dashboard isn't
+		// stuck on the "not configured" placeholder. Operators with
+		// non-standard hostnames override via env.
+		ingestHealthURL: envOr("FLOWSCOPE_INGEST_HEALTH_URL", "http://flowscope-ingest:9100/health/ingest"),
 		ingestHealthHTTP: &http.Client{
 			Timeout: 3 * time.Second,
 		},
