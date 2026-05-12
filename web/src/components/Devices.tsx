@@ -502,13 +502,16 @@ function FeatureHeader({
 function WalkNowButton({ exporter }: { exporter: string }) {
   const qc = useQueryClient()
   const [state, setState] = useState<'idle' | 'queued' | 'error'>('idle')
+  const [errMsg, setErrMsg] = useState<string>('')
   const runWalk = async () => {
     setState('queued')
+    setErrMsg('')
     try {
       await api.requestSnmpWalk(exporter)
-    } catch {
+    } catch (err) {
+      setErrMsg(err instanceof Error ? err.message : String(err))
       setState('error')
-      setTimeout(() => setState('idle'), 4000)
+      setTimeout(() => setState('idle'), 8000)
       return
     }
     // Trigger a few invalidations spaced over ~30s so the fresh
@@ -550,6 +553,7 @@ function WalkNowButton({ exporter }: { exporter: string }) {
       onClick={runWalk}
       disabled={state === 'queued'}
       aria-label="Trigger an SNMP walk on this exporter"
+      title={state === 'error' && errMsg ? errMsg : undefined}
       className={`font-mono text-[10px] uppercase tracking-[0.1em] px-2 py-0.5 border ${tone} disabled:cursor-wait`}
     >
       {label}

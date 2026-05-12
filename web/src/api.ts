@@ -884,7 +884,7 @@ export const api = {
       `/api/snmp/credentials/${encodeURIComponent(c.exporter)}`,
       {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders(true),
         body: JSON.stringify(c),
       },
     )
@@ -897,24 +897,34 @@ export const api = {
   deleteCredential: async (exporter: string) => {
     const r = await fetch(`/api/snmp/credentials/${encodeURIComponent(exporter)}`, {
       method: 'DELETE',
+      headers: authHeaders(false),
     })
-    if (!r.ok) throw new Error(`DELETE ${exporter} → ${r.status}`)
+    if (!r.ok) {
+      const txt = await r.text()
+      throw new Error(`DELETE ${exporter} → ${r.status}: ${txt}`)
+    }
     return r.json()
   },
   testCredential: async (exporter: string): Promise<SNMPTestResult> => {
     const r = await fetch(
       `/api/snmp/credentials/${encodeURIComponent(exporter)}/test`,
-      { method: 'POST' },
+      { method: 'POST', headers: authHeaders(false) },
     )
-    if (!r.ok) throw new Error(`test ${exporter} → ${r.status}`)
+    if (!r.ok) {
+      const txt = await r.text()
+      throw new Error(`test ${exporter} → ${r.status}: ${txt}`)
+    }
     return r.json()
   },
   requestSnmpWalk: async (exporter: string) => {
     const r = await fetch(
       `/api/devices/${encodeURIComponent(exporter)}/snmp/walk`,
-      { method: 'POST' },
+      { method: 'POST', headers: authHeaders(false) },
     )
-    if (!r.ok) throw new Error(`walk ${exporter} → ${r.status}`)
+    if (!r.ok) {
+      const txt = await r.text()
+      throw new Error(`walk ${exporter} → ${r.status}: ${txt}`)
+    }
     return r.json()
   },
   topTalkers: (
