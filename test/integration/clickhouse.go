@@ -119,6 +119,10 @@ func (h *ClickHouseHandle) Truncate(ctx context.Context, t testing.TB) {
 		// rows here to exercise the loader→rule plumbing end-to-end and
 		// rely on a clean slate between cases.
 		"alert_rule_settings",
+		// L2 topology adjacency (000014_lldp_neighbors.sql). Truncated
+		// here so the topology integration tests can rely on an empty
+		// table between cases.
+		"lldp_neighbors",
 	}
 	for _, tbl := range tables {
 		// TRUNCATE on MergeTree is supported and synchronous.

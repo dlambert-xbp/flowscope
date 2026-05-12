@@ -109,6 +109,54 @@ const (
 	// Indexed by entPhysicalIndex, so the entPhysicalName map labels
 	// the row.
 	OIDCefcFRUPowerOperStatus = "1.3.6.1.4.1.9.9.117.1.1.2.1.2"
+
+	// LLDP-MIB (IEEE 802.1AB) — primary vendor-neutral neighbor
+	// discovery. Tables are indexed by (lldpRemTimeMark,
+	// lldpRemLocalPortNum, lldpRemIndex). lldpRemLocalPortNum is
+	// the local IF-MIB ifIndex; the other two columns disambiguate
+	// repeated neighbors per port.
+	//
+	// lldpRemChassisIdSubtype tells the parser how to interpret the
+	// raw bytes in lldpRemChassisId:
+	//   1=chassisComponent (string)
+	//   2=interfaceAlias (string)
+	//   3=portComponent (string)
+	//   4=macAddress       (6 raw bytes → colon-separated hex)
+	//   5=networkAddress   (1-byte AF + N raw bytes → IP string)
+	//   6=interfaceName    (string)
+	//   7=local            (string)
+	OIDLldpRemChassisIdSubtype = "1.0.8802.1.1.2.1.4.1.1.4"
+	OIDLldpRemChassisID        = "1.0.8802.1.1.2.1.4.1.1.5"
+	OIDLldpRemPortIDSubtype    = "1.0.8802.1.1.2.1.4.1.1.6"
+	OIDLldpRemPortID           = "1.0.8802.1.1.2.1.4.1.1.7"
+	OIDLldpRemPortDesc         = "1.0.8802.1.1.2.1.4.1.1.8"
+	OIDLldpRemSysName          = "1.0.8802.1.1.2.1.4.1.1.9"
+	OIDLldpRemSysDesc          = "1.0.8802.1.1.2.1.4.1.1.10"
+	OIDLldpRemSysCapEnabled    = "1.0.8802.1.1.2.1.4.1.1.12"
+	// lldpRemManAddrTable is indexed by the same three keys plus
+	// (lldpRemManAddrSubtype, lldpRemManAddr). We only care that
+	// the address exists — the subtype 1=ipv4 / 2=ipv6 is encoded in
+	// the index so we can decode without a separate column fetch.
+	OIDLldpRemManAddrIfSubtype = "1.0.8802.1.1.2.1.4.2.1.3"
+
+	// CISCO-CDP-MIB — Cisco fallback for devices that don't speak
+	// LLDP (older IOS, some pre-Catalyst 9k). Tables are indexed by
+	// (cdpCacheIfIndex, cdpCacheDeviceIndex). cdpCacheIfIndex IS the
+	// local IF-MIB ifIndex, so we skip the ifTable lookup that LLDP
+	// requires. cdpCacheCapabilities is a 4-byte bitmap (router /
+	// bridge / source-route bridge / switch / host / IGMP / repeater /
+	// phone / remote / AP-CAPWAP / two-port-mac-relay / STA-only).
+	OIDCdpCacheDeviceID     = "1.3.6.1.4.1.9.9.23.1.2.1.1.6"
+	OIDCdpCacheDevicePort   = "1.3.6.1.4.1.9.9.23.1.2.1.1.7"
+	OIDCdpCachePlatform     = "1.3.6.1.4.1.9.9.23.1.2.1.1.8"
+	OIDCdpCacheCapabilities = "1.3.6.1.4.1.9.9.23.1.2.1.1.9"
+	OIDCdpCacheVersion      = "1.3.6.1.4.1.9.9.23.1.2.1.1.5"
+	// cdpCacheAddress is the management IP, encoded as raw bytes with
+	// cdpCacheAddressType (1=IP, 2=DECNET, ...) as the protocol hint.
+	// We accept only address-type 1 (IPv4) and infer IPv6 from a 16-
+	// byte length.
+	OIDCdpCacheAddressType = "1.3.6.1.4.1.9.9.23.1.2.1.1.3"
+	OIDCdpCacheAddress     = "1.3.6.1.4.1.9.9.23.1.2.1.1.4"
 )
 
 // ifAdminStatusName / ifOperStatusName render IF-MIB integer codes

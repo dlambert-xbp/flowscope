@@ -23,6 +23,12 @@ type Inventory struct {
 	SysLocation    string
 	Interfaces     []Interface
 	Resources      []ResourceSample
+	// Neighbors carries the LLDP + CDP rows from the same walk pass.
+	// Populated by the scheduler at neighbor-walk cadence (every 5
+	// minutes by default — topology changes far less than interface
+	// counters). A nil Neighbors slice means "no neighbor walk this
+	// pass"; an empty slice means "walked, no neighbors observed".
+	Neighbors      []Neighbor
 	PollDurationMs uint32
 	Status         string // ok | partial | error
 }
@@ -103,8 +109,15 @@ type Interface struct {
 
 // Client is the operations FlowScope needs from any SNMP backend.
 // Implemented by the gosnmp-backed RealClient and by MockClient.
+//
+// WalkNeighbors is on the same interface because both real and mock
+// clients need to produce neighbors. ifTable is supplied so the
+// walker can resolve lldpRemLocalPortNum → human if_descr without a
+// second SNMP round-trip; pass nil if you don't have the inventory
+// snapshot (the names will just be empty strings).
 type Client interface {
 	Walk(ctx context.Context, target string) (*Inventory, error)
+	WalkNeighbors(ctx context.Context, target string, ifTable map[uint32]string) ([]Neighbor, error)
 }
 
 // Config configures a real (non-mock) SNMP client. It carries either

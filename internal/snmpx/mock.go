@@ -247,6 +247,70 @@ func mockAliasFor(i uint32, vendor string) string {
 	}
 }
 
+// WalkNeighbors returns synthetic LLDP/CDP neighbors for the mock
+// target. The graph forms a small spine-leaf: every mock device
+// reports two neighbors keyed off its seed, producing a deterministic
+// adjacency that's stable across reloads so the Devices → Neighbors
+// tab has something interesting to render in the dev loop.
+//
+// Mock neighbors are intentionally a mix of "known" remotes (IPs the
+// scheduler would also walk in this dev environment) and "unknown"
+// remotes (chassis IDs that don't map back to any walked exporter)
+// so the topology UI exercises both code paths.
+func (m *MockClient) WalkNeighbors(_ context.Context, target string, ifTable map[uint32]string) ([]Neighbor, error) {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(target))
+	seed := h.Sum64()
+	// Two upstream neighbors keyed off the seed. The remote chassis
+	// MAC is deterministic per (target, port) so repeated walks
+	// produce the exact same edges — the ReplacingMergeTree dedupes
+	// trivially.
+	mkMAC := func(salt uint64) string {
+		v := seed ^ salt
+		return fmt.Sprintf("aa:bb:%02x:%02x:%02x:%02x",
+			byte(v>>24), byte(v>>16), byte(v>>8), byte(v))
+	}
+	// Pick a deterministic "known peer" address so two mock devices
+	// out of every batch link to each other. Mod the seed onto the
+	// 10.0.0.0/24 range the dev compose stack typically uses; this
+	// is a synthetic value and never resolved against a real network.
+	knownPeer := fmt.Sprintf("10.0.0.%d", 10+(seed%8))
+	out := []Neighbor{
+		{
+			DiscoveryProto:       "lldp",
+			LocalIfIndex:         2,
+			LocalPortName:        ifTable[2],
+			RemoteChassisID:      mkMAC(0x55a5),
+			RemoteSysName:        fmt.Sprintf("mock-core-%02d", seed%10),
+			RemoteSysDesc:        "Cisco IOS Software, C9500 Software (cat9k_iosxe)",
+			RemotePortID:         "Te1/0/24",
+			RemoteCapabilities:   "bridge,router",
+			RemoteManagementAddr: knownPeer,
+		},
+		{
+			DiscoveryProto:     "lldp",
+			LocalIfIndex:       3,
+			LocalPortName:      ifTable[3],
+			RemoteChassisID:    mkMAC(0xa5a5),
+			RemoteSysName:      fmt.Sprintf("mock-spine-%02d", (seed/3)%10),
+			RemoteSysDesc:      "Arista DCS-7050X3 / EOS 4.31.0F",
+			RemotePortID:       "Ethernet1/1",
+			RemoteCapabilities: "bridge",
+		},
+		{
+			DiscoveryProto:     "cdp",
+			LocalIfIndex:       4,
+			LocalPortName:      ifTable[4],
+			RemoteChassisID:    fmt.Sprintf("mock-ap-%02d", seed%32),
+			RemoteSysName:      fmt.Sprintf("mock-ap-%02d", seed%32),
+			RemoteSysDesc:      "Cisco AIR-CAP3702E-A-K9",
+			RemotePortID:       "GigabitEthernet0",
+			RemoteCapabilities: "wlan-ap",
+		},
+	}
+	return out, nil
+}
+
 func lowerName(s string) string {
 	out := make([]byte, len(s))
 	for i := 0; i < len(s); i++ {
