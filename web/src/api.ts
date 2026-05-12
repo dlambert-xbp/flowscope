@@ -139,6 +139,61 @@ export type DeviceResourcesResponse = {
   window: string
 }
 
+// Neighbor mirrors a row of GET /api/devices/{exporter}/neighbors and
+// the inner row of GET /api/topology — the same shape comes back from
+// both so the Neighbors tab can render either a per-device table or
+// (in the future) a fleet-wide listing without a second type.
+export type Neighbor = {
+  last_seen: string
+  first_seen: string
+  local_exporter: string
+  local_ifindex: number
+  local_port_name: string
+  discovery_proto: 'lldp' | 'cdp'
+  remote_chassis_id: string
+  remote_sys_name: string
+  remote_sys_desc: string
+  remote_port_id: string
+  remote_capabilities: string
+  remote_management_addr: string
+}
+
+export type NeighborsResponse = {
+  exporter: string
+  count: number
+  neighbors: Neighbor[]
+}
+
+// TopologyNode + TopologyEdge are the react-flow-ready node/edge
+// shapes the API emits. They line up 1:1 with the props react-flow
+// expects (id / source / target), so the SPA can map them through
+// with minimal massaging.
+export type TopologyNode = {
+  id: string
+  label: string
+  address: string
+  sys_descr: string
+  capabilities: string[]
+  discovered: boolean
+  reachable: boolean
+  last_seen: string
+}
+
+export type TopologyEdge = {
+  id: string
+  source: string
+  target: string
+  source_port: string
+  target_port: string
+  discovery_proto: 'lldp' | 'cdp'
+  last_seen: string
+}
+
+export type TopologyResponse = {
+  nodes: TopologyNode[]
+  edges: TopologyEdge[]
+}
+
 export type Alert = {
   id: string
   rule_id: string
@@ -788,6 +843,11 @@ export const api = {
     getJSON<DeviceResourcesResponse>(
       `/api/devices/${encodeURIComponent(exporter)}/resources?${timeQuery(range, 86400)}`,
     ),
+  deviceNeighbors: (exporter: string) =>
+    getJSON<NeighborsResponse>(
+      `/api/devices/${encodeURIComponent(exporter)}/neighbors`,
+    ),
+  topology: () => getJSON<TopologyResponse>(`/api/topology`),
   alerts: (state?: 'open' | 'acknowledged' | 'closed') =>
     getJSON<{ count: number; alerts: Alert[]; state: string }>(
       state ? `/api/alerts?state=${state}` : `/api/alerts`,

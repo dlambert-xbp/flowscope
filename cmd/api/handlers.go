@@ -41,6 +41,10 @@ type handlers struct {
 	// case the /auth/* endpoints return 503 and the session-source on
 	// the authz middleware is left unwired.
 	auth authDeps
+	// topoCache memoises /api/topology for ~30s so a dashboard with
+	// the Neighbors tab open doesn't re-aggregate the full graph
+	// every poll cycle. The walker cadence is 5 minutes anyway.
+	topoCache topologyCache
 }
 
 // health is a minimal liveness probe used by Kubernetes / Container

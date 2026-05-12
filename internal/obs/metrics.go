@@ -173,6 +173,48 @@ var (
 	)
 )
 
+// SNMP scheduler metrics. Labeled by exporter so the Overview panel
+// can highlight which devices are misbehaving without aggregating
+// across the fleet.
+//
+// Cardinality note: in practice the exporter set is small (tens to
+// low-hundreds of devices). The credentials store + allowlist already
+// bound the universe.
+var (
+	// SNMPWalkFailuresTotal counts inventory walk failures by exporter
+	// and stage ("inventory" = SNMP I/O, "persist" = ClickHouse insert).
+	SNMPWalkFailuresTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "flowscope_snmp_walk_failures_total",
+			Help: "SNMP inventory walk failures, by exporter and stage.",
+		},
+		[]string{"exporter", "stage"},
+	)
+
+	// SNMPLLDPWalkFailuresTotal counts neighbor-discovery walk failures
+	// (LLDP + CDP combined — the walker tries both and only the
+	// outermost SNMP failure / persist failure bumps the counter).
+	SNMPLLDPWalkFailuresTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "flowscope_snmp_lldp_walk_failures_total",
+			Help: "LLDP/CDP neighbor walk failures, by exporter.",
+		},
+		[]string{"exporter"},
+	)
+
+	// SNMPLLDPNeighborsTotal counts neighbor rows produced by each
+	// walk pass — an operational signal that the topology graph is
+	// being kept fresh. A device that suddenly drops to zero is a
+	// vendor MIB regression or a cabling change worth noticing.
+	SNMPLLDPNeighborsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "flowscope_snmp_lldp_neighbors_total",
+			Help: "Cumulative LLDP/CDP neighbors discovered, by exporter.",
+		},
+		[]string{"exporter"},
+	)
+)
+
 // Alert leader-election metrics. The lease is ClickHouse-backed (see
 // migration 000010_leader_lease.sql). These counters are observed by
 // the Overview "Receiver health" panel so an operator can spot a

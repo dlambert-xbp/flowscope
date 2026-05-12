@@ -226,6 +226,8 @@ func run() error {
 		r.Get("/api/devices/{exporter}", h.device)
 		r.Get("/api/devices/{exporter}/inventory", h.deviceInventory)
 		r.Get("/api/devices/{exporter}/resources", h.deviceResources)
+		r.Get("/api/devices/{exporter}/neighbors", h.deviceNeighbors)
+		r.Get("/api/topology", h.topology)
 		r.Get("/api/interfaces", h.interfaces)
 		r.Get("/api/interfaces/{exporter}/{ifindex}/timeseries", h.interfaceTimeseries)
 		r.Get("/api/top/talkers", h.topTalkers)

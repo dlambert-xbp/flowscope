@@ -14,6 +14,7 @@ import type {
 import { InterfaceChart } from './InterfaceChart'
 import { TimeseriesChart, resolveColor } from './TimeseriesChart'
 import { ServiceLabel } from './ServiceLabel'
+import { NeighborsTable, TopologyGraph } from './TopologyGraph'
 import {
   rangeLabel,
   rangeSeconds,
@@ -210,6 +211,7 @@ export function Devices({
         range={range}
         rangeKey={rangeKey}
         onNavigateToFlows={onNavigateToFlows}
+        onSelectExporter={setSelected}
       />
     </div>
   )
@@ -319,18 +321,20 @@ function DirectoryRow({
 
 /* ----------------------------- Feature view ----------------------------- */
 
-type SubTab = 'summary' | 'interfaces' | 'flows'
+type SubTab = 'summary' | 'interfaces' | 'flows' | 'neighbors'
 
 function Feature({
   exporter,
   range,
   rangeKey,
   onNavigateToFlows,
+  onSelectExporter,
 }: {
   exporter: string | null
   range: TimeRange
   rangeKey: unknown
   onNavigateToFlows: NavigateToFlows
+  onSelectExporter: (exporter: string) => void
 }) {
   const [sub, setSub] = useState<SubTab>('summary')
   // Reuse the same query key FeatureHeader uses so TanStack dedupes —
@@ -367,6 +371,19 @@ function Feature({
             exporter={exporter}
             exporterLabel={exporterLabel}
             onNavigateToFlows={onNavigateToFlows}
+          />
+        )}
+        {sub === 'neighbors' && (
+          <NeighborsTab
+            exporter={exporter}
+            onSelectExporter={(ex) => {
+              // Render-on-state-change: switch the URL synchronously
+              // (the host's setSelected already does that) BEFORE any
+              // refetch. Also flip the sub-tab back to summary so the
+              // new device starts at its overview.
+              onSelectExporter(ex)
+              setSub('summary')
+            }}
           />
         )}
       </div>
@@ -578,7 +595,40 @@ function SubTabs({ active, onChange }: { active: SubTab; onChange: (s: SubTab) =
     <div className="flex border-b border-line bg-ink">
       <Tab id="summary" active={active} onChange={onChange}>Summary</Tab>
       <Tab id="interfaces" active={active} onChange={onChange}>Interfaces</Tab>
+      <Tab id="neighbors" active={active} onChange={onChange}>Neighbors</Tab>
       <Tab id="flows" active={active} onChange={onChange}>Flows</Tab>
+    </div>
+  )
+}
+
+// NeighborsTab is the Devices → Neighbors sub-tab. Top half is the
+// fleet-wide topology graph (so an operator can see how the selected
+// device sits in the fabric); bottom half is the per-device
+// adjacency list with one row per LLDP/CDP neighbor.
+//
+// Click a node on the graph → host shell navigates to that device's
+// Summary tab. The local "Section" wrapper keeps the panel chrome
+// consistent with the Summary tab's sections.
+function NeighborsTab({
+  exporter,
+  onSelectExporter,
+}: {
+  exporter: string
+  onSelectExporter: (exporter: string) => void
+}) {
+  return (
+    <div className="px-6 py-5 space-y-5">
+      <Section title="Topology" sub="lldp / cdp · 5-min walk cadence" right="SOURCE · SNMP">
+        <div className="relative">
+          <TopologyGraph
+            selectedExporter={exporter}
+            onSelectExporter={onSelectExporter}
+          />
+        </div>
+      </Section>
+      <Section title="Neighbors" sub="per-port adjacency" right="SOURCE · SNMP">
+        <NeighborsTable exporter={exporter} />
+      </Section>
     </div>
   )
 }

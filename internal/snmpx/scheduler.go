@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
+
+	"github.com/dlambert-xbp/flowscope/internal/obs"
 )
 
 // Scheduler walks every observed exporter on a configurable cadence
@@ -24,15 +26,22 @@ import (
 // cluster-wide community / mock). This lets the dev loop work with
 // no credential setup while real deployments configure per-target.
 type Scheduler struct {
-	conn           driver.Conn
-	creds          CredentialStore
-	fallback       Client
-	interval       time.Duration
-	concurrency    int
+	conn        driver.Conn
+	creds       CredentialStore
+	fallback    Client
+	interval    time.Duration
+	concurrency int
 
-	mu         sync.Mutex
-	inFlight   map[string]bool
-	lastWalked map[string]time.Time
+	// neighborInterval is the per-device cadence for LLDP/CDP walks.
+	// Topology is stable, so 5 min is a deliberate slowdown vs the
+	// per-device inventory cadence — see VISION.md §3.1 "pollerless-
+	// first" and TASKS.md P3 #20.
+	neighborInterval time.Duration
+
+	mu                  sync.Mutex
+	inFlight            map[string]bool
+	lastWalked          map[string]time.Time
+	lastNeighborsWalked map[string]time.Time
 }
 
 // NewScheduler returns a Scheduler. creds may be nil; in that case
@@ -52,13 +61,15 @@ func NewScheduler(conn driver.Conn, creds CredentialStore, fallback Client, inte
 		concurrency = 8
 	}
 	return &Scheduler{
-		conn:        conn,
-		creds:       creds,
-		fallback:    fallback,
-		interval:    interval,
-		concurrency: concurrency,
-		inFlight:    make(map[string]bool),
-		lastWalked:  make(map[string]time.Time),
+		conn:                conn,
+		creds:               creds,
+		fallback:            fallback,
+		interval:            interval,
+		concurrency:         concurrency,
+		neighborInterval:    5 * time.Minute,
+		inFlight:            make(map[string]bool),
+		lastWalked:          make(map[string]time.Time),
+		lastNeighborsWalked: make(map[string]time.Time),
 	}
 }
 
@@ -233,13 +244,48 @@ func (s *Scheduler) walkOne(ctx context.Context, target string) {
 	}
 	inv, err := client.Walk(walkCtx, target)
 	if err != nil {
+		obs.SNMPWalkFailuresTotal.WithLabelValues(target, "inventory").Inc()
 		slog.Warn("snmp: walk failed", "exporter", target, "err", err)
 		return
 	}
 	if err := s.persist(ctx, inv); err != nil {
+		obs.SNMPWalkFailuresTotal.WithLabelValues(target, "persist").Inc()
 		slog.Warn("snmp: persist failed", "exporter", target, "err", err)
 		return
 	}
+
+	// Neighbor walk runs on its own slower cadence (5 min by default).
+	// Topology is stable so we don't burn LLDP TLVs every 60s. The
+	// neighbor walker reuses the ifTable we just walked so it can
+	// label local ports without a second pass.
+	if s.shouldWalkNeighbors(target) {
+		ifTable := make(map[uint32]string, len(inv.Interfaces))
+		for _, i := range inv.Interfaces {
+			if i.IfDescr != "" {
+				ifTable[i.IfIndex] = i.IfDescr
+			}
+		}
+		neighbors, nerr := client.WalkNeighbors(walkCtx, target, ifTable)
+		if nerr != nil {
+			obs.SNMPLLDPWalkFailuresTotal.WithLabelValues(target).Inc()
+			slog.Warn("snmp: neighbor walk failed", "exporter", target, "err", nerr)
+		} else {
+			if perr := s.persistNeighbors(ctx, target, neighbors); perr != nil {
+				obs.SNMPLLDPWalkFailuresTotal.WithLabelValues(target).Inc()
+				slog.Warn("snmp: persist neighbors failed", "exporter", target, "err", perr)
+			} else {
+				obs.SNMPLLDPNeighborsTotal.WithLabelValues(target).Add(float64(len(neighbors)))
+				s.mu.Lock()
+				s.lastNeighborsWalked[target] = time.Now()
+				s.mu.Unlock()
+				slog.Info("snmp: neighbors walked",
+					"exporter", target,
+					"neighbors", len(neighbors),
+				)
+			}
+		}
+	}
+
 	slog.Info("snmp: walked",
 		"exporter", target,
 		"sys_name", inv.SysName,
@@ -247,6 +293,19 @@ func (s *Scheduler) walkOne(ctx context.Context, target string) {
 		"duration_ms", inv.PollDurationMs,
 		"status", inv.Status,
 	)
+}
+
+// shouldWalkNeighbors returns true if target hasn't had a neighbor
+// walk in the past neighborInterval. First walk always runs (zero
+// time is older than any positive interval).
+func (s *Scheduler) shouldWalkNeighbors(target string) bool {
+	s.mu.Lock()
+	last := s.lastNeighborsWalked[target]
+	s.mu.Unlock()
+	if last.IsZero() {
+		return true
+	}
+	return time.Since(last) >= s.neighborInterval
 }
 
 // clientFor returns the SNMP Client to use for target. If a
@@ -386,6 +445,91 @@ func (s *Scheduler) persist(ctx context.Context, inv *Inventory) error {
 		if err := batch.Send(); err != nil {
 			return fmt.Errorf("send resource batch: %w", err)
 		}
+	}
+	return nil
+}
+
+// persistNeighbors writes one row per neighbor to lldp_neighbors. The
+// table is a ReplacingMergeTree on last_seen so repeated walks
+// "overwrite" the previous snapshot at merge time. first_seen is
+// populated from the existing row when present (so we preserve the
+// original discovery timestamp), defaulting to last_seen on insert.
+//
+// Empty neighbors slice is fine — we still write zero rows and
+// touch nothing. The caller has already incremented the metric.
+func (s *Scheduler) persistNeighbors(ctx context.Context, exporter string, neighbors []Neighbor) error {
+	if len(neighbors) == 0 {
+		return nil
+	}
+	exp16, err := ipv6Bytes(exporter)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+
+	// Fetch existing first_seen per (local_ifindex, discovery_proto,
+	// remote_chassis_id, remote_port_id) so a re-discovered neighbor
+	// keeps its original "first seen" timestamp. A single query is
+	// cheap on the small per-device key set.
+	type fsKey struct {
+		ifIdx   uint32
+		proto   string
+		chassis string
+		portID  string
+	}
+	existing := make(map[fsKey]time.Time, len(neighbors))
+	rows, err := s.conn.Query(ctx,
+		`SELECT local_ifindex, discovery_proto, remote_chassis_id, remote_port_id, min(first_seen)
+		 FROM lldp_neighbors FINAL
+		 WHERE local_exporter = ?
+		 GROUP BY local_ifindex, discovery_proto, remote_chassis_id, remote_port_id`,
+		exp16,
+	)
+	if err == nil {
+		for rows.Next() {
+			var k fsKey
+			var fs time.Time
+			if err := rows.Scan(&k.ifIdx, &k.proto, &k.chassis, &k.portID, &fs); err == nil {
+				existing[k] = fs
+			}
+		}
+		rows.Close()
+	}
+
+	batch, err := s.conn.PrepareBatch(ctx,
+		`INSERT INTO lldp_neighbors
+		   (last_seen, first_seen, local_exporter, local_ifindex, local_port_name,
+		    discovery_proto, remote_chassis_id, remote_sys_name, remote_sys_desc,
+		    remote_port_id, remote_capabilities, remote_management_addr)`,
+	)
+	if err != nil {
+		return fmt.Errorf("prepare neighbor batch: %w", err)
+	}
+	for _, n := range neighbors {
+		fs := now
+		k := fsKey{ifIdx: n.LocalIfIndex, proto: n.DiscoveryProto, chassis: n.RemoteChassisID, portID: n.RemotePortID}
+		if prev, ok := existing[k]; ok && !prev.IsZero() {
+			fs = prev
+		}
+		// Nullable(IPv6) wants a *net.IP. Empty string means "no
+		// management address known"; pass nil so the column lands as
+		// NULL rather than the v4-mapped zero address.
+		var mgmt any
+		if n.RemoteManagementAddr != "" {
+			if ip, e2 := ipv6Bytes(n.RemoteManagementAddr); e2 == nil {
+				mgmt = ip
+			}
+		}
+		if err := batch.Append(
+			now, fs, exp16, n.LocalIfIndex, n.LocalPortName,
+			n.DiscoveryProto, n.RemoteChassisID, n.RemoteSysName, n.RemoteSysDesc,
+			n.RemotePortID, n.RemoteCapabilities, mgmt,
+		); err != nil {
+			return fmt.Errorf("append neighbor: %w", err)
+		}
+	}
+	if err := batch.Send(); err != nil {
+		return fmt.Errorf("send neighbor batch: %w", err)
 	}
 	return nil
 }
