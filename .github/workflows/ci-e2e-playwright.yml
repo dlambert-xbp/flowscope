@@ -25,6 +25,12 @@ jobs:
   e2e:
     name: playwright (compose stack)
     runs-on: ubuntu-latest
+    # COMPOSE_FILE layers the CI override on top of the base compose
+    # file for every `docker compose` invocation in this job. The
+    # override flips FLOWSCOPE_SNMP_MOCK=1 on the snmp service so the
+    # Devices tab has rows once synth has been run.
+    env:
+      COMPOSE_FILE: docker-compose.yml:deploy/ci/docker-compose.ci.yml
     steps:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -117,6 +123,38 @@ jobs:
           echo "----- docker compose logs (tail 200) -----"
           docker compose logs --tail 200 || true
           exit 1
+
+      - name: Set up Go for synth
+        # cmd/synth needs the Go toolchain. cache: false because we're
+        # only `go run`ning one short-lived command; the cache setup
+        # cost would outweigh any download savings.
+        uses: actions/setup-go@3041bf56c941b39c61721a86cd11f3bb1338122a # v5.2.0
+        with:
+          go-version: '1.25'
+          cache: false
+
+      - name: Seed flows + counter samples
+        # 15 seconds of synthetic NetFlow v5 + sFlow v5 traffic against
+        # ingest's host-mapped UDP ports gives the Devices tab rows
+        # (via exporter_health) and lets the walk-now regression canary
+        # actually click a button instead of skipping on empty state.
+        #
+        # The combined FLOWSCOPE_SNMP_MOCK=1 (from the CI compose
+        # override) lets the snmp service produce deterministic device
+        # inventory for the same exporter set so the Devices feature
+        # pane has more than just an IP.
+        run: |
+          go run ./cmd/synth \
+            --target 127.0.0.1:2055 --rate 5000 \
+            --sflow-target 127.0.0.1:6343 --sflow-rate 2000 \
+            --duration 15s
+
+      - name: Wait for ingest + snmp scheduler to settle
+        # The api batcher flushes on N records OR T ms; 5s is well
+        # above the slowest flush. The snmp scheduler ticks every 60s,
+        # so we don't try to wait for it here — the Neighbors empty
+        # state path in Playwright covers the no-walk-yet case.
+        run: sleep 5
 
       - name: Run Playwright
         working-directory: web
