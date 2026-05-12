@@ -11,7 +11,7 @@ import { Banner, Btn, Empty, Field, Section, StyleScope, Tag } from '../shared'
 
 export function AuthTokens() {
   return (
-    <div>
+    <div data-testid="auth-tokens-section">
       <SectionHeader
         eyebrow="Auth & tokens"
         title="API access & SSO"
@@ -47,7 +47,7 @@ function SessionToken() {
         header. Paste a token here and it'll be attached to every PUT/POST/DELETE
         from this browser. Reads stay open behind the proxy.
       </Banner>
-      <div className="flex items-end gap-3 max-w-[800px]">
+      <div className="flex items-end gap-3 max-w-[800px]" data-testid="auth-session-token-form">
         <div className="flex-1">
           <Field label="token">
             <input
@@ -58,6 +58,7 @@ function SessionToken() {
                 setSaved(false)
               }}
               placeholder="fls_…  (or the shared FLOWSCOPE_AUTH_TOKEN)"
+              data-testid="auth-session-token-input"
               className="s-input"
             />
           </Field>
@@ -65,6 +66,7 @@ function SessionToken() {
         <Btn
           tone="accent"
           size="md"
+          data-testid="auth-session-token-save"
           onClick={() => {
             setSettingsAuthToken(tok)
             setSaved(true)

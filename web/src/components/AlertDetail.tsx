@@ -66,6 +66,7 @@ export function AlertDetail({
       role="dialog"
       aria-modal="true"
       aria-label={`Alert detail: ${alert.title}`}
+      data-testid="alert-detail-modal"
       className="fixed inset-0 z-40"
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose()

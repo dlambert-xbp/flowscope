@@ -153,7 +153,7 @@ function Banner({
   const standfirstKind = range.kind === 'preset' ? `trailing ${winLabel}` : winLabel
   const refreshLabel = range.kind === 'preset' ? 'refresh · 2s' : 'absolute · static'
   return (
-    <div className="flex items-stretch border-b border-line bg-surface">
+    <div className="flex items-stretch border-b border-line bg-surface" data-testid="overview-health-panel">
       <div className="flex-1 p-4 border-r border-line flex flex-col gap-1">
         <div className="flex items-center gap-3 text-[10.5px] uppercase tracking-[0.1em] font-semibold text-dim">
           <span>system health · {standfirstKind}</span>

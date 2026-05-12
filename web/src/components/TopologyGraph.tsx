@@ -241,12 +241,12 @@ function TopologyGraphInner({ selectedExporter, onSelectExporter }: TopologyGrap
 
   if (topo.isLoading) {
     return (
-      <div className="p-8 text-dim font-mono text-[13px]">loading topology…</div>
+      <div data-testid="topology-canvas" className="p-8 text-dim font-mono text-[13px]">loading topology…</div>
     )
   }
   if (topo.isError) {
     return (
-      <div className="p-8 text-crit font-mono text-[13px]">
+      <div data-testid="topology-canvas" className="p-8 text-crit font-mono text-[13px]">
         failed to load topology: {(topo.error as Error).message}
       </div>
     )
@@ -256,7 +256,7 @@ function TopologyGraphInner({ selectedExporter, onSelectExporter }: TopologyGrap
   }
 
   return (
-    <div className="h-[640px] border border-line">
+    <div className="h-[640px] border border-line" data-testid="topology-canvas">
       <ReactFlow
         nodes={nodes}
         edges={layouted.edges}
@@ -308,7 +308,7 @@ function GraphLegend() {
 
 function EmptyState() {
   return (
-    <div className="p-8 border border-dashed border-line">
+    <div className="p-8 border border-dashed border-line" data-testid="topology-canvas">
       <div className="font-mono text-[14px] text-text mb-2">No LLDP/CDP neighbors discovered yet.</div>
       <div className="font-mono text-[12px] text-dim leading-[1.5]">
         SNMP credentials must be configured on devices before the snmp
