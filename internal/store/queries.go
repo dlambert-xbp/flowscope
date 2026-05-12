@@ -82,7 +82,9 @@ func (tr TimeRange) Predicate(col string) (string, []any) {
 // MergeTrees (which are append-only by design — see VISION.md §4.2
 // and migration 000003_snmp.sql).
 const sqlLatestInventory = `
-SELECT exporter, argMax(sys_name, polled_at) AS sys_name
+SELECT exporter,
+       argMax(sys_name, polled_at)     AS sys_name,
+       argMax(sys_location, polled_at) AS sys_location
 FROM device_inventory
 WHERE polled_at >= now() - INTERVAL 7 DAY
 GROUP BY exporter`
@@ -518,14 +520,15 @@ GROUP BY exporter, ifindex`
 // SNMP-driven inventory enrichment (model, OS, uptime, location)
 // arrives in a later slice.
 type Device struct {
-	Exporter   string    `json:"exporter"`
-	SysName    string    `json:"sys_name"` // populated from device_inventory when SNMP has walked
-	Flows      uint64    `json:"flows"`
-	Bytes      uint64    `json:"bytes"`
-	Packets    uint64    `json:"packets"`
-	FirstSeen  time.Time `json:"first_seen"`
-	LastSeen   time.Time `json:"last_seen"`
-	IfaceCount uint64    `json:"iface_count"`
+	Exporter    string    `json:"exporter"`
+	SysName     string    `json:"sys_name"`     // populated from device_inventory when SNMP has walked
+	SysLocation string    `json:"sys_location"` // populated from device_inventory when SNMP has walked; left-rail uses it to group exporters by site
+	Flows       uint64    `json:"flows"`
+	Bytes       uint64    `json:"bytes"`
+	Packets     uint64    `json:"packets"`
+	FirstSeen   time.Time `json:"first_seen"`
+	LastSeen    time.Time `json:"last_seen"`
+	IfaceCount  uint64    `json:"iface_count"`
 }
 
 // QueryDevices lists every exporter that produced flow records in the
@@ -540,7 +543,8 @@ func QueryDevices(ctx context.Context, conn driver.Conn, tr TimeRange) ([]Device
 WITH inv AS (` + sqlLatestInventory + `)
 SELECT
     f.exporter   AS exporter,
-    ifNull(inv.sys_name, '') AS sys_name,
+    ifNull(inv.sys_name, '')     AS sys_name,
+    ifNull(inv.sys_location, '') AS sys_location,
     f.flows,
     f.bytes,
     f.packets,
@@ -580,7 +584,7 @@ ORDER BY f.bytes DESC`
 			d        Device
 			exporter netip.Addr
 		)
-		if err := rows.Scan(&exporter, &d.SysName, &d.Flows, &d.Bytes, &d.Packets, &d.FirstSeen, &d.LastSeen, &d.IfaceCount); err != nil {
+		if err := rows.Scan(&exporter, &d.SysName, &d.SysLocation, &d.Flows, &d.Bytes, &d.Packets, &d.FirstSeen, &d.LastSeen, &d.IfaceCount); err != nil {
 			return nil, fmt.Errorf("store: scan device: %w", err)
 		}
 		d.Exporter = exporter.Unmap().String()

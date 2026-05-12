@@ -25,6 +25,14 @@ import {
 } from '../timeRange'
 import { Th, useTableSort, type SortColumns } from './sortable'
 import { formatModel } from '../lib/oidModels'
+import {
+  UNCATEGORIZED_LABEL,
+  groupDevices,
+  loadCollapsedGroups,
+  normalizeLocation,
+  saveCollapsedGroups,
+  type DeviceGroup,
+} from '../lib/deviceGroups'
 import type { Filter } from '../filters'
 
 // NavigateToFlows is the cross-tab navigation primitive injected by
@@ -235,9 +243,93 @@ function Directory({
   onResizeStart: (e: React.MouseEvent) => void
 }) {
   const [filter, setFilter] = useState('')
-  const filtered = devices.filter((d) =>
-    filter === '' ? true : d.exporter.includes(filter),
-  )
+  // Free-text filter matches the exporter IP, the SNMP sys_name, and
+  // the sys_location (case-insensitive) so an operator can find a
+  // device whether they remember the IP, the hostname, or the site
+  // they put it at. Empty filter passes everything through.
+  const needle = filter.trim().toLowerCase()
+  const filtered = devices.filter((d) => {
+    if (needle === '') return true
+    if (d.exporter.toLowerCase().includes(needle)) return true
+    if (d.sys_name && d.sys_name.toLowerCase().includes(needle)) return true
+    if (d.sys_location && d.sys_location.toLowerCase().includes(needle)) return true
+    return false
+  })
+  const groups = groupDevices(filtered)
+
+  // Collapsed-group state is persisted in localStorage so the
+  // operator's "I always close the lab folder" preference survives
+  // refreshes. Default is "everything expanded" — we only ever
+  // persist the collapsed set, so a brand-new folder for a brand-new
+  // site shows up open.
+  //
+  // On first mount, if the selected device's group is collapsed in
+  // persistence we drop it from the working set so the selection is
+  // visible without the operator having to click. After that initial
+  // hydration we leave the set alone — the operator can still
+  // collapse the selected device's folder explicitly if they want.
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => {
+    const persisted = loadCollapsedGroups()
+    if (!selected) return persisted
+    // Walk the device list once to find the selected device and the
+    // name of the group it belongs to, then unset that name in the
+    // persisted set if present. We don't depend on the `groups` const
+    // because lazy initializers can't see render-scope locals.
+    for (const d of devices) {
+      if (d.exporter !== selected) continue
+      const groupName = normalizeLocation(d.sys_location) ?? UNCATEGORIZED_LABEL
+      if (persisted.has(groupName)) {
+        const next = new Set(persisted)
+        next.delete(groupName)
+        return next
+      }
+      break
+    }
+    return persisted
+  })
+  useEffect(() => {
+    saveCollapsedGroups(collapsed)
+  }, [collapsed])
+
+  // Cross-tab navigation (Neighbors → click a neighbor) can change
+  // the selection to a device in a collapsed group after mount; the
+  // lazy initializer above only handles first-paint. Watch for the
+  // selected device's group name to change and pull it out of the
+  // collapsed set when it does. One frame of flicker is acceptable —
+  // common-path selection clicks already happen on visible rows.
+  const selectedGroupName = selected
+    ? groups.find((g) => g.devices.some((d) => d.exporter === selected))?.name
+    : undefined
+  useEffect(() => {
+    if (!selectedGroupName) return
+    setCollapsed((prev) => {
+      if (!prev.has(selectedGroupName)) return prev
+      const next = new Set(prev)
+      next.delete(selectedGroupName)
+      return next
+    })
+  }, [selectedGroupName])
+
+  // When a filter is active, any group with matches force-expands so
+  // the operator can see what they searched for without one extra
+  // click per folder.
+  const filterActive = needle !== ''
+
+  const toggleGroup = useCallback((name: string) => {
+    // Render-on-state-change rule: state flips immediately on click,
+    // before any side effects (the localStorage write below is in an
+    // effect, not in the handler).
+    setCollapsed((prev) => {
+      const next = new Set(prev)
+      if (next.has(name)) {
+        next.delete(name)
+      } else {
+        next.add(name)
+      }
+      return next
+    })
+  }, [])
+
   return (
     <aside className="relative border-r border-line bg-surface flex flex-col overflow-hidden">
       <div className="p-3 border-b border-line">
@@ -260,15 +352,25 @@ function Directory({
               : 'no matches'}
           </div>
         )}
-        {filtered.map((d) => (
-          <DirectoryRow
-            key={d.exporter}
-            d={d}
-            active={d.exporter === selected}
-            onSelect={() => onSelect(d.exporter)}
-            seconds={rangeSeconds(range)}
-          />
-        ))}
+        {groups.map((g) => {
+          // Filter forces a group open when it has matches so the
+          // operator never has to expand a folder to see what they
+          // typed. Otherwise respect the persisted collapsed set —
+          // the initial state of which already excludes the selected
+          // device's group, so the highlight is visible on mount.
+          const isCollapsed = !filterActive && collapsed.has(g.name)
+          return (
+            <DirectoryGroup
+              key={g.slug}
+              group={g}
+              collapsed={isCollapsed}
+              onToggle={() => toggleGroup(g.name)}
+              selected={selected}
+              onSelect={onSelect}
+              seconds={rangeSeconds(range)}
+            />
+          )
+        })}
       </div>
       <div
         role="separator"
@@ -280,6 +382,67 @@ function Directory({
         <div className="h-full w-px ml-auto bg-line group-hover:bg-accent group-active:bg-accent transition-colors" />
       </div>
     </aside>
+  )
+}
+
+// DirectoryGroup is one collapsible folder in the left-rail directory.
+// Header shows caret + location name + count badge; click anywhere on
+// the header to toggle. Selection / hover styling on rows is
+// unchanged from the flat-list era so existing Playwright selectors
+// (data-testid="device-row") and operator muscle memory keep working.
+function DirectoryGroup({
+  group,
+  collapsed,
+  onToggle,
+  selected,
+  onSelect,
+  seconds,
+}: {
+  group: DeviceGroup
+  collapsed: boolean
+  onToggle: () => void
+  selected: string | null
+  onSelect: (exporter: string) => void
+  seconds: number
+}) {
+  return (
+    <div data-testid={`devices-group-${group.slug}`}>
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={!collapsed}
+        title={group.name}
+        data-testid={`devices-group-header-${group.slug}`}
+        className="w-full text-left px-3 py-1.5 border-b border-line-soft bg-ink hover:bg-hover flex items-center gap-2"
+      >
+        <span
+          aria-hidden
+          className="font-mono text-[10px] text-faint w-3 shrink-0 text-center"
+        >
+          {collapsed ? '▸' : '▾'}
+        </span>
+        <span
+          className={`font-mono text-[11px] uppercase tracking-[0.08em] truncate min-w-0 flex-1 ${
+            group.isUncategorized ? 'text-faint' : 'text-dim'
+          }`}
+        >
+          {group.name}
+        </span>
+        <span className="ml-auto font-mono text-[10.5px] text-faint tabular shrink-0">
+          {group.devices.length}
+        </span>
+      </button>
+      {!collapsed &&
+        group.devices.map((d) => (
+          <DirectoryRow
+            key={d.exporter}
+            d={d}
+            active={d.exporter === selected}
+            onSelect={() => onSelect(d.exporter)}
+            seconds={seconds}
+          />
+        ))}
+    </div>
   )
 }
 
