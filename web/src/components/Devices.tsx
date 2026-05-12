@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { Fragment, useCallback, useEffect, useState, type ReactNode } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { api, fmt, labelExporter, labelInterface } from '../api'
 import type {
   Device,
@@ -26,12 +26,14 @@ import {
 import { Th, useTableSort, type SortColumns } from './sortable'
 import { formatModel } from '../lib/oidModels'
 import {
-  UNCATEGORIZED_LABEL,
-  groupDevices,
+  PATH_KEY_SEP,
+  collectFolderKeys,
+  findAncestorKeys,
+  findMatchingFolderKeys,
+  groupDevicesTree,
   loadCollapsedGroups,
-  normalizeLocation,
   saveCollapsedGroups,
-  type DeviceGroup,
+  type FolderNode,
 } from '../lib/deviceGroups'
 import type { Filter } from '../filters'
 
@@ -255,76 +257,133 @@ function Directory({
     if (d.sys_location && d.sys_location.toLowerCase().includes(needle)) return true
     return false
   })
-  const groups = groupDevices(filtered)
+  const tree = useMemo(() => groupDevicesTree(filtered), [filtered])
 
-  // Collapsed-group state is persisted in localStorage so the
-  // operator's "I always close the lab folder" preference survives
-  // refreshes. Default is "everything expanded" — we only ever
-  // persist the collapsed set, so a brand-new folder for a brand-new
-  // site shows up open.
+  // Collapsed-folder state is persisted in localStorage under the same
+  // key as PR #53. Entries are now full path strings joined by
+  // PATH_KEY_SEP (a U+203A character that can't collide with any
+  // user-facing delimiter) — older entries from PR #53 ("Troy DC") are
+  // still valid because they were stored as the raw group name, which
+  // PATH_KEY_SEP-joining of a single-segment path produces verbatim.
   //
-  // On first mount, if the selected device's group is collapsed in
-  // persistence we drop it from the working set so the selection is
-  // visible without the operator having to click. After that initial
-  // hydration we leave the set alone — the operator can still
-  // collapse the selected device's folder explicitly if they want.
+  // Default expansion policy (per spec): top-level folders expanded,
+  // deeper levels collapsed. Operators with `Troy/DC/Row A/Rack 12`
+  // don't want four pre-unfolded layers on first visit — they want a
+  // site overview and to drill in.
   const [collapsed, setCollapsed] = useState<Set<string>>(() => {
+    // First-mount hydration: if the selected device's ancestor chain
+    // includes any folder the operator previously collapsed, drop
+    // those entries so the highlight is visible without a click.
+    // PR #53 did the equivalent for the single flat group; we extend
+    // that to every ancestor of the selection. Falls back to the raw
+    // persisted set when nothing is selected.
     const persisted = loadCollapsedGroups()
     if (!selected) return persisted
-    // Walk the device list once to find the selected device and the
-    // name of the group it belongs to, then unset that name in the
-    // persisted set if present. We don't depend on the `groups` const
-    // because lazy initializers can't see render-scope locals.
-    for (const d of devices) {
-      if (d.exporter !== selected) continue
-      const groupName = normalizeLocation(d.sys_location) ?? UNCATEGORIZED_LABEL
-      if (persisted.has(groupName)) {
-        const next = new Set(persisted)
-        next.delete(groupName)
-        return next
-      }
-      break
+    const initialTree = groupDevicesTree(devices)
+    const ancestors = findAncestorKeys(initialTree, selected)
+    if (ancestors.size === 0) return persisted
+    let changed = false
+    const next = new Set(persisted)
+    for (const k of ancestors) {
+      if (next.delete(k)) changed = true
     }
-    return persisted
+    return changed ? next : persisted
   })
   useEffect(() => {
     saveCollapsedGroups(collapsed)
   }, [collapsed])
 
-  // Cross-tab navigation (Neighbors → click a neighbor) can change
-  // the selection to a device in a collapsed group after mount; the
-  // lazy initializer above only handles first-paint. Watch for the
-  // selected device's group name to change and pull it out of the
-  // collapsed set when it does. One frame of flicker is acceptable —
-  // common-path selection clicks already happen on visible rows.
-  const selectedGroupName = selected
-    ? groups.find((g) => g.devices.some((d) => d.exporter === selected))?.name
-    : undefined
+  // `seenKeys` tracks which folder keys we've already applied the
+  // default expansion policy to. The first time a new folder key
+  // shows up in the tree (typically on initial /api/devices load, but
+  // also when a brand-new exporter at a brand-new path arrives), we
+  // add it to `seenKeys` and — for depth ≥ 1 folders — start it
+  // collapsed. This gives "top-level expanded, deeper collapsed" as
+  // the default while still respecting operator-explicit toggles
+  // (which live in `collapsed` independently).
+  const [seenKeys, setSeenKeys] = useState<Set<string>>(() => new Set())
   useEffect(() => {
-    if (!selectedGroupName) return
+    const allKeys = collectFolderKeys(tree, 0)
+    let added = false
+    const newDeep: string[] = []
+    const nextSeen = new Set(seenKeys)
+    for (const k of allKeys) {
+      if (!nextSeen.has(k)) {
+        nextSeen.add(k)
+        added = true
+        // depth ≥ 1 → start collapsed
+        if (k.includes(PATH_KEY_SEP)) newDeep.push(k)
+      }
+    }
+    if (!added) return
+    setSeenKeys(nextSeen)
+    if (newDeep.length === 0) return
     setCollapsed((prev) => {
-      if (!prev.has(selectedGroupName)) return prev
+      // Keep selected device's ancestor chain visible even when its
+      // path crosses depth ≥ 1 folders — the operator selected this
+      // device, they want to see it.
+      const ancestors = selected ? findAncestorKeys(tree, selected) : new Set<string>()
       const next = new Set(prev)
-      next.delete(selectedGroupName)
+      for (const k of newDeep) {
+        if (!ancestors.has(k)) next.add(k)
+      }
       return next
     })
-  }, [selectedGroupName])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tree])
 
-  // When a filter is active, any group with matches force-expands so
-  // the operator can see what they searched for without one extra
-  // click per folder.
+  // Cross-tab navigation (Neighbors → click a neighbor) can change
+  // the selection to a device in a collapsed folder after mount; the
+  // lazy initializer above only handles first-paint. Watch the
+  // selected exporter's ancestor chain and drop any collapsed entries
+  // on it so the highlight is reachable. One frame of flicker is
+  // acceptable — common-path selection clicks already happen on
+  // visible rows.
+  const ancestorKeys = useMemo(
+    () => (selected ? findAncestorKeys(tree, selected) : new Set<string>()),
+    [tree, selected],
+  )
+  const ancestorKeysSig = useMemo(
+    () => Array.from(ancestorKeys).sort().join('|'),
+    [ancestorKeys],
+  )
+  useEffect(() => {
+    if (ancestorKeys.size === 0) return
+    setCollapsed((prev) => {
+      let changed = false
+      const next = new Set(prev)
+      for (const k of ancestorKeys) {
+        if (next.delete(k)) changed = true
+      }
+      return changed ? next : prev
+    })
+    // ancestorKeysSig is the stable signature of the set; using it as
+    // the dep keeps the effect from re-firing every render when the
+    // tree reference changes but the chain doesn't.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ancestorKeysSig])
+
+  // When a filter is active, every folder on the ancestor chain of a
+  // matching device force-expands so the operator never has to expand
+  // a folder to see what they typed. The flat per-group "has matches"
+  // check from PR #53 generalises here: we walk matching devices up
+  // to the root and force-expand each.
   const filterActive = needle !== ''
+  const filterExpand = useMemo(
+    () => (filterActive ? findMatchingFolderKeys(tree, needle) : new Set<string>()),
+    [filterActive, tree, needle],
+  )
 
-  const toggleGroup = useCallback((name: string) => {
+  const toggleFolder = useCallback((key: string) => {
     // Render-on-state-change rule: state flips immediately on click,
     // before any side effects (the localStorage write below is in an
     // effect, not in the handler).
     setCollapsed((prev) => {
       const next = new Set(prev)
-      if (next.has(name)) {
-        next.delete(name)
+      if (next.has(key)) {
+        next.delete(key)
       } else {
-        next.add(name)
+        next.add(key)
       }
       return next
     })
@@ -352,25 +411,30 @@ function Directory({
               : 'no matches'}
           </div>
         )}
-        {groups.map((g) => {
-          // Filter forces a group open when it has matches so the
-          // operator never has to expand a folder to see what they
-          // typed. Otherwise respect the persisted collapsed set —
-          // the initial state of which already excludes the selected
-          // device's group, so the highlight is visible on mount.
-          const isCollapsed = !filterActive && collapsed.has(g.name)
-          return (
-            <DirectoryGroup
-              key={g.slug}
-              group={g}
-              collapsed={isCollapsed}
-              onToggle={() => toggleGroup(g.name)}
-              selected={selected}
-              onSelect={onSelect}
-              seconds={rangeSeconds(range)}
-            />
-          )
-        })}
+        {tree.roots.map((node) => (
+          <DirectoryFolder
+            key={node.key}
+            node={node}
+            collapsed={collapsed}
+            filterExpand={filterExpand}
+            onToggle={toggleFolder}
+            selected={selected}
+            onSelect={onSelect}
+            seconds={rangeSeconds(range)}
+          />
+        ))}
+        {tree.uncategorized && (
+          <DirectoryFolder
+            key={tree.uncategorized.key}
+            node={tree.uncategorized}
+            collapsed={collapsed}
+            filterExpand={filterExpand}
+            onToggle={toggleFolder}
+            selected={selected}
+            onSelect={onSelect}
+            seconds={rangeSeconds(range)}
+          />
+        )}
       </div>
       <div
         role="separator"
@@ -385,65 +449,132 @@ function Directory({
   )
 }
 
-// DirectoryGroup is one collapsible folder in the left-rail directory.
-// Header shows caret + location name + count badge; click anywhere on
-// the header to toggle. Selection / hover styling on rows is
-// unchanged from the flat-list era so existing Playwright selectors
-// (data-testid="device-row") and operator muscle memory keep working.
-function DirectoryGroup({
-  group,
+// DirectoryFolder is one collapsible folder in the left-rail
+// directory. Renders its header, then (when expanded) any direct
+// devices at this exact path, then any child folders recursively.
+// Header shows caret + per-depth indentation + folder name +
+// aggregate count badge; click anywhere on the header to toggle.
+//
+// data-testid strategy: every folder container carries
+// `devices-folder-<path-slug>` and its header button carries
+// `devices-folder-header-<path-slug>`. For depth-0 (top-level)
+// folders we ALSO emit the PR #53 testids (`devices-group-<slug>` /
+// `devices-group-header-<slug>`) as compatibility aliases so the
+// Playwright smoke suite keeps working unchanged. The alias is
+// implemented as a thin outer wrapper that carries the alias testid
+// only on the container; the alias header testid is duplicated as a
+// hidden child node (an empty <span> with the legacy testid) since a
+// button element can only have one data-testid value.
+//
+// Selection / hover styling on device rows is unchanged from the
+// flat-list era so existing Playwright selectors (data-testid=
+// "device-row") and operator muscle memory keep working.
+function DirectoryFolder({
+  node,
   collapsed,
+  filterExpand,
   onToggle,
   selected,
   onSelect,
   seconds,
 }: {
-  group: DeviceGroup
-  collapsed: boolean
-  onToggle: () => void
+  node: FolderNode
+  collapsed: Set<string>
+  filterExpand: Set<string>
+  onToggle: (key: string) => void
   selected: string | null
   onSelect: (exporter: string) => void
   seconds: number
 }) {
-  return (
-    <div data-testid={`devices-group-${group.slug}`}>
+  // A folder force-expands when its key is in the filter-match set
+  // (the filter query has a match inside this subtree). Otherwise
+  // respect the persisted collapsed set.
+  const isCollapsed = !filterExpand.has(node.key) && collapsed.has(node.key)
+  const indentPx = node.depth * 16
+  const folderTestId = `devices-folder-${node.slug}`
+  const headerTestId = `devices-folder-header-${node.slug}`
+  // PR #53 compatibility aliases — only top-level folders get them,
+  // because PR #53 only ever rendered top-level groups.
+  const aliasContainer =
+    node.depth === 0 ? `devices-group-${node.slug}` : undefined
+  const aliasHeader =
+    node.depth === 0 ? `devices-group-header-${node.slug}` : undefined
+
+  const inner = (
+    <div data-testid={folderTestId}>
       <button
         type="button"
-        onClick={onToggle}
-        aria-expanded={!collapsed}
-        title={group.name}
-        data-testid={`devices-group-header-${group.slug}`}
-        className="w-full text-left px-3 py-1.5 border-b border-line-soft bg-ink hover:bg-hover flex items-center gap-2"
+        onClick={() => onToggle(node.key)}
+        aria-expanded={!isCollapsed}
+        title={node.path.join(' / ')}
+        data-testid={headerTestId}
+        className="w-full text-left px-3 py-1.5 border-b border-line-soft bg-ink hover:bg-hover flex items-center gap-2 relative"
+        style={indentPx > 0 ? { paddingLeft: `${12 + indentPx}px` } : undefined}
       >
+        {aliasHeader && (
+          // Hidden sibling carrying the PR #53 header testid so
+          // page.getByTestId('devices-group-header-*') keeps resolving
+          // to a clickable target. Pointer events forward to the
+          // surrounding button via pointer-events:none — clicking the
+          // span clicks the button.
+          <span
+            aria-hidden
+            data-testid={aliasHeader}
+            className="absolute inset-0 pointer-events-none"
+          />
+        )}
         <span
           aria-hidden
           className="font-mono text-[10px] text-faint w-3 shrink-0 text-center"
         >
-          {collapsed ? '▸' : '▾'}
+          {isCollapsed ? '▸' : '▾'}
         </span>
         <span
           className={`font-mono text-[11px] uppercase tracking-[0.08em] truncate min-w-0 flex-1 ${
-            group.isUncategorized ? 'text-faint' : 'text-dim'
+            node.isUncategorized ? 'text-faint' : 'text-dim'
           }`}
         >
-          {group.name}
+          {node.name}
         </span>
         <span className="ml-auto font-mono text-[10.5px] text-faint tabular shrink-0">
-          {group.devices.length}
+          {node.totalCount}
         </span>
       </button>
-      {!collapsed &&
-        group.devices.map((d) => (
-          <DirectoryRow
-            key={d.exporter}
-            d={d}
-            active={d.exporter === selected}
-            onSelect={() => onSelect(d.exporter)}
-            seconds={seconds}
-          />
-        ))}
+      {!isCollapsed && (
+        <>
+          {node.devices.map((d) => (
+            <DirectoryRow
+              key={d.exporter}
+              d={d}
+              active={d.exporter === selected}
+              onSelect={() => onSelect(d.exporter)}
+              seconds={seconds}
+              indentPx={indentPx + 12}
+            />
+          ))}
+          {node.children.map((c) => (
+            <DirectoryFolder
+              key={c.key}
+              node={c}
+              collapsed={collapsed}
+              filterExpand={filterExpand}
+              onToggle={onToggle}
+              selected={selected}
+              onSelect={onSelect}
+              seconds={seconds}
+            />
+          ))}
+        </>
+      )}
     </div>
   )
+
+  // Wrap depth-0 folders in an outer alias container so
+  // page.getByTestId('devices-group-*') keeps resolving.
+  if (aliasContainer) {
+    return <div data-testid={aliasContainer}>{inner}</div>
+  }
+  return inner
 }
 
 function DirectoryRow({
@@ -451,11 +582,16 @@ function DirectoryRow({
   active,
   onSelect,
   seconds,
+  indentPx = 0,
 }: {
   d: Device
   active: boolean
   onSelect: () => void
   seconds: number
+  // indentPx is the per-row left-padding bump driven by the folder
+  // depth this row lives at. Defaults to 0 for backward-compat with
+  // PR #53's flat layout (which would pass nothing).
+  indentPx?: number
 }) {
   const since = secondsSince(d.last_seen)
   const dot =
@@ -468,6 +604,7 @@ function DirectoryRow({
       className={`w-full text-left px-3 py-2 border-b border-line-soft flex items-center gap-3 hover:bg-hover ${
         active ? 'bg-accent-wash' : ''
       }`}
+      style={indentPx > 0 ? { paddingLeft: `${12 + indentPx}px` } : undefined}
     >
       <span className={`w-1.5 h-1.5 rounded-full ${dot} shrink-0 mt-0.5 self-start`} />
       <div className="min-w-0 flex-1">

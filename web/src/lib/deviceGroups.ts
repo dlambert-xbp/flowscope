@@ -152,3 +152,300 @@ export function saveCollapsedGroups(set: Set<string>): void {
     // ignore
   }
 }
+
+/* ------------------------- Hierarchical paths -------------------------- */
+
+// PATH_KEY_SEP joins a path's segments into a single string used as the
+// localStorage entry and React key for a folder. U+203A "single
+// right-pointing angle quotation mark" is chosen specifically because
+// it cannot collide with any of the recognised user-facing delimiters
+// (`/`, ` > `, ` : `, ` :: `, ` - `, `, `) — so even a location string
+// that happens to contain " > " round-trips unambiguously through the
+// persisted set.
+export const PATH_KEY_SEP = ' › '
+
+// DELIMITERS lists path separators to try, in priority order. The
+// first delimiter that splits the trimmed location into ≥ 2 non-empty
+// segments wins. Ordering matters:
+//
+//   - ` > ` and ` / ` (with spaces) are the most unambiguous "I meant
+//     hierarchy" signals.
+//   - `/` (no spaces) catches `Troy/DC/Row A/Rack 12` — the canonical
+//     pollerless-shop convention — but we guard against leading slashes
+//     so a path-like `/usr/local` doesn't shed its leading segment as
+//     an empty.
+//   - ` :: ` then ` : ` cover Cisco-style "Site :: Building :: Floor".
+//   - ` - ` (with spaces) is intentionally space-padded so a hyphenated
+//     name like `BPO-Edge-01` stays a single segment.
+//   - `, ` (with trailing space) catches `Austin DC, Row B, Rack 5`.
+const DELIMITERS: ReadonlyArray<string> = [
+  ' > ',
+  ' / ',
+  '/',
+  ' :: ',
+  ' : ',
+  ' - ',
+  ', ',
+]
+
+// parseLocationPath splits a sys_location into an ordered hierarchy of
+// path segments. Empty / placeholder values yield `[]` (the
+// Uncategorized bucket); no recognised delimiter yields a single-element
+// array, which preserves PR #53's flat-grouping behaviour bit-for-bit.
+//
+// Delimiter precedence is fixed (see DELIMITERS): the first delimiter
+// that produces ≥ 2 non-empty segments wins. Leading/trailing empty
+// segments (e.g. from `/Troy/DC`) are dropped, so `/Troy/DC` resolves
+// to `['Troy', 'DC']` rather than `['', 'Troy', 'DC']`.
+//
+// Mixed-delimiter strings resolve by priority order: a string like
+// `Troy/DC - Row A` produces `['Troy', 'DC - Row A']` (the bare `/`
+// matches before ` - ` in the priority list). This is a deliberate
+// tradeoff — the alternative ("longest delimiter wins" or "user's
+// preferred separator") would require operator config, which we don't
+// have. Most real-world strings use a single consistent delimiter, so
+// priority-order works well; mixed-delimiter strings are edge cases.
+export function parseLocationPath(loc: string | null | undefined): string[] {
+  if (isPlaceholderLocation(loc)) return []
+  const trimmed = (loc as string).trim()
+  // First pass: any delimiter that yields ≥ 2 non-empty segments wins.
+  for (const delim of DELIMITERS) {
+    const parts = trimmed.split(delim).map((s) => s.trim()).filter((s) => s.length > 0)
+    if (parts.length >= 2) return parts
+  }
+  // Second pass: a delimiter that yields EXACTLY 1 non-empty segment
+  // is still treated as having "structurally matched" — e.g. `/Troy`
+  // (single segment after dropping the leading empty) should resolve
+  // to `['Troy']`, not `['/Troy']`. We only re-scan against `/`
+  // because it's the only zero-padding delimiter where a leading
+  // empty-segment artefact is common in real input. The padded
+  // delimiters (` > `, ` / `, ` :: `, …) can't strand themselves at
+  // the start of a non-empty string.
+  const slashParts = trimmed.split('/').map((s) => s.trim()).filter((s) => s.length > 0)
+  if (trimmed.includes('/') && slashParts.length === 1) {
+    return slashParts
+  }
+  // No delimiter matched. Return as a single segment — same bucket
+  // the flat groupDevices() would produce.
+  return [trimmed]
+}
+
+// pathKey joins a path array into the stable string used as
+// localStorage entry, React key, and Set membership token. Inverse of
+// (path → key); the original delimiter is lost on the way in (that's
+// fine — we only need stable equality, not round-trip).
+export function pathKey(path: ReadonlyArray<string>): string {
+  return path.join(PATH_KEY_SEP)
+}
+
+// pathSlug produces a data-testid-safe slug from a full path. Each
+// segment is slugified independently and joined with `-` so the slug
+// reads naturally (`troy-dc-row-a`) and stays stable even when a
+// segment contains characters that would otherwise collapse to the
+// same slug as another path.
+export function pathSlug(path: ReadonlyArray<string>): string {
+  if (path.length === 0) return UNCATEGORIZED_SLUG
+  return path.map((s) => slugify(s)).join('-')
+}
+
+// FolderNode is one node in the location tree. Leaves carry the devices
+// physically at that path; interior nodes carry only children but their
+// totalCount aggregates the entire subtree.
+export type FolderNode = {
+  // name is the last segment of `path`, used as the display label.
+  name: string
+  // path is the full ancestor chain ending at this node. Top-level
+  // folders have a single-element path; depth = path.length - 1.
+  path: string[]
+  // key is the stable PATH_KEY_SEP-joined string. Suitable as a React
+  // key and as a localStorage entry.
+  key: string
+  // slug is the dash-joined per-segment slug. Used for data-testid.
+  slug: string
+  // depth is path.length - 1. Top-level folders are depth 0.
+  depth: number
+  // children are the sub-folders under this node, ordered alphabetically.
+  children: FolderNode[]
+  // devices are the exporters whose parsed path ends EXACTLY at this
+  // node. A parent folder may have its own devices when the dataset
+  // mixes `Troy` and `Troy/DC` — the former lands here, not as a child.
+  devices: Device[]
+  // totalCount is the aggregate device count for this entire subtree
+  // (this.devices + sum(children.totalCount)).
+  totalCount: number
+  // isUncategorized flags the catch-all bucket so callers can sort it
+  // to the bottom. Always false for nested folders.
+  isUncategorized: boolean
+}
+
+// LocationTree is the result of grouping devices hierarchically: a
+// list of top-level folder roots plus an optional Uncategorized bucket
+// at the end (kept as a separate field so the renderer can pin it).
+export type LocationTree = {
+  // roots are the top-level (depth-0) folders, sorted alphabetically.
+  roots: FolderNode[]
+  // uncategorized is the flat catch-all bucket of placeholder-location
+  // devices, or null if no such devices exist.
+  uncategorized: FolderNode | null
+}
+
+// groupDevicesTree builds a hierarchical folder tree from the supplied
+// devices. Devices with placeholder / blank sys_location land in the
+// dedicated Uncategorized bucket; the rest are placed at the leaf of
+// their parsed path. Intermediate folders are synthesised on demand.
+//
+// totalCount is computed in a second pass after the tree is built, so
+// callers can read it without recursing.
+export function groupDevicesTree(devices: Device[]): LocationTree {
+  let uncategorizedDevices: Device[] | undefined
+
+  // pathStr → mutable node. We reuse this map both to dedupe siblings
+  // and to look up intermediate ancestors as we descend.
+  const byKey = new Map<string, FolderNode>()
+  const roots: FolderNode[] = []
+
+  const ensureNode = (path: string[]): FolderNode => {
+    const key = pathKey(path)
+    const existing = byKey.get(key)
+    if (existing) return existing
+    const node: FolderNode = {
+      name: path[path.length - 1] ?? '',
+      path: path.slice(),
+      key,
+      slug: pathSlug(path),
+      depth: path.length - 1,
+      children: [],
+      devices: [],
+      totalCount: 0,
+      isUncategorized: false,
+    }
+    byKey.set(key, node)
+    if (path.length === 1) {
+      roots.push(node)
+    } else {
+      const parent = ensureNode(path.slice(0, -1))
+      parent.children.push(node)
+    }
+    return node
+  }
+
+  for (const d of devices) {
+    const path = parseLocationPath(d.sys_location)
+    if (path.length === 0) {
+      if (!uncategorizedDevices) uncategorizedDevices = []
+      uncategorizedDevices.push(d)
+      continue
+    }
+    const leaf = ensureNode(path)
+    leaf.devices.push(d)
+  }
+
+  // Sort siblings alphabetically (case-insensitive). Recurse to sort
+  // every depth in one pass.
+  const sortRec = (nodes: FolderNode[]) => {
+    nodes.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }))
+    for (const n of nodes) sortRec(n.children)
+  }
+  sortRec(roots)
+
+  // Compute totalCount bottom-up.
+  const aggregate = (n: FolderNode): number => {
+    let sum = n.devices.length
+    for (const c of n.children) sum += aggregate(c)
+    n.totalCount = sum
+    return sum
+  }
+  for (const r of roots) aggregate(r)
+
+  let uncategorized: FolderNode | null = null
+  if (uncategorizedDevices && uncategorizedDevices.length > 0) {
+    uncategorized = {
+      name: UNCATEGORIZED_LABEL,
+      path: [UNCATEGORIZED_LABEL],
+      key: UNCATEGORIZED_LABEL,
+      slug: UNCATEGORIZED_SLUG,
+      depth: 0,
+      children: [],
+      devices: uncategorizedDevices,
+      totalCount: uncategorizedDevices.length,
+      isUncategorized: true,
+    }
+  }
+
+  return { roots, uncategorized }
+}
+
+// findAncestorKeys returns the set of folder keys on the ancestor
+// chain (inclusive of the leaf) of the folder that physically contains
+// the supplied exporter. Used to auto-expand a path on mount when the
+// operator has a selected device in a deeply nested folder.
+//
+// Returns an empty set when the exporter isn't found in the tree (e.g.
+// pre-load, or a stale URL pointing at a deleted device).
+export function findAncestorKeys(tree: LocationTree, exporter: string): Set<string> {
+  const out = new Set<string>()
+  const walk = (node: FolderNode, chain: string[]): boolean => {
+    const nextChain = [...chain, node.key]
+    if (node.devices.some((d) => d.exporter === exporter)) {
+      for (const k of nextChain) out.add(k)
+      return true
+    }
+    for (const c of node.children) {
+      if (walk(c, nextChain)) return true
+    }
+    return false
+  }
+  for (const r of tree.roots) {
+    if (walk(r, [])) return out
+  }
+  if (tree.uncategorized) {
+    if (walk(tree.uncategorized, [])) return out
+  }
+  return out
+}
+
+// collectFolderKeys flattens every folder key in the tree into a set,
+// optionally filtered to depth ≤ maxDepth (0-indexed; pass 0 to get
+// only top-level keys). Useful for the "default: top-level expanded,
+// deeper levels collapsed" policy — pass maxDepth = 0 to collapse
+// everything below the roots.
+export function collectFolderKeys(tree: LocationTree, minDepth = 0): Set<string> {
+  const out = new Set<string>()
+  const walk = (n: FolderNode) => {
+    if (n.depth >= minDepth) out.add(n.key)
+    for (const c of n.children) walk(c)
+  }
+  for (const r of tree.roots) walk(r)
+  if (tree.uncategorized) walk(tree.uncategorized)
+  return out
+}
+
+// findMatchingFolderKeys returns the set of every folder key on the
+// ancestor chain of every device whose row matches the supplied
+// case-insensitive needle. Used to force-expand matching paths when a
+// filter query is active. An empty / whitespace-only needle yields an
+// empty set (the caller should suppress force-expand in that case).
+export function findMatchingFolderKeys(
+  tree: LocationTree,
+  needle: string,
+): Set<string> {
+  const out = new Set<string>()
+  const n = needle.trim().toLowerCase()
+  if (n === '') return out
+  const matches = (d: Device): boolean => {
+    if (d.exporter.toLowerCase().includes(n)) return true
+    if (d.sys_name && d.sys_name.toLowerCase().includes(n)) return true
+    if (d.sys_location && d.sys_location.toLowerCase().includes(n)) return true
+    return false
+  }
+  const walk = (node: FolderNode, chain: string[]): void => {
+    const nextChain = [...chain, node.key]
+    if (node.devices.some(matches)) {
+      for (const k of nextChain) out.add(k)
+    }
+    for (const c of node.children) walk(c, nextChain)
+  }
+  for (const r of tree.roots) walk(r, [])
+  if (tree.uncategorized) walk(tree.uncategorized, [])
+  return out
+}
