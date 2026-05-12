@@ -61,7 +61,7 @@ export function App() {
       <Strip />
       <Bar tab={tab} onTab={setTab} />
       <PageContext tab={tab} showRange={showRange} range={tr.range} onRangeChange={tr.set} />
-      <main className="overflow-auto">
+      <main className="overflow-auto" data-testid={`tab-panel-${tab}`}>
         {tab === 'overview' && (
           <Overview range={tr.range} rangeKey={tr.queryKey} />
         )}
@@ -420,6 +420,7 @@ function TabBtn({
     <button
       onClick={() => onTab(id)}
       aria-selected={selected}
+      data-testid={`tab-${id}`}
       className={`relative px-4 h-full flex items-center gap-2 text-[13px] border-r border-line ${
         selected ? 'text-text' : 'text-dim hover:text-text hover:bg-surface'
       }`}

@@ -121,6 +121,7 @@ function Rail({
               active={current === s.id}
               onClick={() => onSelect(s.id)}
               label={s.label}
+              sectionId={s.id}
             />
           ))}
         </div>
@@ -133,16 +134,19 @@ function RailItem({
   active,
   onClick,
   label,
+  sectionId,
 }: {
   active: boolean
   onClick: () => void
   label: string
+  sectionId: SectionId
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
       aria-current={active ? 'page' : undefined}
+      data-testid={`settings-section-${sectionId}`}
       className={`w-full text-left px-3 py-1.5 border-l-2 transition-colors text-[13px] ${
         active
           ? 'border-accent bg-accent-wash text-text'

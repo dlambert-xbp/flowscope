@@ -68,6 +68,7 @@ export function Btn({
   children,
   type = 'button',
   title,
+  'data-testid': dataTestid,
 }: {
   tone?: 'ghost' | 'accent' | 'crit' | 'warn'
   size?: 'sm' | 'md'
@@ -76,6 +77,7 @@ export function Btn({
   children: ReactNode
   type?: 'button' | 'submit'
   title?: string
+  'data-testid'?: string
 }) {
   const toneClass =
     tone === 'accent' ? 'border-accent text-accent hover:bg-accent-wash'
@@ -89,6 +91,7 @@ export function Btn({
       onClick={onClick}
       disabled={disabled}
       title={title}
+      data-testid={dataTestid}
       className={`font-mono text-[11px] uppercase tracking-[0.06em] border ${toneClass} ${padding} disabled:opacity-50 disabled:cursor-not-allowed`}
     >
       {children}

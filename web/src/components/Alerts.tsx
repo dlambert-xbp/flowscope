@@ -188,13 +188,13 @@ function List({
   }
   if (alerts.length === 0) {
     return (
-      <div className="px-6 py-12 text-center text-[13px] font-mono text-dim">
+      <div data-testid="alerts-empty" className="px-6 py-12 text-center text-[13px] font-mono text-dim">
         no alerts · drive synth to populate flows, then wait for rule conditions
       </div>
     )
   }
   return (
-    <ul>
+    <ul data-testid="alerts-list">
       {alerts.map((a) => (
         <Row key={a.id} alert={a} onSelect={onSelect} />
       ))}
@@ -239,13 +239,14 @@ function Row({ alert, onSelect }: { alert: Alert; onSelect: (a: Alert) => void }
   // (ack / close) are siblings, so clicks on them don't trigger the
   // modal because the listener is on the content button only.
   return (
-    <li className="border-b border-line">
+    <li className="border-b border-line" data-testid="alert-row">
       <div className="grid grid-cols-[3px_1fr_auto] gap-4 px-6 py-4">
         <div className={`${sevBar} -mx-6`} />
         <button
           type="button"
           onClick={() => onSelect(alert)}
           aria-label={`Open detail for alert: ${alert.title}`}
+          data-testid="alert-row-open"
           className="min-w-0 text-left hover:bg-ink/40 -mx-2 px-2 -my-1 py-1 rounded-sm cursor-pointer"
         >
           <div className="flex items-baseline gap-3 mb-1">

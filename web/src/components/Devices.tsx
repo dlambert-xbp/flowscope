@@ -254,7 +254,7 @@ function Directory({
           <span>{loading ? '…' : `${filtered.length}/${devices.length}`}</span>
         </div>
         {filtered.length === 0 && !loading && (
-          <div className="px-3 py-6 text-[12px] font-mono text-dim">
+          <div data-testid="devices-empty" className="px-3 py-6 text-[12px] font-mono text-dim">
             {devices.length === 0
               ? 'no exporters seen in window'
               : 'no matches'}
@@ -301,6 +301,7 @@ function DirectoryRow({
   return (
     <button
       onClick={onSelect}
+      data-testid="device-row"
       className={`w-full text-left px-3 py-2 border-b border-line-soft flex items-center gap-3 hover:bg-hover ${
         active ? 'bg-accent-wash' : ''
       }`}
@@ -554,6 +555,7 @@ function WalkNowButton({ exporter }: { exporter: string }) {
       disabled={state === 'queued'}
       aria-label="Trigger an SNMP walk on this exporter"
       title={state === 'error' && errMsg ? errMsg : undefined}
+      data-testid="walk-now-button"
       className={`font-mono text-[10px] uppercase tracking-[0.1em] px-2 py-0.5 border ${tone} disabled:cursor-wait`}
     >
       {label}
@@ -652,6 +654,7 @@ function Tab({
   return (
     <button
       onClick={() => onChange(id)}
+      data-testid={`devices-subtab-${id}`}
       className={`relative px-4 py-2.5 text-[13px] border-r border-line ${
         selected ? 'text-text' : 'text-dim hover:text-text hover:bg-surface'
       }`}
