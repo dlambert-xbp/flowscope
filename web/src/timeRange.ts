@@ -1,4 +1,13 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import {
+  createContext,
+  createElement,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from 'react'
 import { getConfig } from './config'
 
 // PRESETS are the trailing-window options offered in the selector. The
@@ -126,19 +135,22 @@ function writeToURL(r: TimeRange) {
   }
 }
 
-// useTimeRange is the global time-range hook. One range applies across
-// every tab; switching tabs preserves the operator's selection. State
-// mirrors to URL params (window=, from=, to=) so refresh and shared
-// links keep the range. React Query callers should include `queryKey`
-// in their queryKey so range changes trigger refetches.
-export function useTimeRange(): {
+// TimeRangeAPI is the shape the rest of the app consumes — read the
+// current range, set a new one, get a queryKey for React Query deps.
+export type TimeRangeAPI = {
   range: TimeRange
   set: (r: TimeRange) => void
   setPreset: (p: Preset) => void
   setAbsolute: (from: Date, to: Date) => void
   reset: () => void
   queryKey: unknown
-} {
+}
+
+// Internal hook that builds the state. Used by the provider; not
+// exported, since calling it twice would create independent state
+// instances that don't share via React (URL sync would partially
+// paper over the divergence, but updates wouldn't be reactive).
+function useTimeRangeState(): TimeRangeAPI {
   const [range, setRange] = useState<TimeRange>(() => readFromURL())
 
   // React to back/forward navigation that may change the URL.
@@ -173,4 +185,27 @@ export function useTimeRange(): {
   }, [range])
 
   return { range, set, setPreset, setAbsolute, reset, queryKey }
+}
+
+// TimeRangeContext lets every chart, panel, and selector share the
+// same range state. Brushing a chart calls setAbsolute on this
+// context; the URL is updated, every consumer re-renders, and
+// dependent queries refetch with the narrowed window.
+const TimeRangeContext = createContext<TimeRangeAPI | null>(null)
+
+export function TimeRangeProvider({ children }: { children: ReactNode }) {
+  const value = useTimeRangeState()
+  return createElement(TimeRangeContext.Provider, { value }, children)
+}
+
+// useTimeRange returns the shared API. Must be called inside a
+// <TimeRangeProvider>; the provider lives at the app root so anything
+// inside the React tree (App's TimeRangeSelector, TimeseriesChart's
+// brush handler, Devices' per-tab consumers) sees the same state.
+export function useTimeRange(): TimeRangeAPI {
+  const ctx = useContext(TimeRangeContext)
+  if (!ctx) {
+    throw new Error('useTimeRange must be used inside <TimeRangeProvider>')
+  }
+  return ctx
 }

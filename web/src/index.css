@@ -136,3 +136,13 @@ td.n, th.n { font-family: var(--font-mono); font-variant-numeric: tabular-nums; 
 }
 .th-sort:hover .th-arrow { color: var(--color-dim); }
 .th-sort.is-active .th-arrow { color: var(--color-accent); }
+
+/* uPlot drag-select rectangle — make it visible against the dark theme. */
+/* uPlot's default .u-select is barely visible on a dark background (it's */
+/* rgba(0,0,0,0.07)); paint with the accent token so the brush range reads */
+/* clearly while the operator drags. */
+.uplot-host .u-select {
+  background: color-mix(in srgb, var(--color-accent) 18%, transparent);
+  border-left: 1px solid var(--color-accent);
+  border-right: 1px solid var(--color-accent);
+}

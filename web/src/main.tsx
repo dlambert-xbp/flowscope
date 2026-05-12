@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { App } from './App'
 import { AppConfirmProvider } from './components/ui/appConfirm'
 import { hydrateConfig } from './config'
+import { TimeRangeProvider } from './timeRange'
 import './index.css'
 
 const queryClient = new QueryClient({
@@ -27,9 +28,11 @@ hydrateConfig().finally(() => {
   createRoot(document.getElementById('root')!).render(
     <StrictMode>
       <QueryClientProvider client={queryClient}>
-        <AppConfirmProvider>
-          <App />
-        </AppConfirmProvider>
+        <TimeRangeProvider>
+          <AppConfirmProvider>
+            <App />
+          </AppConfirmProvider>
+        </TimeRangeProvider>
       </QueryClientProvider>
     </StrictMode>,
   )

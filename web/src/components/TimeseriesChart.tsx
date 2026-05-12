@@ -1,18 +1,20 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useRef, type ReactNode } from 'react'
 import uPlot from 'uplot'
 import 'uplot/dist/uPlot.min.css'
 import { useTheme } from '../theme'
+import { useTimeRange } from '../timeRange'
 
 // TimeseriesChart is the shared uPlot wrapper for every chart in the
-// product. One series per `series` entry, drag-to-zoom on the X axis
-// out of the box, a "↺ reset zoom" affordance that appears when the
-// scale diverges from the data extent, and theme-aware colours.
+// product. One series per `series` entry, drag-to-zoom that maps to
+// the global TimeRange so every other panel re-narrows in sync, and
+// theme-aware colours that rebuild on theme switch.
 //
-// Local zoom only — brushing this chart does not retroactively change
-// the global URL time range. (The TimeRangeSelector is still the
-// thing that decides what data each chart fetches.) When we want
-// "apply this brush to all panels", add a button next to the reset
-// affordance that pushes (from, to) into the URL.
+// Brushing semantics: the operator drags across the chart, the
+// pixel range is converted to (from, to) Date objects via
+// u.posToVal(), and the global TimeRange is updated to that absolute
+// window. The URL picks it up, every consumer (charts, tables,
+// summary tiles) re-renders against the same window. Reset is via
+// the TimeRangeSelector preset buttons in the top bar.
 
 export type ChartSeries = {
   label: string
@@ -64,22 +66,17 @@ export function TimeseriesChart({
   const wrapRef = useRef<HTMLDivElement | null>(null)
   const plotRef = useRef<uPlot | null>(null)
   const themeRef = useRef<string>('')
-  const dataExtentRef = useRef<[number, number] | null>(null)
-  // zoomedRef mirrors the zoomed React state so the setData callback
-  // (which runs inside the useEffect closure on every refetch) can
-  // decide whether to preserve the current scale or reset it without
-  // adding `zoomed` to the effect's deps (which would re-run on every
-  // user drag and rebuild the plot).
-  const zoomedRef = useRef(false)
   const { resolved } = useTheme()
-  const [zoomed, setZoomed] = useState(false)
+  const { setAbsolute } = useTimeRange()
+  // Latest brush handler captured in a ref so the uPlot hook (built
+  // once at construction time) always calls the freshest closure.
+  // Avoids rebuilding the plot every render just to refresh callbacks.
+  const setAbsoluteRef = useRef(setAbsolute)
+  setAbsoluteRef.current = setAbsolute
   // Structural signature: any change here forces a destroy + rebuild
   // of the uPlot instance so series labels, colours, axis formatters
   // and y-anchors all refresh. Pure data changes (new xs / new
-  // series[i].values) take the cheap setData path. This is what makes
-  // switching from the Memory rollup to the Temperature rollup
-  // actually re-label the y-axis instead of carrying the old "%"
-  // formatter into a °C plot.
+  // series[i].values) take the cheap setData path.
   const structuralKey = `${height}|${yMin ?? ''}|${yMax ?? ''}|${series.length}|${series.map((s) => `${s.label}/${s.color}`).join(',')}`
   const structuralRef = useRef(structuralKey)
 
@@ -88,25 +85,16 @@ export function TimeseriesChart({
     if (!wrap) return
 
     if (xs.length === 0) {
-      // Tear down any existing plot when there's no data so the
-      // overlay can take over the canvas cleanly.
       if (plotRef.current) {
         plotRef.current.destroy()
         plotRef.current = null
       }
-      dataExtentRef.current = null
-      zoomedRef.current = false
-      setZoomed(false)
       return
     }
 
     const data: uPlot.AlignedData = [xs, ...series.map((s) => s.values)]
-    dataExtentRef.current = [xs[0], xs[xs.length - 1]]
-
     const width = wrap.clientWidth || 600
 
-    // Rebuild on theme change OR on structural change (different
-    // series shape / labels / colours / formatters / y-anchors).
     const structuralChanged = structuralRef.current !== structuralKey
     if (
       plotRef.current &&
@@ -114,8 +102,6 @@ export function TimeseriesChart({
     ) {
       plotRef.current.destroy()
       plotRef.current = null
-      zoomedRef.current = false
-      setZoomed(false)
     }
     themeRef.current = resolved
     structuralRef.current = structuralKey
@@ -130,27 +116,19 @@ export function TimeseriesChart({
           yMin,
           yMax,
           yFormat,
-          onScale: (min, max) => {
-            const extent = dataExtentRef.current
-            if (!extent) return
-            const isFull = Math.abs(min - extent[0]) < 0.5 && Math.abs(max - extent[1]) < 0.5
-            zoomedRef.current = !isFull
-            setZoomed(!isFull)
-          },
+          onBrush: (from, to) => setAbsoluteRef.current(from, to),
         }),
         data,
         wrap,
       )
     } else {
       plotRef.current.setSize({ width, height })
-      // Preserve the user's zoom across refetch refreshes: uPlot's
-      // setData defaults resetScales=true, which is the silent
-      // killer that made drag-zoom "reset back to normal a second
-      // later" — every 5-15s refetch wiped the brushed scale. When
-      // the user has explicitly zoomed we pass false so the brushed
-      // window survives. The "↺ reset zoom" affordance is the
-      // explicit way out.
-      plotRef.current.setData(data, !zoomedRef.current)
+      // resetScales=true (the uPlot default) refits the chart to the
+      // freshly fetched window. With brushing now wired to the
+      // global TimeRange, every refetch already reflects the
+      // operator's chosen window — let uPlot snap to that data
+      // extent cleanly instead of preserving a stale pixel scale.
+      plotRef.current.setData(data)
     }
   }, [xs, series, height, yMin, yMax, yFormat, resolved, structuralKey])
 
@@ -170,15 +148,6 @@ export function TimeseriesChart({
     }
   }, [height])
 
-  const resetZoom = () => {
-    const u = plotRef.current
-    const extent = dataExtentRef.current
-    if (!u || !extent) return
-    u.setScale('x', { min: extent[0], max: extent[1] })
-    zoomedRef.current = false
-    setZoomed(false)
-  }
-
   return (
     <div className="relative">
       <div
@@ -186,16 +155,6 @@ export function TimeseriesChart({
         className="w-full bg-ink border border-line uplot-host"
         style={{ height }}
       />
-      {zoomed && (
-        <button
-          type="button"
-          onClick={resetZoom}
-          className="absolute top-1.5 right-1.5 font-mono text-[10px] uppercase tracking-[0.08em] px-2 py-0.5 border border-line bg-surface text-dim hover:border-accent hover:text-text"
-          title="Reset zoom (show full window)"
-        >
-          ↺ reset zoom
-        </button>
-      )}
       {loading && xs.length === 0 && <Overlay>loading…</Overlay>}
       {error && <Overlay tone="error">{error.message}</Overlay>}
       {!loading && !error && xs.length === 0 && (
@@ -203,7 +162,7 @@ export function TimeseriesChart({
       )}
       {xs.length > 0 && (
         <div className="absolute bottom-1.5 left-2 font-mono text-[10px] text-faint pointer-events-none">
-          drag to zoom
+          drag to set time range
         </div>
       )}
     </div>
@@ -236,7 +195,7 @@ function buildOpts({
   yMin,
   yMax,
   yFormat,
-  onScale,
+  onBrush,
 }: {
   width: number
   height: number
@@ -245,16 +204,22 @@ function buildOpts({
   yMin?: number
   yMax?: number
   yFormat?: (v: number) => string
-  onScale: (min: number, max: number) => void
+  onBrush: (from: Date, to: Date) => void
 }): uPlot.Options {
+  // pendingBrushRef: when the user drags, uPlot calls setSelect
+  // repeatedly with a growing rect. On mouseup (with setScale=true)
+  // uPlot auto-zooms and then fires setSelect again with width=0 to
+  // clear the rectangle. We capture the last non-zero pixel range
+  // and fire onBrush exactly when it clears — that's the drag-end
+  // signal, and gives us both immediate visual feedback (uPlot's
+  // auto-zoom) and the absolute (from, to) for the global range.
+  let pendingBrush: { min: number; max: number } | null = null
+
   return {
     width,
     height,
     padding: [12, 16, 6, 8],
     cursor: {
-      // Drag-to-zoom on X. setScale=true makes uPlot do the zoom for
-      // us; dist=4 prevents single-click drags from being treated as
-      // brushes (which would crash the y-axis range when min===max).
       drag: { x: true, y: false, setScale: true, dist: 4 },
       points: { size: 6 },
     },
@@ -270,12 +235,29 @@ function buildOpts({
       },
     },
     hooks: {
-      setScale: [
-        (u, key) => {
-          if (key !== 'x') return
-          const scale = u.scales.x
-          if (scale.min == null || scale.max == null) return
-          onScale(scale.min, scale.max)
+      setSelect: [
+        (u) => {
+          const sel = u.select
+          if (sel.width > 0) {
+            // Active selection while the operator is dragging.
+            const lo = u.posToVal(sel.left, 'x')
+            const hi = u.posToVal(sel.left + sel.width, 'x')
+            if (Number.isFinite(lo) && Number.isFinite(hi) && hi > lo) {
+              pendingBrush = { min: lo, max: hi }
+            }
+          } else if (pendingBrush) {
+            // Selection just cleared — drag completed. uPlot has
+            // already auto-zoomed the canvas (setScale: true above);
+            // now propagate the same range to the global TimeRange so
+            // every other panel re-narrows in sync. The next
+            // refetch will arrive with data bounded to this window
+            // and the chart will naturally redraw at the new extent.
+            const { min, max } = pendingBrush
+            pendingBrush = null
+            const from = new Date(min * 1000)
+            const to = new Date(max * 1000)
+            onBrush(from, to)
+          }
         },
       ],
     },
