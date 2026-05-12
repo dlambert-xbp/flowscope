@@ -1,0 +1,22 @@
+# CI-only docker-compose override.
+#
+# Loaded on top of docker-compose.yml by the Playwright e2e workflow
+# (.github/workflows/ci-e2e-playwright.yml) via the COMPOSE_FILE env
+# variable so the test stack is hermetic and self-populating without
+# real network gear.
+#
+# Not loaded automatically by `docker compose up` — keeping it out of
+# the auto-load path means local dev defaults to real gosnmp + a real
+# auth gate.
+#
+# Overrides:
+#   - FLOWSCOPE_SNMP_MOCK=1 on snmp so the walker emits deterministic
+#     inventory keyed by exporter address. Combined with synthetic
+#     flow traffic from cmd/synth (run inside the workflow), devices
+#     appear in the Devices tab so the walk-now regression canary in
+#     the Playwright suite has a row to click.
+
+services:
+  snmp:
+    environment:
+      FLOWSCOPE_SNMP_MOCK: "1"
