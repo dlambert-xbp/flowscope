@@ -2117,6 +2117,18 @@ ORDER BY ts ASC`
 // QueryRecentFlows returns the most recent N rows from the flows table,
 // newest first. If exporter is non-empty, results are filtered to that
 // single exporter. Limit is clamped to [1, 1000].
+//
+// We anchor the query to a trailing recentFlowsWindow so the planner
+// can use the partition (PARTITION BY toYYYYMMDD(observed)) and the
+// primary-key prefix (toStartOfMinute(observed), …) to skip the rest
+// of the 7-day retention. Without this bound, ClickHouse scans every
+// partition just to find the top N by observed — which on a busy
+// collector (tens of millions of rows per day) is too slow to fit
+// under the front-door upstream timeout. A 10-minute window keeps the
+// live tail responsive while still giving plenty of headroom for
+// quiet periods.
+const recentFlowsWindow = "INTERVAL 10 MINUTE"
+
 func QueryRecentFlows(ctx context.Context, conn driver.Conn, limit int, exporter string) ([]RecentFlow, error) {
 	if limit <= 0 {
 		limit = 100
@@ -2124,14 +2136,14 @@ func QueryRecentFlows(ctx context.Context, conn driver.Conn, limit int, exporter
 	if limit > 1000 {
 		limit = 1000
 	}
-	exporterPredicate := ""
 	args := []any{}
+	wherePred := " WHERE f.observed >= now() - " + recentFlowsWindow
 	if exporter != "" {
 		addr, err := netip.ParseAddr(exporter)
 		if err != nil {
 			return nil, fmt.Errorf("store: invalid exporter address: %w", err)
 		}
-		exporterPredicate = " WHERE f.exporter = ?"
+		wherePred += " AND f.exporter = ?"
 		args = append(args, toIPv6(addr))
 	}
 	q := `
@@ -2142,7 +2154,7 @@ SELECT
     f.src_port, f.dst_port, f.proto, f.bytes, f.packets,
     f.input_ifindex, f.output_ifindex, f.src_as, f.dst_as, f.tcp_flags, f.source
 FROM flows AS f
-LEFT JOIN inv ON f.exporter = inv.exporter` + exporterPredicate + `
+LEFT JOIN inv ON f.exporter = inv.exporter` + wherePred + `
 ORDER BY f.observed DESC
 LIMIT ?`
 	args = append(args, uint64(limit))
