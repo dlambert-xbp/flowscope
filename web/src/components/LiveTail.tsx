@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useRef, useState } from 'react'
 import { api, fmt } from '../api'
 import type { RecentFlow } from '../api'
@@ -41,19 +41,29 @@ export function LiveTail({
       // ignore
     }
   }, [storageKey, collapsed])
-  // Live tail is, by definition, live — it should keep streaming
-  // regardless of the global time-range mode. (Absolute / frozen
-  // range pauses other queries via useLiveInterval; that gate is
-  // exactly the opposite of what this component wants.) Unconditional
-  // 2s cadence with focus-aware refetch so a backgrounded tab doesn't
-  // burn the api.
+  // Live tail must keep streaming regardless of the global time-range
+  // mode. The QueryClient's default refetchInterval gates polling on
+  // isLive() — perfect for window-scoped queries, exactly wrong for
+  // this component. Per-query option merging proved unreliable when
+  // the operator was on an absolute range, so we drive the refetch
+  // explicitly via a setInterval + invalidateQueries. Belt-and-
+  // suspenders, but it gives the operator the guarantee that "Live
+  // tail" actually means live no matter what.
+  const qc = useQueryClient()
   const recent = useQuery({
     queryKey: ['recent', 20],
     queryFn: () => api.recentFlows(20),
-    refetchInterval: 2000,
-    refetchIntervalInBackground: false,
+    refetchOnMount: 'always',
     refetchOnWindowFocus: true,
+    staleTime: 0,
   })
+  useEffect(() => {
+    if (collapsed) return
+    const id = window.setInterval(() => {
+      qc.invalidateQueries({ queryKey: ['recent', 20] })
+    }, 2000)
+    return () => window.clearInterval(id)
+  }, [collapsed, qc])
   const flows = recent.data?.flows ?? []
   const { sortedRows, sortKey, sortDir, toggle } = useTableSort(flows, FLOW_COLS, {
     key: 'observed',
