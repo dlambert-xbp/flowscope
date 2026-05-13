@@ -195,13 +195,18 @@ type StorageHealth struct {
 // over the trailing minute on flows.
 func QueryStorageHealth(ctx context.Context, conn driver.Conn) (StorageHealth, error) {
 	var h StorageHealth
+	// Lag / rate / newest come from a trailing 24h bound so the planner
+	// reads at most one day of partitions. The oldest timestamp is
+	// pulled separately from system.parts metadata — that's the true
+	// retention floor, and reading min(observed) over the bounded
+	// window would just return "24h ago" no matter how much history is
+	// actually retained.
 	row := conn.QueryRow(ctx, `
 SELECT
     coalesce(toUnixTimestamp(now()) - toUnixTimestamp(max(observed)), 0) AS lag_seconds,
     coalesce(countIf(observed >= now() - INTERVAL 60 SECOND) / 60.0, 0) AS rate_recent,
     coalesce(countIf(observed >= now() - INTERVAL 60 SECOND), 0) AS rows_60s,
-    coalesce(max(observed), toDateTime(0)) AS newest,
-    coalesce(min(observed), toDateTime(0)) AS oldest
+    coalesce(max(observed), toDateTime(0)) AS newest
 FROM flows
 WHERE observed >= now() - INTERVAL 24 HOUR`)
 	if err := row.Scan(
@@ -209,9 +214,22 @@ WHERE observed >= now() - INTERVAL 24 HOUR`)
 		&h.RowsPerSecRecent,
 		&h.RowsLast60s,
 		&h.NewestObserved,
-		&h.OldestObserved,
 	); err != nil {
 		return h, fmt.Errorf("store: query storage health flows: %w", err)
+	}
+	// Retention floor — cheap, metadata-only read from system.parts.
+	// Active parts only so detached / merged-away parts don't skew the
+	// answer. min_time is populated by ClickHouse when the partition
+	// expression is a date / datetime function (PARTITION BY toYYYYMMDD
+	// in our case) — same source the Overview panel uses for "oldest".
+	if err := conn.QueryRow(ctx, `
+SELECT coalesce(min(min_time), toDateTime(0))
+FROM system.parts
+WHERE database = currentDatabase()
+  AND table = 'flows'
+  AND active = 1`).Scan(&h.OldestObserved); err != nil {
+		// Non-fatal — the panel falls back to "—" when oldest is zero.
+		h.OldestObserved = time.Time{}
 	}
 	// Per-table row count estimates. system.tables.total_rows is an
 	// estimate (replicated/sharded clusters report partial values),
@@ -1141,12 +1159,16 @@ type AlertDetail struct {
 // returned when no event has ever been written for that hash.
 func QueryAlertDetail(ctx context.Context, conn driver.Conn, id string) (*AlertDetail, error) {
 	// Resolve the (rule_id, scope, group_key) tuple from the hash.
-	// Use the same WHERE the ack/close path uses so the lookups stay
-	// consistent across endpoints.
+	// Use the same 7-day bound as the summary / timeline queries below
+	// so we don't scan every active partition of alert_events just to
+	// compute one cityHash64 match — alert_events grows fast on a
+	// flapping fleet, and this is the lookup behind every alert-modal
+	// open.
 	const lookup = `
 SELECT rule_id, scope, group_key
 FROM alert_events
-WHERE cityHash64(concat(rule_id, '|', scope, '|', group_key)) = reinterpretAsUInt64(reverse(unhex(?)))
+WHERE ts >= now() - INTERVAL 7 DAY
+  AND cityHash64(concat(rule_id, '|', scope, '|', group_key)) = reinterpretAsUInt64(reverse(unhex(?)))
 GROUP BY rule_id, scope, group_key
 LIMIT 1`
 	var ruleID, scope, groupKey string
@@ -1326,10 +1348,14 @@ func CloseAlert(ctx context.Context, conn driver.Conn, id string, actor string) 
 }
 
 func appendStateTransition(ctx context.Context, conn driver.Conn, id, state, actor, body string) error {
+	// Bounded the same way as QueryAlertDetail's lookup so an ack /
+	// close click doesn't scan the full alert_events retention to find
+	// the row it's about to mutate.
 	const lookup = `
 SELECT rule_id, scope, group_key, argMax(severity, ts), argMax(title, ts), argMax(runbook, ts), argMax(labels, ts)
 FROM alert_events
-WHERE cityHash64(concat(rule_id, '|', scope, '|', group_key)) = reinterpretAsUInt64(reverse(unhex(?)))
+WHERE ts >= now() - INTERVAL 7 DAY
+  AND cityHash64(concat(rule_id, '|', scope, '|', group_key)) = reinterpretAsUInt64(reverse(unhex(?)))
 GROUP BY rule_id, scope, group_key
 LIMIT 1`
 	row := conn.QueryRow(ctx, lookup, id)
