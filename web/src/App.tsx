@@ -3,7 +3,7 @@ import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import { api, fmt } from './api'
 import { getConfig } from './config'
 import { Overview } from './components/Overview'
-import { Flows, FlowsLive, FlowsInvestigate } from './components/Flows'
+import { Flows } from './components/Flows'
 import { Devices } from './components/Devices'
 import { Alerts } from './components/Alerts'
 import { Settings } from './components/Settings'
@@ -13,14 +13,7 @@ import { useTimeRange, useLiveInterval, type TimeRange } from './timeRange'
 import { TimeRangeSelector } from './components/TimeRangeSelector'
 import { FILTER_KEYS, type Filter } from './filters'
 
-type Tab =
-  | 'overview'
-  | 'live'
-  | 'flows'
-  | 'investigate'
-  | 'devices'
-  | 'alerts'
-  | 'settings'
+type Tab = 'overview' | 'flows' | 'devices' | 'alerts' | 'settings'
 
 const LABEL_PREFIX = '_l_'
 const TAB_PARAM = 'tab'
@@ -28,9 +21,7 @@ const DEFAULT_TAB: Tab = 'overview'
 
 const TAB_LABELS: Record<Tab, string> = {
   overview: 'Overview',
-  live: 'Live tail',
   flows: 'Flows',
-  investigate: 'Investigate',
   devices: 'Devices',
   alerts: 'Alerts',
   settings: 'Settings',
@@ -38,21 +29,13 @@ const TAB_LABELS: Record<Tab, string> = {
 
 const VALID_TABS: ReadonlySet<Tab> = new Set<Tab>([
   'overview',
-  'live',
   'flows',
-  'investigate',
   'devices',
   'alerts',
   'settings',
 ])
 
-const TIME_TABS: ReadonlySet<Tab> = new Set<Tab>([
-  'overview',
-  'live',
-  'flows',
-  'investigate',
-  'devices',
-])
+const TIME_TABS: ReadonlySet<Tab> = new Set<Tab>(['overview', 'flows', 'devices'])
 
 function readTabFromURL(): Tab {
   if (typeof window === 'undefined') return DEFAULT_TAB
@@ -138,12 +121,8 @@ export function App() {
         {tab === 'overview' && (
           <Overview range={tr.range} rangeKey={tr.queryKey} />
         )}
-        {tab === 'live' && <FlowsLive />}
         {tab === 'flows' && (
           <Flows range={tr.range} rangeKey={tr.queryKey} />
-        )}
-        {tab === 'investigate' && (
-          <FlowsInvestigate range={tr.range} rangeKey={tr.queryKey} />
         )}
         {tab === 'devices' && (
           <Devices
@@ -362,9 +341,7 @@ function Bar({ tab, onTab }: { tab: Tab; onTab: (t: Tab) => void }) {
       </div>
       <div className="flex h-full">
         <TabBtn id="overview" active={tab} onTab={onTab} label="Overview" />
-        <TabBtn id="live" active={tab} onTab={onTab} label="Live tail" />
         <TabBtn id="flows" active={tab} onTab={onTab} label="Flows" count={fmt.compact(flowCount)} />
-        <TabBtn id="investigate" active={tab} onTab={onTab} label="Investigate" />
         <TabBtn id="devices" active={tab} onTab={onTab} label="Devices" count={fmt.compact(deviceCount)} />
         <TabBtn id="alerts" active={tab} onTab={onTab} label="Alerts" count={fmt.compact(openAlertCount)} tone={alertTone} />
         <TabBtn id="settings" active={tab} onTab={onTab} label="Settings" />

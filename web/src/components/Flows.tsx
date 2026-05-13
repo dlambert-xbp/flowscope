@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { api, fmt } from '../api'
 import type {
   FlowsListDir,
@@ -56,12 +56,120 @@ const SORT_OPTIONS: { id: TopNSort; label: string }[] = [
   { id: 'flows', label: 'flows' },
 ]
 
-// Flows is the Top-N analysis surface: filter chips on top, then the
-// Top-talkers / services / protocols / conversations / interfaces /
-// ASN tabs with a sort + page-size selector. Live tail and the
-// paginated Investigate table are now their own top-level tabs so the
-// operator can switch contexts without losing scroll position.
+// FlowSubTab is the three views nested inside the Flows tab. Each is
+// a separate sub-page that shares the URL-synced filter chips via
+// useFilters — switching between them doesn't drop the operator's
+// narrowing.
+type FlowSubTab = 'top' | 'live' | 'investigate'
+
+const FLOW_SUBTAB_PARAM = 'fs'
+const VALID_SUBTABS: ReadonlySet<FlowSubTab> = new Set<FlowSubTab>([
+  'top',
+  'live',
+  'investigate',
+])
+
+function readSubTabFromURL(): FlowSubTab {
+  if (typeof window === 'undefined') return 'top'
+  const v = new URLSearchParams(window.location.search).get(FLOW_SUBTAB_PARAM)
+  return v && VALID_SUBTABS.has(v as FlowSubTab) ? (v as FlowSubTab) : 'top'
+}
+
+function writeSubTabToURL(next: FlowSubTab) {
+  if (typeof window === 'undefined') return
+  const sp = new URLSearchParams(window.location.search)
+  if (next === 'top') sp.delete(FLOW_SUBTAB_PARAM)
+  else sp.set(FLOW_SUBTAB_PARAM, next)
+  const qs = sp.toString()
+  const href = qs ? `${window.location.pathname}?${qs}` : window.location.pathname
+  if (window.location.pathname + window.location.search !== href) {
+    window.history.replaceState({}, '', href)
+  }
+}
+
+// Flows is the parent surface — a sub-tab bar (Top-N / Live tail /
+// Investigate) plus the active sub-view. Filter chips live at the
+// parent level so they carry across switches without remounting.
+// LiveTail is filter-agnostic by design (operator wants every flow,
+// not the filtered slice); Top-N and Investigate both narrow by chips.
 export function Flows({
+  range,
+  rangeKey,
+}: {
+  range: TimeRange
+  rangeKey: unknown
+}) {
+  const [sub, setSubState] = useState<FlowSubTab>(() => readSubTabFromURL())
+  useEffect(() => {
+    const onPop = () => setSubState(readSubTabFromURL())
+    window.addEventListener('popstate', onPop)
+    return () => window.removeEventListener('popstate', onPop)
+  }, [])
+  const setSub = useCallback((next: FlowSubTab) => {
+    setSubState(next)
+    writeSubTabToURL(next)
+  }, [])
+  return (
+    <div>
+      <FlowSubTabs active={sub} onChange={setSub} />
+      {sub === 'top' && <FlowsTopN range={range} rangeKey={rangeKey} />}
+      {sub === 'live' && (
+        <LiveTail storageKey="flowscope.liveTab.collapsed" />
+      )}
+      {sub === 'investigate' && (
+        <FlowsInvestigate range={range} rangeKey={rangeKey} />
+      )}
+    </div>
+  )
+}
+
+function FlowSubTabs({
+  active,
+  onChange,
+}: {
+  active: FlowSubTab
+  onChange: (s: FlowSubTab) => void
+}) {
+  return (
+    <div className="flex border-b border-line bg-ink">
+      <FlowSubTabBtn id="top" active={active} onChange={onChange}>Top-N</FlowSubTabBtn>
+      <FlowSubTabBtn id="live" active={active} onChange={onChange}>Live tail</FlowSubTabBtn>
+      <FlowSubTabBtn id="investigate" active={active} onChange={onChange}>Investigate</FlowSubTabBtn>
+    </div>
+  )
+}
+
+function FlowSubTabBtn({
+  id,
+  active,
+  onChange,
+  children,
+}: {
+  id: FlowSubTab
+  active: FlowSubTab
+  onChange: (s: FlowSubTab) => void
+  children: ReactNode
+}) {
+  const selected = id === active
+  return (
+    <button
+      type="button"
+      onClick={() => onChange(id)}
+      data-testid={`flows-subtab-${id}`}
+      className={`relative px-4 py-2.5 text-[13px] border-r border-line ${
+        selected ? 'text-text' : 'text-dim hover:text-text hover:bg-surface'
+      }`}
+    >
+      {children}
+      {selected && <span className="absolute left-0 right-0 -bottom-px h-0.5 bg-accent" />}
+    </button>
+  )
+}
+
+// FlowsTopN is the Top-N analysis surface: filter chips on top, then
+// Top talkers / services / protocols / conversations / interfaces /
+// ASN tabs with a sort + page-size selector.
+function FlowsTopN({
   range,
   rangeKey,
 }: {
@@ -112,24 +220,13 @@ export function Flows({
   )
 }
 
-// FlowsLive is the standalone Live tail tab. No filters, no auto-
-// refresh control — just the rolling stream of recent flows. Operator
-// can collapse / expand via the panel's own toggle.
-export function FlowsLive() {
-  return (
-    <div>
-      <LiveTail storageKey="flowscope.liveTab.collapsed" />
-    </div>
-  )
-}
-
-// FlowsInvestigate is the standalone Investigate tab — the same
-// paginated, sortable flow table that previously sat at the bottom of
-// the Flows tab. URL-synced filter chips share state with the Flows
-// Top-N tab via useFilters so navigating between the two doesn't
-// drop the operator's narrowing. No auto-scroll on the row highlight
-// unless the move was triggered by j/k keys.
-export function FlowsInvestigate({
+// FlowsInvestigate renders the paginated, sortable flow table.
+// URL-synced filter chips share state with FlowsTopN. The body is
+// only meaningful when at least one filter narrows the set — without
+// filters the table would just be a window-wide flow dump, which
+// isn't what "investigation" is for. Empty-filter state shows a
+// prompt to add a filter.
+function FlowsInvestigate({
   range,
   rangeKey,
 }: {
@@ -149,13 +246,22 @@ export function FlowsInvestigate({
         onClear={f.clear}
         range={range}
       />
-      <Investigate
-        qs={qs}
-        range={apiRange}
-        rangeKey={rangeKey}
-        onAdd={f.add}
-        onDrill={setDrill}
-      />
+      {f.filters.length === 0 ? (
+        <div className="px-6 py-10 text-center text-[13px] font-mono text-dim">
+          Add a filter above to investigate matching flows.{' '}
+          <span className="text-faint">
+            Investigation is filter-driven — narrow by exporter (name or IP), 5-tuple, ASN, or interface.
+          </span>
+        </div>
+      ) : (
+        <Investigate
+          qs={qs}
+          range={apiRange}
+          rangeKey={rangeKey}
+          onAdd={f.add}
+          onDrill={setDrill}
+        />
+      )}
       <FlowDrawer
         drill={drill}
         pageFilters={qs}
@@ -254,11 +360,68 @@ function FilterBuilder({
   const [value, setValue] = useState<string>('')
   const [label, setLabel] = useState<string>('')
   const [error, setError] = useState<string | null>(null)
+  // Loaded so the exporter key can resolve a hostname like
+  // "troy-flex-internet-01" to the underlying IP at submit time. Cheap
+  // — the App shell already fetches this, TanStack dedupes the cache.
+  const devices = useQuery({
+    queryKey: ['devices', 'filter-builder'],
+    queryFn: () => api.devices(86_400),
+    refetchInterval: false,
+    staleTime: 60_000,
+  })
   const placeholder = PLACEHOLDERS[key]
   const submit = () => {
     const v = value.trim()
     if (!v) {
       setError('value required')
+      return
+    }
+    // Exporter: accept either an IP literal or a hostname. Match by
+    // sys_name (case-insensitive, exact) against the devices list and
+    // resolve to the canonical IP so the SQL filter still uses the
+    // exporter column unchanged. The chip's label keeps the human
+    // name so the operator never sees the IP unless they typed one.
+    if (key === 'exporter' && !looksLikeIP(v)) {
+      const needle = v.toLowerCase()
+      const rows = devices.data?.devices ?? []
+      const match = rows.find(
+        (d) => d.sys_name && d.sys_name.toLowerCase() === needle,
+      )
+      if (!match) {
+        const partials = rows.filter(
+          (d) => d.sys_name && d.sys_name.toLowerCase().includes(needle),
+        )
+        if (partials.length === 1) {
+          // One unambiguous prefix/substring match — accept it.
+          const f: Filter = {
+            key,
+            value: partials[0].exporter,
+            label: partials[0].sys_name || partials[0].exporter,
+          }
+          onAdd(f)
+          setValue('')
+          setLabel('')
+          setError(null)
+          return
+        }
+        if (partials.length > 1) {
+          setError(`ambiguous — ${partials.length} exporters match`)
+          return
+        }
+        setError('no exporter with that name')
+        return
+      }
+      const f: Filter = {
+        key,
+        value: match.exporter,
+        label: match.sys_name || match.exporter,
+      }
+      const lbl = label.trim()
+      if (lbl && lbl !== match.exporter) f.label = lbl
+      onAdd(f)
+      setValue('')
+      setLabel('')
+      setError(null)
       return
     }
     const validationError = validateValue(key, v)
@@ -267,6 +430,13 @@ function FilterBuilder({
       return
     }
     const f: Filter = { key, value: v }
+    // When filtering by exporter IP, also try to attach the human
+    // hostname as the chip label so the chip reads as a name even
+    // though the underlying value is an IP.
+    if (key === 'exporter' && !label.trim()) {
+      const match = (devices.data?.devices ?? []).find((d) => d.exporter === v)
+      if (match && match.sys_name) f.label = match.sys_name
+    }
     const lbl = label.trim()
     if (lbl && lbl !== v) f.label = lbl
     onAdd(f)
@@ -348,7 +518,7 @@ function FilterBuilder({
 }
 
 const PLACEHOLDERS: Record<FilterKey, string> = {
-  exporter: 'exporter IP (e.g. 10.110.0.182)',
+  exporter: 'exporter name or IP',
   src_addr: 'source IP',
   dst_addr: 'destination IP',
   src_port: 'source port (1–65535)',
@@ -358,6 +528,16 @@ const PLACEHOLDERS: Record<FilterKey, string> = {
   output_ifindex: 'output ifindex',
   src_as: 'source ASN (e.g. 13335)',
   dst_as: 'destination ASN',
+}
+
+// looksLikeIP returns true when value parses as an IPv4 or IPv6
+// literal (or at least the chars that could ever appear in one). The
+// FilterBuilder uses this to decide whether to treat an exporter
+// filter value as a hostname (resolve via devices list) or an IP
+// (use directly). Loose by design — exact validity is enforced by
+// validateValue.
+function looksLikeIP(v: string): boolean {
+  return /^[0-9a-fA-F:.]+$/.test(v) && /[.:]/.test(v)
 }
 
 function validateValue(key: FilterKey, value: string): string | null {
