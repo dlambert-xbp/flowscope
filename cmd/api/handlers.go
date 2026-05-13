@@ -856,7 +856,7 @@ func (h *handlers) device(w http.ResponseWriter, r *http.Request) {
 	d, err := store.QueryDevice(r.Context(), h.conn, exporter, tr)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "no flows from this exporter in the requested window")
+			writeError(w, http.StatusNotFound, "exporter not found in flows or SNMP inventory")
 			return
 		}
 		writeError(w, http.StatusInternalServerError, err.Error())

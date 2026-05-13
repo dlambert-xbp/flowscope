@@ -74,8 +74,27 @@ export type Device = {
   bytes: number
   packets: number
   first_seen: string
+  // last_seen is at the unix epoch (1970-01-01) when the device is
+  // SNMP-walked but has produced no flow records inside the time
+  // window — the UI uses isEpoch() to render that as "discovered"
+  // instead of "offline".
   last_seen: string
   iface_count: number
+  // last_walked is the most recent SNMP poll timestamp from
+  // device_inventory; epoch when SNMP has not walked yet.
+  last_walked: string
+}
+
+// isEpoch returns true when the supplied ISO timestamp represents the
+// unix epoch (or earlier). Used to distinguish "no data" from "stale
+// data" — the QueryDevices SQL substitutes epoch via ifNull() when a
+// LEFT JOIN misses, so the frontend can render those rows as
+// "discovered" / "never walked" instead of pretending they are merely
+// offline.
+export function isEpoch(iso: string): boolean {
+  if (!iso) return true
+  const t = new Date(iso).getTime()
+  return !Number.isFinite(t) || t <= 0
 }
 
 export type SNMPInterface = {

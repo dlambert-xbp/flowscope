@@ -527,31 +527,40 @@ type Device struct {
 	Bytes       uint64    `json:"bytes"`
 	Packets     uint64    `json:"packets"`
 	FirstSeen   time.Time `json:"first_seen"`
-	LastSeen    time.Time `json:"last_seen"`
+	LastSeen    time.Time `json:"last_seen"`   // epoch when SNMP knows the device but no flow records in window
 	IfaceCount  uint64    `json:"iface_count"`
+	LastWalked  time.Time `json:"last_walked"` // latest polled_at from device_inventory; epoch when never walked
 }
 
-// QueryDevices lists every exporter that produced flow records in the
-// trailing window, ranked by total bytes. iface_count is the number
-// of unique ifindex values that produced counter samples in the same
-// window — populated only for sFlow / gNMI-capable exporters.
-// sys_name comes from the latest SNMP walk; empty when no walk yet.
+// QueryDevices lists every exporter known to FlowScope, ranked by
+// total flow bytes in the window. The list is the union of:
+//
+//   - exporters that produced flow records in the trailing window
+//   - exporters present in device_inventory (SNMP has walked them
+//     within the 7-day retention) regardless of recent flow activity
+//
+// SNMP-only rows have flow stats of zero and last_seen at epoch — the
+// UI uses that to render them as "discovered" (walked but silent)
+// instead of dropping them. iface_count is the number of unique
+// ifindex values that produced counter samples in the same window —
+// populated only for sFlow / gNMI-capable exporters; zero otherwise.
+// last_walked is the latest polled_at from device_inventory; epoch
+// when SNMP has not walked this exporter yet.
 func QueryDevices(ctx context.Context, conn driver.Conn, tr TimeRange) ([]Device, error) {
 	obsPred, obsArgs := tr.Predicate("observed")
 	tsPred, tsArgs := tr.Predicate("ts")
 	q := `
-WITH inv AS (` + sqlLatestInventory + `)
-SELECT
-    f.exporter   AS exporter,
-    ifNull(inv.sys_name, '')     AS sys_name,
-    ifNull(inv.sys_location, '') AS sys_location,
-    f.flows,
-    f.bytes,
-    f.packets,
-    f.first_seen,
-    f.last_seen,
-    ifNull(i.iface_count, 0) AS iface_count
-FROM (
+WITH
+  inv AS (
+    SELECT exporter,
+           argMax(sys_name, polled_at)     AS sys_name,
+           argMax(sys_location, polled_at) AS sys_location,
+           max(polled_at)                  AS polled_at
+    FROM device_inventory
+    WHERE polled_at >= now() - INTERVAL 7 DAY
+    GROUP BY exporter
+  ),
+  flow_agg AS (
     SELECT
         exporter,
         count() AS flows,
@@ -562,15 +571,37 @@ FROM (
     FROM flows
     WHERE ` + obsPred + `
     GROUP BY exporter
-) AS f
-LEFT JOIN (
+  ),
+  iface_agg AS (
     SELECT exporter, uniq(ifindex) AS iface_count
     FROM iface_counter_samples
     WHERE ` + tsPred + `
     GROUP BY exporter
-) AS i ON f.exporter = i.exporter
-LEFT JOIN inv ON f.exporter = inv.exporter
-ORDER BY f.bytes DESC`
+  ),
+  all_exporters AS (
+    SELECT exporter FROM (
+        SELECT exporter FROM flow_agg
+        UNION ALL
+        SELECT exporter FROM inv
+    )
+    GROUP BY exporter
+  )
+SELECT
+    a.exporter,
+    ifNull(inv.sys_name, '')     AS sys_name,
+    ifNull(inv.sys_location, '') AS sys_location,
+    ifNull(f.flows,   toUInt64(0)) AS flows,
+    ifNull(f.bytes,   toUInt64(0)) AS bytes,
+    ifNull(f.packets, toUInt64(0)) AS packets,
+    ifNull(f.first_seen, toDateTime64('1970-01-01 00:00:00', 3, 'UTC')) AS first_seen,
+    ifNull(f.last_seen,  toDateTime64('1970-01-01 00:00:00', 3, 'UTC')) AS last_seen,
+    ifNull(i.iface_count, toUInt64(0)) AS iface_count,
+    ifNull(inv.polled_at, toDateTime64('1970-01-01 00:00:00', 3, 'UTC')) AS last_walked
+FROM all_exporters AS a
+LEFT JOIN flow_agg  AS f ON a.exporter = f.exporter
+LEFT JOIN iface_agg AS i ON a.exporter = i.exporter
+LEFT JOIN inv             ON a.exporter = inv.exporter
+ORDER BY bytes DESC, sys_name, a.exporter`
 	args := append([]any{}, obsArgs...)
 	args = append(args, tsArgs...)
 	rows, err := conn.Query(ctx, q, args...)
@@ -584,7 +615,14 @@ ORDER BY f.bytes DESC`
 			d        Device
 			exporter netip.Addr
 		)
-		if err := rows.Scan(&exporter, &d.SysName, &d.SysLocation, &d.Flows, &d.Bytes, &d.Packets, &d.FirstSeen, &d.LastSeen, &d.IfaceCount); err != nil {
+		if err := rows.Scan(
+			&exporter,
+			&d.SysName, &d.SysLocation,
+			&d.Flows, &d.Bytes, &d.Packets,
+			&d.FirstSeen, &d.LastSeen,
+			&d.IfaceCount,
+			&d.LastWalked,
+		); err != nil {
 			return nil, fmt.Errorf("store: scan device: %w", err)
 		}
 		d.Exporter = exporter.Unmap().String()
@@ -594,8 +632,11 @@ ORDER BY f.bytes DESC`
 }
 
 // QueryDevice returns the same shape as one row of QueryDevices,
-// scoped to the supplied exporter address. Empty result (no flows in
-// window) returns ErrNotFound — the api maps this to 404.
+// scoped to the supplied exporter address. Returns ErrNotFound only
+// when both the flows table AND device_inventory have no record of
+// the exporter within retention. SNMP-only devices return a row with
+// zeroed flow stats and a populated last_walked — the api maps this
+// to 200 so the UI can render the device detail without a hard 404.
 func QueryDevice(ctx context.Context, conn driver.Conn, exporter netip.Addr, tr TimeRange) (*Device, error) {
 	obsPred, obsArgs := tr.Predicate("observed")
 	q := `
@@ -612,25 +653,42 @@ GROUP BY exporter`
 	args := append([]any{}, obsArgs...)
 	args = append(args, expIP)
 	row := conn.QueryRow(ctx, q, args...)
-	var d Device
+	var (
+		d           Device
+		hasFlowRow  bool
+	)
 	if err := row.Scan(&d.Flows, &d.Bytes, &d.Packets, &d.FirstSeen, &d.LastSeen); err != nil {
-		// clickhouse-go returns sql.ErrNoRows wrapped on empty groups
-		if isNoRows(err) {
-			return nil, ErrNotFound
+		if !isNoRows(err) {
+			return nil, fmt.Errorf("store: query device: %w", err)
 		}
-		return nil, fmt.Errorf("store: query device: %w", err)
+	} else {
+		hasFlowRow = true
 	}
 	d.Exporter = exporter.Unmap().String()
 
-	// Latest SNMP sys_name for this exporter. Non-fatal if SNMP has
-	// not yet walked.
+	// Latest SNMP sys_name + sys_location + polled_at for this exporter.
+	// Non-fatal if SNMP has not yet walked.
 	const qn = `
-SELECT argMax(sys_name, polled_at)
+SELECT
+    argMax(sys_name, polled_at)     AS sys_name,
+    argMax(sys_location, polled_at) AS sys_location,
+    max(polled_at)                  AS polled_at
 FROM device_inventory
 WHERE polled_at >= now() - INTERVAL 7 DAY AND exporter = ?
 GROUP BY exporter`
-	if err := conn.QueryRow(ctx, qn, expIP).Scan(&d.SysName); err != nil {
+	hasInvRow := true
+	if err := conn.QueryRow(ctx, qn, expIP).Scan(&d.SysName, &d.SysLocation, &d.LastWalked); err != nil {
+		if !isNoRows(err) {
+			return nil, fmt.Errorf("store: query device inventory: %w", err)
+		}
+		hasInvRow = false
 		d.SysName = ""
+		d.SysLocation = ""
+	}
+
+	// Neither flows nor inventory knew about this exporter — 404.
+	if !hasFlowRow && !hasInvRow {
+		return nil, ErrNotFound
 	}
 
 	// Interface count for this exporter.

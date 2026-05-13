@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
-import { api, fmt } from '../api'
+import { api, fmt, isEpoch } from '../api'
 import type {
   Alert,
   AlertSummary,
@@ -253,10 +253,15 @@ type Tile = {
   status?: { text: string; tone: 'crit' | 'warn' | 'ok' | 'dim' }
 }
 
+// ExporterStatus buckets exporters by their flow freshness. A
+// "discovered" exporter is one that SNMP has walked but that hasn't
+// produced flow records inside the active time window — distinct from
+// "offline" (sent flows before but not lately).
 type ExporterStatus = {
   online: number
   silent: number
   offline: number
+  discovered: number
 }
 
 function KpiGrid({
@@ -292,7 +297,9 @@ function KpiGrid({
         ? { text: `${exporters.silent} silent`, tone: 'warn' }
         : exporters.online > 0
           ? { text: 'all reporting', tone: 'ok' }
-          : { text: 'none seen', tone: 'dim' }
+          : exporters.discovered > 0
+            ? { text: `${exporters.discovered} no flows`, tone: 'dim' }
+            : { text: 'none seen', tone: 'dim' }
   const exporterState: Tile['state'] =
     exporters.offline > 0 ? 'crit' : exporters.silent > 0 ? 'warn' : undefined
   const enrichedPct =
@@ -340,14 +347,17 @@ function KpiGrid({
     },
     {
       label: 'exporters',
-      value: fmt.num(exporters.online + exporters.silent + exporters.offline),
-      unit: 'reporting',
+      value: fmt.num(
+        exporters.online + exporters.silent + exporters.offline + exporters.discovered,
+      ),
+      unit: 'known',
       state: exporterState,
       status: exporterTone,
       micro: [
         `${exporters.online} online`,
         ...(exporters.silent ? [`${exporters.silent} silent`] : []),
         ...(exporters.offline ? [`${exporters.offline} offline`] : []),
+        ...(exporters.discovered ? [`${exporters.discovered} no flows`] : []),
       ],
     },
     {
@@ -638,13 +648,13 @@ function ExportersPanel({
       last_seen: d.last_seen,
     })
   }
-  // Sort: offline first, then silent, then online; within each tier
-  // sort by worst loss desc so attention lands on the noisy ingest.
+  // Sort: offline first, then silent, then online, then discovered
+  // (walked but no flows in window — they go to the bottom because they
+  // aren't actively reporting). Within each tier sort by worst loss
+  // desc so the noisy ingest gets attention.
   rows.sort((a, b) => {
-    const aSince = secondsSince(a.last_seen)
-    const bSince = secondsSince(b.last_seen)
-    const aTier = aSince >= 300 ? 0 : aSince >= 60 ? 1 : 2
-    const bTier = bSince >= 300 ? 0 : bSince >= 60 ? 1 : 2
+    const aTier = tierFor(a.last_seen)
+    const bTier = tierFor(b.last_seen)
     if (aTier !== bTier) return aTier - bTier
     return b.loss_pct - a.loss_pct
   })
@@ -657,6 +667,9 @@ function ExportersPanel({
           <span className="text-ok">{status.online} online</span>
           {status.silent > 0 && <span className="text-warn">{status.silent} silent</span>}
           {status.offline > 0 && <span className="text-crit">{status.offline} offline</span>}
+          {status.discovered > 0 && (
+            <span className="text-faint">{status.discovered} no flows</span>
+          )}
           <span className={lossTone}>{lossLabel}</span>
         </span>
       }
@@ -687,8 +700,9 @@ function ExportersPanel({
           </thead>
           <tbody>
             {rows.map((r, i) => {
+              const discovered = isEpoch(r.last_seen)
               const since = secondsSince(r.last_seen)
-              const fresh = freshnessTone(since)
+              const fresh = freshnessTone(since, discovered)
               const tone =
                 r.loss_pct >= 5
                   ? 'text-crit'
@@ -723,7 +737,7 @@ function ExportersPanel({
                     {r.source ? `${r.loss_pct.toFixed(2)}%` : '—'}
                   </td>
                   <td className={`r n tabular ${fresh.text}`}>
-                    {formatSince(since)}
+                    {discovered ? 'no flows' : formatSince(since)}
                   </td>
                 </tr>
               )
@@ -1133,20 +1147,44 @@ function secondsSince(iso: string): number {
   return Math.max(0, (Date.now() - t) / 1000)
 }
 
+// tierFor orders rows for the Exporters panel: offline first
+// (loudest), then silent, then online, then discovered (SNMP-walked
+// but no flow records in the window — at the bottom because they
+// aren't actively reporting).
+function tierFor(lastSeen: string): number {
+  if (isEpoch(lastSeen)) return 3
+  const since = secondsSince(lastSeen)
+  if (since >= 300) return 0
+  if (since >= 60) return 1
+  return 2
+}
+
 function classifyExporters(devices: Device[]): ExporterStatus {
   let online = 0
   let silent = 0
   let offline = 0
+  let discovered = 0
   for (const d of devices) {
+    if (isEpoch(d.last_seen)) {
+      discovered++
+      continue
+    }
     const since = secondsSince(d.last_seen)
     if (since < 60) online++
     else if (since < 300) silent++
     else offline++
   }
-  return { online, silent, offline }
+  return { online, silent, offline, discovered }
 }
 
-function freshnessTone(since: number): { dot: string; text: string } {
+// freshnessTone maps "seconds since last flow" to a status dot color +
+// label tone. Pass discovered=true for SNMP-walked-but-silent rows so
+// they render neutral instead of crit.
+function freshnessTone(
+  since: number,
+  discovered = false,
+): { dot: string; text: string } {
+  if (discovered) return { dot: 'bg-faint', text: 'text-faint' }
   if (since < 60) return { dot: 'bg-ok', text: 'text-faint' }
   if (since < 300) return { dot: 'bg-warn', text: 'text-warn' }
   return { dot: 'bg-crit', text: 'text-crit' }

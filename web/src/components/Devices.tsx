@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Fragment, useCallback, useEffect, useState, type ReactNode } from 'react'
-import { api, fmt, labelExporter, labelInterface } from '../api'
+import { api, fmt, isEpoch, labelExporter, labelInterface } from '../api'
 import type {
   Device,
   DeviceInventory,
@@ -457,9 +457,18 @@ function DirectoryRow({
   onSelect: () => void
   seconds: number
 }) {
+  // discovered: SNMP has walked this device but no flow records hit the
+  // table inside the window. Render a neutral dot + "—" rate so the
+  // operator can tell at a glance that we know about it via SNMP only.
+  const discovered = isEpoch(d.last_seen)
   const since = secondsSince(d.last_seen)
-  const dot =
-    since < 60 ? 'bg-ok' : since < 300 ? 'bg-warn' : 'bg-crit'
+  const dot = discovered
+    ? 'bg-faint'
+    : since < 60
+      ? 'bg-ok'
+      : since < 300
+        ? 'bg-warn'
+        : 'bg-crit'
   const lbl = labelExporter(d)
   return (
     <button
@@ -469,7 +478,10 @@ function DirectoryRow({
         active ? 'bg-accent-wash' : ''
       }`}
     >
-      <span className={`w-1.5 h-1.5 rounded-full ${dot} shrink-0 mt-0.5 self-start`} />
+      <span
+        className={`w-1.5 h-1.5 rounded-full ${dot} shrink-0 mt-0.5 self-start`}
+        title={discovered ? 'SNMP walked · no flows in window' : undefined}
+      />
       <div className="min-w-0 flex-1">
         <div className="font-mono text-[12.5px] truncate">{lbl.primary}</div>
         {lbl.secondary && (
@@ -477,7 +489,7 @@ function DirectoryRow({
         )}
       </div>
       <span className="ml-auto font-mono text-[10.5px] text-faint shrink-0 tabular">
-        {fmt.bps((d.bytes * 8) / Math.max(1, seconds))}
+        {discovered ? '—' : fmt.bps((d.bytes * 8) / Math.max(1, seconds))}
       </span>
     </button>
   )
@@ -583,22 +595,37 @@ function FeatureHeader({
   })
   const d = q.data
   const i = inv.data
-  const since = d ? secondsSince(d.last_seen) : Infinity
-  const status =
-    since < 60 ? 'online' : since < 300 ? 'silent' : 'offline'
+  // discovered = SNMP knows the device but there are no flow records
+  // inside the active time window. Show it as "discovered" (neutral)
+  // rather than misleading "offline" — see [[snmp-only-devices]].
+  const discovered = d ? isEpoch(d.last_seen) : false
+  const since = d && !discovered ? secondsSince(d.last_seen) : Infinity
+  const status: 'online' | 'silent' | 'offline' | 'discovered' = discovered
+    ? 'discovered'
+    : since < 60
+      ? 'online'
+      : since < 300
+        ? 'silent'
+        : 'offline'
   const tone =
-    status === 'online' ? 'text-ok' : status === 'silent' ? 'text-warn' : 'text-crit'
+    status === 'online'
+      ? 'text-ok'
+      : status === 'silent'
+        ? 'text-warn'
+        : status === 'discovered'
+          ? 'text-faint'
+          : 'text-crit'
   const headline = i?.sys_name || exporter
   return (
     <header className="px-6 pt-6 pb-4 border-b border-line bg-surface">
       <div className="flex items-center gap-3 text-[10.5px] uppercase tracking-[0.1em] font-semibold text-dim mb-1">
         <span className={tone}>● {status}</span>
         <span className="font-mono text-[10.5px] text-faint normal-case tracking-[0.02em]">
-          last seen {d ? fmt.time(d.last_seen).slice(11, 19) + 'Z' : '—'}
+          last seen {d && !discovered ? fmt.time(d.last_seen).slice(11, 19) + 'Z' : '—'}
         </span>
         <WalkNowButton exporter={exporter} />
         <span className="font-mono text-[10.5px] text-faint normal-case tracking-[0.02em]">
-          first seen {d ? fmt.time(d.first_seen).slice(11, 19) + 'Z' : '—'}
+          first seen {d && !discovered ? fmt.time(d.first_seen).slice(11, 19) + 'Z' : '—'}
         </span>
         {i && (
           <span className="font-mono text-[10.5px] text-faint normal-case tracking-[0.02em]">
