@@ -1,0 +1,419 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>FlowScope · architecture</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root {
+      --ink:     #0c0f14;
+      --surface: #131820;
+      --raise:   #1a212c;
+      --line:    #232b39;
+      --text:    #e6e9ef;
+      --dim:     #a6adba;
+      --faint:   #5d6776;
+      --accent:  #ff7a47;
+      --ok:      #4ec98c;
+      --warn:    #e8c45a;
+      --crit:    #e26b6b;
+      --info:    #6da9e8;
+      --mono:    ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    }
+    * { box-sizing: border-box; }
+    html, body { background: var(--ink); color: var(--text); margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, system-ui, sans-serif; line-height: 1.5; }
+    main { max-width: 1180px; margin: 0 auto; padding: 32px 24px 64px; }
+    h1 { font-size: 22px; letter-spacing: -0.01em; margin: 0 0 4px; font-weight: 600; }
+    .eyebrow { font-family: var(--mono); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.16em; color: var(--faint); font-weight: 600; }
+    p { color: var(--dim); font-size: 14px; max-width: 78ch; margin: 8px 0 0; }
+    section { margin-top: 40px; padding-top: 24px; border-top: 1px solid var(--line); }
+    h2 { font-size: 13px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--dim); font-weight: 600; margin: 0 0 16px; font-family: var(--mono); }
+    code { font-family: var(--mono); font-size: 12.5px; background: var(--raise); padding: 1px 6px; border: 1px solid var(--line); color: var(--text); }
+    .diagram { background: var(--surface); border: 1px solid var(--line); padding: 12px; overflow-x: auto; }
+    svg { display: block; margin: 0 auto; max-width: 100%; height: auto; }
+    .legend { display: flex; gap: 18px; flex-wrap: wrap; margin-top: 18px; font-family: var(--mono); font-size: 11.5px; color: var(--dim); }
+    .legend .pill { display: inline-flex; align-items: center; gap: 6px; }
+    .legend .pill::before { content: ""; width: 10px; height: 10px; border-radius: 2px; }
+    .legend .src::before     { background: var(--info); }
+    .legend .svc::before     { background: var(--accent); }
+    .legend .data::before    { background: var(--raise); border: 1px solid var(--line); }
+    .legend .store::before   { background: var(--ok); }
+    .legend .ui::before      { background: var(--warn); }
+    .legend .arrow::before   { background: var(--faint); width: 14px; height: 2px; border-radius: 0; }
+    .legend .arrow-dashed::before { background: transparent; border-top: 2px dashed var(--faint); width: 14px; height: 0; }
+    .table { margin-top: 16px; font-family: var(--mono); font-size: 12px; width: 100%; border-collapse: collapse; }
+    .table th, .table td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    .table th { color: var(--faint); text-transform: uppercase; letter-spacing: 0.06em; font-size: 10.5px; font-weight: 600; }
+    .table td { color: var(--dim); }
+    .table td:first-child { color: var(--text); white-space: nowrap; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px; }
+    .card { border: 1px solid var(--line); background: var(--raise); padding: 14px 16px; }
+    .card h3 { margin: 0 0 6px; font-size: 11.5px; letter-spacing: 0.08em; text-transform: uppercase; font-family: var(--mono); color: var(--dim); }
+    .card p { margin: 0; font-size: 13px; color: var(--dim); }
+    .tag { display: inline-block; font-family: var(--mono); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em; padding: 1px 6px; border: 1px solid var(--line); margin-right: 6px; color: var(--dim); }
+    .tag.accent { color: var(--accent); border-color: var(--accent); }
+    .tag.ok { color: var(--ok); border-color: var(--ok); }
+    .tag.info { color: var(--info); border-color: var(--info); }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="eyebrow">FlowScope · architecture</div>
+    <h1>End-to-end data flow<span style="color:var(--accent)">.</span></h1>
+    <p>How telemetry travels from network gear to the operator's browser. Five Go services emit through a single fan-out point per data type, write to ClickHouse, and serve a React SPA. TLS terminates at the edge; nothing inside the cluster speaks it.</p>
+
+    <section>
+      <h2>System flow</h2>
+      <div class="diagram">
+        <svg viewBox="0 0 1140 980" role="img" aria-label="FlowScope end-to-end data flow">
+          <defs>
+            <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="#a6adba" />
+            </marker>
+            <marker id="arr-dim" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="#5d6776" />
+            </marker>
+            <style>
+              .node rect, .node path { stroke: #232b39; stroke-width: 1.5; }
+              .node text { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; fill: #e6e9ef; }
+              .band-label { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; fill: #5d6776; font-size: 10.5px; letter-spacing: 0.18em; text-transform: uppercase; font-weight: 600; }
+              .src      rect { fill: #16243a; stroke: #6da9e8; }
+              .src      text { fill: #6da9e8; }
+              .svc      rect { fill: #2a1e15; stroke: #ff7a47; }
+              .svc      text { fill: #ff7a47; font-weight: 600; }
+              .svc      .sub { fill: #d6b8a3; font-weight: 400; }
+              .data     rect { fill: #1a212c; }
+              .data     text { fill: #a6adba; }
+              .store    rect { fill: #112a1d; stroke: #4ec98c; }
+              .store    text { fill: #4ec98c; }
+              .store    .tbl  { fill: #b8e6cd; font-weight: 400; font-size: 10.5px; }
+              .ui       rect { fill: #2a2510; stroke: #e8c45a; }
+              .ui       text { fill: #e8c45a; }
+              .lbl      { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; fill: #a6adba; font-size: 10.5px; }
+              .lbl-edge { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; fill: #5d6776; font-size: 10.5px; }
+              .edge     { stroke: #5d6776; stroke-width: 1.5; fill: none; }
+              .edge-strong { stroke: #a6adba; stroke-width: 1.8; fill: none; }
+              .edge-dashed { stroke: #5d6776; stroke-width: 1.5; fill: none; stroke-dasharray: 5 3; }
+              .band     rect { fill: transparent; stroke: #232b39; stroke-dasharray: 3 3; }
+            </style>
+          </defs>
+
+          <!-- band: exporters -->
+          <g class="band">
+            <rect x="20" y="20" width="1100" height="120" rx="6" />
+          </g>
+          <text x="34" y="38" class="band-label">network exporters</text>
+
+          <!-- exporter cards -->
+          <g class="node src">
+            <rect x="60" y="56" width="220" height="64" rx="6" />
+            <text x="170" y="80" text-anchor="middle" font-size="12.5">routers · switches · firewalls</text>
+            <text x="170" y="100" text-anchor="middle" font-size="11">NetFlow v5/v9 · IPFIX (UDP)</text>
+          </g>
+          <g class="node src">
+            <rect x="320" y="56" width="200" height="64" rx="6" />
+            <text x="420" y="80" text-anchor="middle" font-size="12.5">sFlow agents</text>
+            <text x="420" y="100" text-anchor="middle" font-size="11">flow + counter samples (UDP)</text>
+          </g>
+          <g class="node src">
+            <rect x="560" y="56" width="200" height="64" rx="6" />
+            <text x="660" y="80" text-anchor="middle" font-size="12.5">SNMP responder</text>
+            <text x="660" y="100" text-anchor="middle" font-size="11">v2c · v3 (UDP/161)</text>
+          </g>
+          <g class="node src">
+            <rect x="800" y="56" width="280" height="64" rx="6" />
+            <text x="940" y="80" text-anchor="middle" font-size="12.5">gNMI publisher</text>
+            <text x="940" y="100" text-anchor="middle" font-size="11">OpenConfig streaming (gRPC)</text>
+          </g>
+
+          <!-- band: services -->
+          <g class="band">
+            <rect x="20" y="170" width="1100" height="290" rx="6" />
+          </g>
+          <text x="34" y="188" class="band-label">flowscope services · go</text>
+
+          <!-- ingest -->
+          <g class="node svc">
+            <rect x="60" y="208" width="220" height="92" rx="6" />
+            <text x="170" y="232" text-anchor="middle" font-size="13">ingest</text>
+            <text x="170" y="251" text-anchor="middle" font-size="11" class="sub">UDP listeners · parsers</text>
+            <text x="170" y="268" text-anchor="middle" font-size="11" class="sub">template cache · seq tracker</text>
+            <text x="170" y="285" text-anchor="middle" font-size="11" class="sub">record.Emit() fan-out</text>
+          </g>
+
+          <!-- snmp -->
+          <g class="node svc">
+            <rect x="320" y="208" width="200" height="92" rx="6" />
+            <text x="420" y="232" text-anchor="middle" font-size="13">snmp</text>
+            <text x="420" y="251" text-anchor="middle" font-size="11" class="sub">scheduler · worker pool</text>
+            <text x="420" y="268" text-anchor="middle" font-size="11" class="sub">credential resolution</text>
+            <text x="420" y="285" text-anchor="middle" font-size="11" class="sub">inventory · LLDP walk</text>
+          </g>
+
+          <!-- gnmi -->
+          <g class="node svc">
+            <rect x="560" y="208" width="200" height="92" rx="6" />
+            <text x="660" y="232" text-anchor="middle" font-size="13">gnmi</text>
+            <text x="660" y="251" text-anchor="middle" font-size="11" class="sub">subscription manager</text>
+            <text x="660" y="268" text-anchor="middle" font-size="11" class="sub">long-lived gRPC streams</text>
+            <text x="660" y="285" text-anchor="middle" font-size="11" class="sub">emit → record / counters</text>
+          </g>
+
+          <!-- api -->
+          <g class="node svc">
+            <rect x="800" y="208" width="200" height="92" rx="6" />
+            <text x="900" y="232" text-anchor="middle" font-size="13">api</text>
+            <text x="900" y="251" text-anchor="middle" font-size="11" class="sub">net/http · chi router</text>
+            <text x="900" y="268" text-anchor="middle" font-size="11" class="sub">REST + WebSocket</text>
+            <text x="900" y="285" text-anchor="middle" font-size="11" class="sub">prepared queries · cache</text>
+          </g>
+
+          <!-- alert (right column wraps) -->
+          <g class="node svc">
+            <rect x="60" y="320" width="220" height="80" rx="6" />
+            <text x="170" y="344" text-anchor="middle" font-size="13">alert</text>
+            <text x="170" y="362" text-anchor="middle" font-size="11" class="sub">leader-elected (lease)</text>
+            <text x="170" y="378" text-anchor="middle" font-size="11" class="sub">rules · dedup · webhooks</text>
+            <text x="170" y="394" text-anchor="middle" font-size="11" class="sub">runbook URLs</text>
+          </g>
+
+          <!-- hot ring -->
+          <g class="node data">
+            <rect x="320" y="320" width="200" height="80" rx="6" stroke="#5d6776" />
+            <text x="420" y="346" text-anchor="middle" font-size="12.5">hot ring (in-process)</text>
+            <text x="420" y="365" text-anchor="middle" font-size="11">sub-second live tail</text>
+            <text x="420" y="382" text-anchor="middle" font-size="11">/api/stream feeds</text>
+          </g>
+
+          <!-- batcher -->
+          <g class="node data">
+            <rect x="560" y="320" width="200" height="80" rx="6" stroke="#5d6776" />
+            <text x="660" y="346" text-anchor="middle" font-size="12.5">ClickHouse batcher</text>
+            <text x="660" y="365" text-anchor="middle" font-size="11">N rows or T ms</text>
+            <text x="660" y="382" text-anchor="middle" font-size="11">backpressure → parser</text>
+          </g>
+
+          <!-- webhook -->
+          <g class="node data">
+            <rect x="800" y="320" width="200" height="80" rx="6" stroke="#5d6776" />
+            <text x="900" y="346" text-anchor="middle" font-size="12.5">webhook dispatcher</text>
+            <text x="900" y="365" text-anchor="middle" font-size="11">slack · teams · pagerduty</text>
+            <text x="900" y="382" text-anchor="middle" font-size="11">retries · DLQ</text>
+          </g>
+
+          <!-- band: storage -->
+          <g class="band">
+            <rect x="20" y="490" width="1100" height="180" rx="6" />
+          </g>
+          <text x="34" y="508" class="band-label">storage</text>
+
+          <!-- clickhouse -->
+          <g class="node store">
+            <rect x="60" y="528" width="940" height="116" rx="6" />
+            <text x="530" y="554" text-anchor="middle" font-size="14">ClickHouse cluster · warm + cold via TTL tiering</text>
+
+            <!-- table chip rows -->
+            <text x="100" y="586"  class="tbl">flows</text>
+            <text x="220" y="586"  class="tbl">iface_counter_samples</text>
+            <text x="430" y="586"  class="tbl">device_inventory</text>
+            <text x="600" y="586"  class="tbl">device_snmp_interfaces</text>
+            <text x="800" y="586"  class="tbl">lldp_neighbors</text>
+            <text x="100" y="608"  class="tbl">alerts</text>
+            <text x="200" y="608"  class="tbl">alert_events</text>
+            <text x="340" y="608"  class="tbl">snmp_credentials</text>
+            <text x="510" y="608"  class="tbl">snmp_global_defaults</text>
+            <text x="700" y="608"  class="tbl">exporter_health</text>
+            <text x="860" y="608"  class="tbl">device_resources</text>
+            <text x="100" y="630"  class="tbl">custom_services</text>
+            <text x="250" y="630"  class="tbl">webhook_endpoints</text>
+            <text x="410" y="630"  class="tbl">app_settings</text>
+            <text x="550" y="630"  class="tbl">audit_events</text>
+            <text x="680" y="630"  class="tbl">api_tokens</text>
+            <text x="800" y="630"  class="tbl">snmp_walk_requests</text>
+          </g>
+
+          <!-- band: frontend -->
+          <g class="band">
+            <rect x="20" y="700" width="1100" height="260" rx="6" />
+          </g>
+          <text x="34" y="718" class="band-label">frontend · operator</text>
+
+          <!-- edge tls -->
+          <g class="node data">
+            <rect x="60" y="738" width="220" height="58" rx="6" stroke="#5d6776" />
+            <text x="170" y="763" text-anchor="middle" font-size="12.5">TLS terminator</text>
+            <text x="170" y="780" text-anchor="middle" font-size="10.5">App Gateway · nginx · Caddy</text>
+          </g>
+
+          <!-- SPA -->
+          <g class="node ui">
+            <rect x="320" y="738" width="780" height="200" rx="6" />
+            <text x="710" y="762" text-anchor="middle" font-size="13">React SPA (Vite build)</text>
+            <text x="710" y="780" text-anchor="middle" font-size="11">TanStack Query · OpenAPI client · Recharts · react-flow</text>
+
+            <!-- tabs -->
+            <g class="node data">
+              <rect x="340" y="800" width="140" height="44" rx="6" stroke="#5d6776" />
+              <text x="410" y="820" text-anchor="middle" font-size="12">Overview</text>
+              <text x="410" y="835" text-anchor="middle" font-size="10.5">system health</text>
+            </g>
+            <g class="node data">
+              <rect x="490" y="800" width="140" height="44" rx="6" stroke="#5d6776" />
+              <text x="560" y="820" text-anchor="middle" font-size="12">Flows</text>
+              <text x="560" y="835" text-anchor="middle" font-size="10.5">talkers · investigate</text>
+            </g>
+            <g class="node data">
+              <rect x="640" y="800" width="140" height="44" rx="6" stroke="#5d6776" />
+              <text x="710" y="820" text-anchor="middle" font-size="12">Devices</text>
+              <text x="710" y="835" text-anchor="middle" font-size="10.5">snmp · neighbors</text>
+            </g>
+            <g class="node data">
+              <rect x="790" y="800" width="140" height="44" rx="6" stroke="#5d6776" />
+              <text x="860" y="820" text-anchor="middle" font-size="12">Alerts</text>
+              <text x="860" y="835" text-anchor="middle" font-size="10.5">open · ack · close</text>
+            </g>
+            <g class="node data">
+              <rect x="940" y="800" width="140" height="44" rx="6" stroke="#5d6776" />
+              <text x="1010" y="820" text-anchor="middle" font-size="12">Settings</text>
+              <text x="1010" y="835" text-anchor="middle" font-size="10.5">SNMP · tokens · …</text>
+            </g>
+
+            <text x="340" y="880" class="lbl">GET /api/* · WS /api/stream</text>
+            <text x="710" y="880" text-anchor="middle" class="lbl">PUT /api/snmp/credentials · /api/snmp/globals · …</text>
+            <text x="1080" y="880" text-anchor="end" class="lbl">X-Auth-Token</text>
+
+            <text x="340" y="912" class="lbl">URL state: ?tab · ?device · filter chips · time range</text>
+          </g>
+
+          <!-- ARROWS -->
+          <!-- exporters → services -->
+          <line class="edge" x1="170" y1="120" x2="170" y2="208" marker-end="url(#arr)" />
+          <text x="178" y="170" class="lbl-edge">UDP/2055,4739</text>
+
+          <line class="edge" x1="420" y1="120" x2="225" y2="208" marker-end="url(#arr)" />
+          <text x="280" y="170" class="lbl-edge">UDP/6343</text>
+
+          <line class="edge" x1="660" y1="120" x2="420" y2="208" marker-end="url(#arr)" />
+          <text x="470" y="170" class="lbl-edge">snmp polls →</text>
+
+          <line class="edge" x1="940" y1="120" x2="660" y2="208" marker-end="url(#arr)" />
+          <text x="755" y="170" class="lbl-edge">gRPC subscribe</text>
+
+          <!-- ingest → ring + batcher (record.Emit fan-out) -->
+          <line class="edge-strong" x1="170" y1="300" x2="420" y2="320" marker-end="url(#arr)" />
+          <text x="240" y="312" class="lbl-edge">record.Emit() · hot</text>
+
+          <line class="edge-strong" x1="170" y1="300" x2="660" y2="320" marker-end="url(#arr)" />
+          <text x="380" y="320" class="lbl-edge">record.Emit() · batched</text>
+
+          <!-- sflow counter samples bypass record.Emit -->
+          <line class="edge-dashed" x1="225" y1="300" x2="640" y2="528" marker-end="url(#arr-dim)" />
+          <text x="385" y="430" class="lbl-edge">counter samples · bypass</text>
+
+          <!-- snmp → CH directly (persist) -->
+          <line class="edge" x1="420" y1="300" x2="420" y2="528" marker-end="url(#arr)" />
+          <text x="430" y="430" class="lbl-edge">persist inventory</text>
+
+          <!-- gnmi → ring + batcher (counter side bypasses too) -->
+          <line class="edge" x1="660" y1="300" x2="660" y2="320" marker-end="url(#arr)" />
+          <line class="edge-dashed" x1="700" y1="300" x2="780" y2="528" marker-end="url(#arr-dim)" />
+          <text x="720" y="430" class="lbl-edge">gnmi counters · bypass</text>
+
+          <!-- api → CH (reads) -->
+          <line class="edge" x1="900" y1="300" x2="900" y2="528" marker-end="url(#arr)" />
+          <text x="908" y="430" class="lbl-edge">prepared reads</text>
+
+          <!-- batcher → CH -->
+          <line class="edge-strong" x1="660" y1="400" x2="660" y2="528" marker-end="url(#arr)" />
+
+          <!-- ring → api (over websocket via /api/stream) -->
+          <line class="edge" x1="520" y1="360" x2="800" y2="270" marker-end="url(#arr)" />
+          <text x="600" y="305" class="lbl-edge">live tail · WS</text>
+
+          <!-- alert → CH (reads) and webhook dispatcher -->
+          <line class="edge" x1="170" y1="400" x2="170" y2="528" marker-end="url(#arr)" />
+          <text x="178" y="475" class="lbl-edge">queries · writes alerts</text>
+
+          <line class="edge" x1="280" y1="360" x2="800" y2="360" marker-end="url(#arr)" />
+          <text x="640" y="352" class="lbl-edge">fire · ack · close</text>
+
+          <!-- webhook out -->
+          <line class="edge-dashed" x1="900" y1="400" x2="1090" y2="450" marker-end="url(#arr-dim)" />
+          <text x="1010" y="425" class="lbl-edge">outbound webhook</text>
+
+          <!-- CH → SPA via TLS terminator -->
+          <line class="edge-strong" x1="900" y1="528" x2="900" y2="350" stroke-dasharray="0" stroke="transparent" />
+          <line class="edge" x1="900" y1="300" x2="170" y2="738" marker-end="url(#arr)" />
+          <text x="500" y="700" class="lbl-edge">JSON responses · WS frames</text>
+
+          <line class="edge-strong" x1="280" y1="767" x2="320" y2="767" marker-end="url(#arr)" />
+          <text x="290" y="755" class="lbl-edge">HTTPS</text>
+
+        </svg>
+      </div>
+      <div class="legend">
+        <span class="pill src">network source</span>
+        <span class="pill svc">flowscope service</span>
+        <span class="pill data">in-process / wire concern</span>
+        <span class="pill store">storage</span>
+        <span class="pill ui">operator surface</span>
+        <span class="pill arrow">control / data flow</span>
+        <span class="pill arrow-dashed">bypass / out-of-band</span>
+      </div>
+    </section>
+
+    <section>
+      <h2>Service responsibilities</h2>
+      <table class="table">
+        <thead>
+          <tr><th>service</th><th>responsibility</th><th>writes to</th><th>reads from</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>ingest</td><td>UDP receive · parse v5/v9/IPFIX/sFlow · seq tracker · <code>record.Emit</code> fan-out</td><td>flows · iface_counter_samples · exporter_health</td><td>—</td></tr>
+          <tr><td>snmp</td><td>scheduler · credential resolver (custom / global v2c / global v3 / env) · inventory + LLDP walk</td><td>device_inventory · device_snmp_interfaces · device_resources · lldp_neighbors</td><td>snmp_credentials · snmp_global_defaults · snmp_walk_requests · flows (discovery)</td></tr>
+          <tr><td>gnmi</td><td>long-lived gRPC subscriptions · streaming counter samples</td><td>flows · iface_counter_samples</td><td>—</td></tr>
+          <tr><td>api</td><td>REST (chi) · WebSocket live tail · prepared CH queries · settings writes</td><td>alerts (ack/close) · settings tables · audit_events</td><td>everything</td></tr>
+          <tr><td>alert</td><td>leader-elected rule engine · dedup · webhook dispatch · runbooks</td><td>alerts · alert_events</td><td>flows · iface_counter_samples · device_inventory · alert_rule_settings · webhook_endpoints</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>Invariants worth knowing</h2>
+      <div class="row">
+        <div class="card">
+          <h3>One fan-out per data type</h3>
+          <p><span class="tag accent">flows</span> every parser calls <code>record.Emit</code> → hot ring + batcher. <span class="tag accent">snmp</span> walks go through the worker pool. <span class="tag accent">alerts</span> route through the engine. New features extend these — they don't bypass them.</p>
+        </div>
+        <div class="card">
+          <h3>Counters &gt; flows</h3>
+          <p>Anywhere the UI shows a rate, counter-sample diffs win over flow-bucketed aggregation. The timeseries endpoint labels its response <code>source: counters | gnmi | flows</code> so the operator knows what they're looking at.</p>
+        </div>
+        <div class="card">
+          <h3>Pollerless-first</h3>
+          <p>Receivers, not interrogators. We don't poll for anything streaming telemetry or sFlow counters already provide. SNMP polling fills the gaps inventory needs, not the per-interface bandwidth gauges.</p>
+        </div>
+        <div class="card">
+          <h3>TLS at the edge</h3>
+          <p>App Gateway / nginx / Caddy terminates TLS. The Go services speak plain HTTP inside the cluster. Auth on the wire is <code>X-Auth-Token</code> today, OIDC/Entra ID later.</p>
+        </div>
+        <div class="card">
+          <h3>Forward-only schemas</h3>
+          <p>Migrations are idempotent and forward-only. They run from a one-shot init container before new pods take traffic. No external migration tool.</p>
+        </div>
+        <div class="card">
+          <h3>Data stays in-tenant</h3>
+          <p>No SaaS callbacks. The only outbound traffic is what the operator configures: webhook URLs, SMTP relay, syslog server.</p>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Related diagrams</h2>
+      <ul style="font-family: var(--mono); font-size: 13px; color: var(--dim); line-height: 1.9; padding-left: 18px;">
+        <li><a href="snmp-credential-resolution.html" style="color: var(--accent);">SNMP credential resolution</a> — per-exporter binding → global v2c / v3 → env fallback</li>
+      </ul>
+    </section>
+  </main>
+</body>
+</html>

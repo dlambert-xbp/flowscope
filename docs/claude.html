@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>FlowScope · CLAUDE.md</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root {
+      --ink:     #0c0f14;
+      --surface: #131820;
+      --raise:   #1a212c;
+      --line:    #232b39;
+      --text:    #e6e9ef;
+      --dim:     #a6adba;
+      --faint:   #5d6776;
+      --accent:  #ff7a47;
+      --ok:      #4ec98c;
+      --warn:    #e8c45a;
+      --crit:    #e26b6b;
+      --info:    #6da9e8;
+      --mono:    ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    }
+    * { box-sizing: border-box; }
+    html, body { background: var(--ink); color: var(--text); margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, system-ui, sans-serif; line-height: 1.55; }
+    main { max-width: 1180px; margin: 0 auto; padding: 32px 24px 64px; }
+    h1 { font-size: 22px; letter-spacing: -0.01em; margin: 0 0 4px; font-weight: 600; }
+    .eyebrow { font-family: var(--mono); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.16em; color: var(--faint); font-weight: 600; }
+    p { color: var(--dim); font-size: 14px; max-width: 82ch; margin: 8px 0 0; }
+    p + p { margin-top: 12px; }
+    section { margin-top: 40px; padding-top: 24px; border-top: 1px solid var(--line); }
+    h2 { font-size: 13px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--dim); font-weight: 600; margin: 0 0 16px; font-family: var(--mono); }
+    h3 { font-size: 13.5px; margin: 24px 0 6px; color: var(--text); font-weight: 600; }
+    code { font-family: var(--mono); font-size: 12.5px; background: var(--raise); padding: 1px 6px; border: 1px solid var(--line); color: var(--text); }
+    pre { font-family: var(--mono); font-size: 12.5px; background: var(--surface); border: 1px solid var(--line); color: var(--text); padding: 14px 16px; overflow-x: auto; margin: 14px 0 0; line-height: 1.55; }
+    pre code { background: transparent; border: 0; padding: 0; }
+    ul { color: var(--dim); font-size: 14px; max-width: 82ch; padding-left: 20px; margin: 8px 0 0; }
+    ul li { margin: 4px 0; }
+    ul li strong { color: var(--text); font-weight: 600; }
+    .table { margin-top: 16px; font-family: var(--mono); font-size: 12px; width: 100%; border-collapse: collapse; }
+    .table th, .table td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    .table th { color: var(--faint); text-transform: uppercase; letter-spacing: 0.06em; font-size: 10.5px; font-weight: 600; }
+    .table td { color: var(--dim); }
+    .table td:first-child { color: var(--text); white-space: nowrap; }
+    .table td code { font-size: 11.5px; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px; }
+    .row.three { grid-template-columns: repeat(3, 1fr); }
+    .card { border: 1px solid var(--line); background: var(--raise); padding: 14px 16px; }
+    .card h3 { margin: 0 0 6px; font-size: 11.5px; letter-spacing: 0.08em; text-transform: uppercase; font-family: var(--mono); color: var(--dim); font-weight: 600; }
+    .card p { margin: 0; font-size: 13px; color: var(--dim); max-width: none; }
+    .card p + p { margin-top: 8px; }
+    .tag { display: inline-block; font-family: var(--mono); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em; padding: 1px 6px; border: 1px solid var(--line); margin-right: 6px; color: var(--dim); }
+    .tag.accent { color: var(--accent); border-color: var(--accent); }
+    .tag.ok { color: var(--ok); border-color: var(--ok); }
+    .tag.info { color: var(--info); border-color: var(--info); }
+    .tag.warn { color: var(--warn); border-color: var(--warn); }
+    .tag.crit { color: var(--crit); border-color: var(--crit); }
+    .stack { display: grid; grid-template-columns: 200px 1fr; gap: 6px 18px; margin-top: 12px; font-size: 13.5px; }
+    .stack .k { font-family: var(--mono); color: var(--faint); font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.08em; padding-top: 2px; }
+    .stack .v { color: var(--dim); }
+    .stack .v strong { color: var(--text); font-weight: 600; }
+    .agreement { display: grid; grid-template-columns: 1fr; gap: 10px; margin-top: 16px; }
+    .agreement .item { border: 1px solid var(--line); background: var(--raise); padding: 12px 16px; display: grid; grid-template-columns: 220px 1fr; gap: 16px; }
+    .agreement .item .lbl { font-family: var(--mono); font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--accent); padding-top: 2px; }
+    .agreement .item p { margin: 0; font-size: 13px; color: var(--dim); max-width: none; }
+    .crumb { font-family: var(--mono); font-size: 11px; color: var(--faint); margin-top: 6px; }
+    .crumb a { color: var(--accent); text-decoration: none; }
+    .crumb a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="eyebrow">FlowScope · CLAUDE.md</div>
+    <h1>How this codebase is laid out, and the rules for changing it<span style="color:var(--accent)">.</span></h1>
+    <p>This is the developer-facing companion to <a href="../VISION.md" style="color:var(--accent)">VISION.md</a>. VISION.md describes <em>what</em> the product is and <em>why</em>; this page describes <em>how</em> the codebase is structured and the agreements that govern changes to it.</p>
+    <p class="crumb">source: <a href="../CLAUDE.md">CLAUDE.md</a> · sibling: <a href="architecture.html">architecture.html</a> · <a href="snmp-credential-resolution.html">snmp-credential-resolution.html</a></p>
+
+    <section>
+      <h2>Stack at a glance</h2>
+      <div class="stack">
+        <div class="k">backend</div>
+        <div class="v"><strong>Go 1.25+</strong> — <code>ingest</code>, <code>api</code>, <code>alert</code>, <code>snmp</code>, <code>gnmi</code>. One module, multiple internal packages, one binary per <code>cmd/&lt;service&gt;/main.go</code>.</div>
+
+        <div class="k">frontend</div>
+        <div class="v"><strong>React 19 + TypeScript + Vite</strong>. Tailwind, shadcn/ui, TanStack Query, Recharts, react-flow. Lives in <code>web/</code>.</div>
+
+        <div class="k">storage</div>
+        <div class="v"><strong>ClickHouse</strong> (warm + cold via TTL tiering). In-process Go ring buffer per ingest replica for sub-second hot views.</div>
+
+        <div class="k">deployment</div>
+        <div class="v"><strong>Helm chart</strong> targeting AKS or Azure Container Apps. Bicep/Terraform module provisions the Azure substrate (LB, AKS, ClickHouse, Key Vault).</div>
+
+        <div class="k">auth</div>
+        <div class="v">API token via <code>X-Auth-Token</code> (Phase 1) &rarr; OIDC/Entra ID (Phase 2). Master keys read from <strong>Azure Key Vault</strong> via Workload Identity, never from env vars in prod.</div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Repository layout</h2>
+<pre><code>.
+├── cmd/                          # Service entrypoints (one main.go per binary)
+│   ├── ingest/
+│   ├── api/
+│   ├── alert/
+│   ├── snmp/
+│   └── gnmi/
+├── internal/                     # Shared Go packages, not importable externally
+│   ├── record/                   # Canonical flow record + Emit fan-out
+│   ├── netflow/                  # v5/v9/IPFIX parsers, template cache
+│   ├── sflow/                    # sFlow v5 parser (flow + counter samples)
+│   ├── store/                    # ClickHouse client, schema migrations, batchers
+│   ├── snmpx/                    # gosnmp wrapper, encrypted credential store
+│   ├── gnmix/                    # openconfig/gnmic wrapper, subscription manager
+│   ├── alerteng/                 # Rule evaluation, dedup, grouping, channels
+│   ├── secrets/                  # Key Vault / file / env loader, single interface
+│   └── obs/                      # Prometheus metrics, structured logging helpers
+├── api/openapi.yaml              # Source of truth for the REST contract
+├── web/                          # React SPA (Vite project)
+│   ├── src/
+│   ├── package.json
+│   └── vite.config.ts
+├── deploy/
+│   ├── helm/flowscope/           # Helm chart published per release
+│   └── infra/                    # Bicep or Terraform for Azure substrate
+├── test/
+│   ├── golden/                   # Captured pcaps + expected records, per parser
+│   └── e2e/                      # Playwright specs
+└── go.mod</code></pre>
+    </section>
+
+    <section>
+      <h2>Commands</h2>
+
+      <h3>Backend</h3>
+<pre><code>go build ./...                              # Compile all binaries
+go test -race ./...                         # Unit tests with race detector (required before merge)
+go test -race -tags=integration ./...       # Integration tests (hit a local ClickHouse)
+golangci-lint run                           # Lint
+go run ./cmd/ingest                         # Run ingest locally
+go run ./cmd/api                            # Run api locally</code></pre>
+
+      <h3>Frontend</h3>
+<pre><code>cd web && npm install
+cd web && npm run dev                       # Vite dev server with HMR
+cd web && npm run build                     # Production bundle
+cd web && npm run typecheck
+cd web && npm run lint
+cd web && npm run test                      # Vitest
+cd web && npm run e2e                       # Playwright (requires backend running)</code></pre>
+
+      <h3>Local stack &amp; tooling</h3>
+<pre><code># Docker compose (ClickHouse + all services)
+make bootstrap-secrets                      # First-time: creates ./secrets/snmp_master
+docker compose up --build
+
+# OpenAPI client regen (after editing api/openapi.yaml)
+make gen-client                             # → web/src/api/generated/
+
+# Helm chart smoke test
+helm lint deploy/helm/flowscope
+helm template deploy/helm/flowscope > /tmp/rendered.yaml
+
+# Synthetic traffic
+go run ./cmd/synth -- --target 127.0.0.1:2055 --rate 50000 --duration 60s</code></pre>
+
+      <p style="margin-top:14px"><strong style="color:var(--text)">CI gates (every PR):</strong> <code>go test -race</code>, <code>golangci-lint</code>, <code>vitest</code>, <code>playwright</code> against an ephemeral compose stack, <code>helm lint</code>, container image build + sign.</p>
+    </section>
+
+    <section>
+      <h2>Configuration surface</h2>
+      <p>All services read configuration from environment variables, with Key Vault references resolved at startup via <code>internal/secrets</code>.</p>
+      <table class="table">
+        <thead>
+          <tr><th>variable</th><th>service</th><th>purpose</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>FLOWSCOPE_NETFLOW_PORT</code></td><td>ingest</td><td>UDP listener (default 2055)</td></tr>
+          <tr><td><code>FLOWSCOPE_SFLOW_PORT</code></td><td>ingest</td><td>UDP listener (default 6343)</td></tr>
+          <tr><td><code>FLOWSCOPE_IPFIX_PORT</code></td><td>ingest</td><td>UDP listener (default 4739)</td></tr>
+          <tr><td><code>FLOWSCOPE_HTTP_ADDR</code></td><td>api</td><td>Listen address (default <code>:8080</code>)</td></tr>
+          <tr><td><code>FLOWSCOPE_CLICKHOUSE_DSN</code></td><td>all</td><td>ClickHouse cluster DSN</td></tr>
+          <tr><td><code>FLOWSCOPE_AUTH_TOKEN_REF</code></td><td>api</td><td>Key Vault reference for the API auth token</td></tr>
+          <tr><td><code>FLOWSCOPE_SNMP_KEY_REF</code></td><td>snmp</td><td>Key Vault reference for the SNMP master key</td></tr>
+          <tr><td><code>FLOWSCOPE_LOG_LEVEL</code></td><td>all</td><td><code>debug</code> / <code>info</code> / <code>warn</code> / <code>error</code></td></tr>
+          <tr><td><code>FLOWSCOPE_SNMP_WORKERS</code></td><td>snmp</td><td>Worker pool size (default 8)</td></tr>
+          <tr><td><code>FLOWSCOPE_SNMP_MOCK</code></td><td>snmp</td><td><code>1</code> to use mock client; build-tag-gated</td></tr>
+        </tbody>
+      </table>
+      <p style="margin-top:14px"><span class="tag crit">key rotation</span> <code>FLOWSCOPE_SNMP_KEY_REF</code> resolves to a master key the <code>snmp</code> service uses to derive an AES-256-GCM key via HKDF-SHA256 for credential encryption at rest. The resolved value <strong style="color:var(--text)">must stay constant across restarts</strong> — rotating it invalidates every stored v3 credential.</p>
+    </section>
+
+    <section>
+      <h2>Architecture</h2>
+
+      <h3 style="margin-top:8px">Concurrency model (Go)</h3>
+      <ul>
+        <li><strong>ingest</strong> — one goroutine per UDP listener, fan-in via buffered channels into a parser worker pool, then into <code>record.Emit</code> which writes to (a) the in-process hot ring and (b) the ClickHouse batch writer goroutine. Backpressure is explicit — if the batch writer can't keep up, the parser pool blocks on the channel and dropped-packet counters increment on the listener side.</li>
+        <li><strong>api</strong> — <code>net/http</code> with <code>chi</code> for routing, stateless. WebSocket endpoint streams hot-ring updates and Overview metrics. Reads come from ClickHouse with prepared queries and a small per-request cache.</li>
+        <li><strong>alert</strong> — singleton via leader election (using a ClickHouse Keeper lock or equivalent). Single evaluation loop on a ticker; rules are pure functions over query results, idempotent.</li>
+        <li><strong>snmp</strong> — <code>errgroup</code>-managed worker pool sized via <code>FLOWSCOPE_SNMP_WORKERS</code>. Per-device cadence stored in the <code>devices</code> table. In-flight walks deduped by <code>(exporter, oid)</code> key.</li>
+        <li><strong>gnmi</strong> — long-lived gRPC streams, one goroutine per subscription, fan-in to a single writer goroutine that emits records via <code>record.Emit</code> (same fan-out point as flow ingest).</li>
+      </ul>
+      <p>Shared mutable state across goroutines uses <code>sync.RWMutex</code> or channels — never both, never bare globals. Every shared struct has a comment naming the lock that guards it. The race detector runs on every CI invocation.</p>
+
+      <h3>Data flow: parser &rarr; <code>record.Emit</code> &rarr; fan-out</h3>
+      <p>Every parser (NetFlow v5, NetFlow v9/IPFIX, sFlow v5) produces a canonical <code>record.Flow</code> and calls <code>record.Emit(ctx, rec)</code>. <code>Emit</code> is the <strong style="color:var(--text)">single fan-out point</strong> that:</p>
+      <ol style="color:var(--dim); font-size:14px; max-width:82ch; padding-left:20px; margin-top:8px;">
+        <li>Pushes to the in-process hot ring (<code>internal/record/ring.go</code>) for sub-second live views.</li>
+        <li>Hands off to the ClickHouse batch writer (<code>internal/store/batcher.go</code>), which accumulates and flushes every N records or T milliseconds, whichever comes first.</li>
+        <li>Updates per-exporter / per-interface counter aggregates used by the Overview tab.</li>
+      </ol>
+      <p style="margin-top:14px"><span class="tag warn">asymmetry</span> sFlow / gNMI counter samples bypass the flow-derived aggregation path and write directly to <code>iface_counter_samples</code> in ClickHouse with absolute octets/packets. The per-interface timeseries endpoint diffs successive counter samples to compute authoritative bytes/sec. When no counter samples exist (NetFlow-only exporters), it falls back to flow-bucketed aggregation and labels the response <code>"source": "flows"</code>. This <code>counters &gt; flows</code> invariant is non-negotiable — see VISION.md §3.3.</p>
+
+      <h3>NetFlow v9 / IPFIX templates</h3>
+      <p>Templates are stored per ingest replica in <code>internal/netflow.TemplateCache</code>, keyed by <code>(exporter, source_id, template_id)</code>. Data flowsets that arrive before their template is seen are dropped and a <code>nf9_template_miss_total</code> counter increments. The 5-tuple-hashed UDP load balancer ensures a given exporter consistently lands on the same replica, so template state is reliably colocated with data records from that exporter. Field IDs FlowScope cares about are listed in <code>internal/netflow/fields.go</code>; unknown fields are skipped by declared length.</p>
+
+      <h3>sFlow v5 parser</h3>
+      <p><code>sflow.Parse</code> dispatches by sample format (<code>tag &amp; 0xFFF</code>):</p>
+      <ul>
+        <li><strong>1 / 3</strong> — flow_sample / flow_sample_expanded &rarr; <code>parseFlowSample</code> &rarr; <code>parseRawHeader</code> (Ethernet / VLAN / IPv4/IPv6 / TCP/UDP)</li>
+        <li><strong>2 / 4</strong> — counters_sample / counters_sample_expanded &rarr; <code>parseCountersSample</code> (writes absolute interface totals)</li>
+      </ul>
+      <p>The agent address from the sFlow datagram header overrides the UDP source IP as the canonical exporter ID, except when it's <code>0.0.0.0</code>.</p>
+
+      <h3>Frontend</h3>
+      <p>The SPA polls REST endpoints via TanStack Query and subscribes to a WebSocket for the Overview tab and live flow tail. All filtering (by exporter, by ifIndex, by 5-tuple) is encoded in the URL via React Router search params and passed through to the API as query parameters. The OpenAPI-generated TS client lives in <code>web/src/api/generated/</code> and is regenerated by <code>make gen-client</code> whenever <code>api/openapi.yaml</code> changes — never hand-edit the generated files.</p>
+
+      <h3>REST API surface</h3>
+      <p>Source of truth: <code>api/openapi.yaml</code>. Adding an endpoint means editing the spec, regenerating the TS client, then implementing the Go handler. Drift between handlers and spec is caught by a contract test in CI.</p>
+      <p style="margin-top:10px">Key endpoints (full list in the spec):</p>
+      <ul>
+        <li><code>GET /api/summary</code>, <code>/api/devices</code>, <code>/api/interfaces</code>, <code>/api/flows/recent</code></li>
+        <li><code>GET /api/top/talkers</code>, <code>/api/top/ports</code>, <code>/api/protocols</code>, <code>/api/timeseries</code></li>
+        <li><code>GET /api/interfaces/{exporter}/{ifindex}/timeseries?seconds=N</code> — bucketed ingress/egress; response carries <code>"source": "counters" | "gnmi" | "flows"</code></li>
+        <li><code>GET /api/alerts</code>, <code>POST /api/alerts/{id}/ack</code>, <code>POST /api/alerts/{id}/close</code></li>
+        <li><code>WS  /api/stream</code> — Overview metrics + live flow tail</li>
+      </ul>
+      <p>Most accept <code>?exporter=&lt;ip&gt;</code> for filtering; flows + timeseries also accept <code>?ifindex=&lt;n&gt;</code>.</p>
+    </section>
+
+    <section>
+      <h2>Constraints worth knowing</h2>
+      <div class="row three">
+        <div class="card">
+          <h3>Pollerless-first</h3>
+          <p>Receivers, not interrogators. Don't add a periodic SNMP poller for anything streaming telemetry or sFlow counters can provide.</p>
+        </div>
+        <div class="card">
+          <h3>Counters &gt; flows</h3>
+          <p>Anywhere the UI shows a rate, prefer counter-sample diffs. Fall back to flow buckets, label the source.</p>
+        </div>
+        <div class="card">
+          <h3>One fan-out per data type</h3>
+          <p>Flows through <code>record.Emit</code>. SNMP through the worker pool. Alerts through the engine. New features extend these, not bypass them.</p>
+        </div>
+        <div class="card">
+          <h3>TLS at the edge</h3>
+          <p>Azure App Gateway, nginx, or Caddy terminates TLS. The Go services speak plain HTTP inside the cluster.</p>
+        </div>
+        <div class="card">
+          <h3>Data stays in-tenant</h3>
+          <p>No SaaS callbacks, no telemetry-back-to-vendor. The only outbound traffic is what the operator configures (webhooks, SMTP, syslog).</p>
+        </div>
+        <div class="card">
+          <h3>Forward-only migrations</h3>
+          <p>Schema migrations are idempotent and forward-only. They run from a one-shot init container before new pods take traffic.</p>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Working agreement</h2>
+      <div class="agreement">
+        <div class="item">
+          <div class="lbl">99% confidence rule</div>
+          <p>Before making any change, you must be &ge;99% confident the change is correct and complete. If you aren't, stop and either ask clarifying questions or write down the specific reasons it may not work (unknown protocol field layouts, untested concurrency interactions, ambiguous intent, missing dependency, untested platform behavior) so the user can decide whether to proceed. This applies to code edits, schema changes, dependency additions, and infra changes. A confident plan with explicit caveats beats a guess that compiles.</p>
+        </div>
+        <div class="item">
+          <div class="lbl">Tests gate merges</div>
+          <p>A PR that touches a parser must add or update a golden-pcap test. A PR that touches a schema must include the migration and a migration test. A PR that touches a critical user journey must update the Playwright spec. CI enforces this; reviewers enforce it harder.</p>
+        </div>
+        <div class="item">
+          <div class="lbl">Race detector non-negotiable</div>
+          <p><code>go test -race</code> runs on every CI invocation. Any new shared state must survive the race detector under concurrent load.</p>
+        </div>
+        <div class="item">
+          <div class="lbl">Typed contracts at every boundary</div>
+          <p>Go interfaces internally; OpenAPI-generated TS client between <code>api</code> and <code>web</code>. Don't bypass the generated client to "just hit the endpoint" from React.</p>
+        </div>
+        <div class="item">
+          <div class="lbl">No silent failures</div>
+          <p>Every dropped packet, malformed template, failed walk increments a Prometheus counter and is visible on the Overview tab. If you add a new failure mode, you add the counter in the same PR.</p>
+        </div>
+        <div class="item">
+          <div class="lbl">Render on state change</div>
+          <p>React click handlers update local state synchronously <em>before</em> awaiting fetches. A dashboard that feels broken for 200ms is a dashboard the user does not trust.</p>
+        </div>
+        <div class="item">
+          <div class="lbl">No browser pop-ups</div>
+          <p>Use the in-app modal primitives (<code>Dialog</code>, <code>AlertDialog</code>, <code>Prompt</code> from the design system). Never <code>window.prompt</code> / <code>confirm</code> / <code>alert</code>.</p>
+        </div>
+        <div class="item">
+          <div class="lbl">New binary = Helm update</div>
+          <p>Adding a new <code>cmd/&lt;service&gt;/</code> needs a Deployment, Service, and (if applicable) HPA + PDB in <code>deploy/helm/flowscope/templates/</code>. CI's <code>helm lint</code> catches missing pieces; reviewers verify.</p>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Related</h2>
+      <ul style="font-family: var(--mono); font-size: 13px; color: var(--dim); line-height: 1.9;">
+        <li><a href="architecture.html" style="color: var(--accent);">architecture.html</a> — end-to-end system diagram and service responsibilities</li>
+        <li><a href="snmp-credential-resolution.html" style="color: var(--accent);">snmp-credential-resolution.html</a> — per-exporter binding &rarr; global v2c / v3 &rarr; env fallback</li>
+        <li><a href="../VISION.md" style="color: var(--accent);">VISION.md</a> — product vision, what FlowScope is and why</li>
+        <li><a href="../CLAUDE.md" style="color: var(--accent);">CLAUDE.md</a> — markdown source of this page</li>
+      </ul>
+    </section>
+  </main>
+</body>
+</html>
