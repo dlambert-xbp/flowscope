@@ -832,14 +832,11 @@ function Tab({
 
 function SummaryTab({
   exporter,
-  range,
-  rangeKey,
 }: {
   exporter: string
   range: TimeRange
   rangeKey: unknown
 }) {
-  const winLabel = rangeLabel(range)
   return (
     <div className="px-6 py-5 space-y-5">
       <Section title="Inventory" sub="snmp · v2c" right="SOURCE · SNMP">
@@ -847,9 +844,6 @@ function SummaryTab({
       </Section>
       <Section title="Health" sub="cpu · memory · storage · last 24h" right="SOURCE · SNMP">
         <ResourcesPanel exporter={exporter} />
-      </Section>
-      <Section title="Top interfaces" sub={`counter samples · ${winLabel}`} right="SOURCE · COUNTERS">
-        <InterfacesMini exporter={exporter} range={range} rangeKey={rangeKey} />
       </Section>
     </div>
   )
@@ -1456,77 +1450,6 @@ function Section({
       </div>
       <div className="pt-2">{children}</div>
     </section>
-  )
-}
-
-function InterfacesMini({
-  exporter,
-  range,
-  rangeKey,
-}: {
-  exporter: string
-  range: TimeRange
-  rangeKey: unknown
-}) {
-  const apiRange = toApi(range)
-  const q = useQuery({
-    queryKey: ['device-ifaces', exporter, rangeKey],
-    queryFn: () => api.interfaces(apiRange, exporter),
-    refetchInterval: useLiveInterval(5000),
-  })
-  const ifaces = q.data?.interfaces ?? []
-  // Mini view shows top 10 by current ingress rate so the user sees
-  // the busy interfaces; the full sortable table lives on the
-  // Interfaces sub-tab.
-  const top = [...ifaces]
-    .sort((a, b) => b.in_bps_latest - a.in_bps_latest)
-    .slice(0, 10)
-  if (q.isLoading) return <p className="text-dim font-mono text-[12px]">loading…</p>
-  if (ifaces.length === 0) {
-    return (
-      <p className="text-dim font-mono text-[12px]">
-        no counter samples · sFlow / gNMI required for authoritative rates
-      </p>
-    )
-  }
-  return (
-    <table className="w-full table-fixed">
-      <colgroup>
-        <col style={{ width: '40%' }} />
-        <col />
-        <col />
-        <col />
-        <col />
-        <col style={{ width: '90px' }} />
-      </colgroup>
-      <thead>
-        <tr>
-          <th>interface</th>
-          <th className="r">in (latest)</th>
-          <th className="r">out (latest)</th>
-          <th className="r">in peak</th>
-          <th className="r">out peak</th>
-          <th className="r">last seen</th>
-        </tr>
-      </thead>
-      <tbody>
-        {top.map((i: InterfaceRow) => {
-          const lbl = labelInterface(i)
-          return (
-            <tr key={i.ifindex} className="hover:bg-surface">
-              <td>
-                <TwoLine primary={lbl.primary} secondary={lbl.secondary || undefined} />
-              </td>
-              <td className="r n">{fmt.bps(i.in_bps_latest)}</td>
-              <td className="r n">{fmt.bps(i.out_bps_latest)}</td>
-              <td className="r n text-accent">{fmt.bps(i.in_bps_peak)}</td>
-              <td className="r n text-ok">{fmt.bps(i.out_bps_peak)}</td>
-              <td className="r n text-faint">{fmt.time(i.last_seen).slice(11, 19)}</td>
-            </tr>
-          )
-        })}
-      </tbody>
-    </table>
   )
 }
 

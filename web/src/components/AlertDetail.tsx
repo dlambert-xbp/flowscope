@@ -120,9 +120,9 @@ function Header({ alert, onClose }: { alert: Alert; onClose: () => void }) {
         ? 'bg-warn'
         : 'bg-accent'
   return (
-    <div className="border-b border-line">
-      <div className="grid grid-cols-[3px_1fr_auto] gap-4 px-6 py-4">
-        <div className={`${sevBar} -mx-6`} />
+    <div className="relative border-b border-line">
+      <div className={`absolute left-0 top-0 bottom-0 w-[3px] ${sevBar}`} aria-hidden />
+      <div className="grid grid-cols-[1fr_auto] gap-4 pl-7 pr-6 py-4">
         <div className="min-w-0">
           <div className="flex items-baseline gap-3 mb-1">
             <span

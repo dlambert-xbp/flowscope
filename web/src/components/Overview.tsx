@@ -102,18 +102,15 @@ export function Overview({
         totalDevices={deviceList.length}
         alertSummary={alertSummary.data}
       />
-      <div className="grid grid-cols-1 lg:grid-cols-2 border-b border-line">
+      <div className="border-b border-line">
         <StreamsPanel rows={streams.data?.rows ?? []} loading={streams.isLoading} range={range} />
-        <ExportersPanel
-          devices={deviceList}
-          loading={devices.isLoading}
-          status={exporterStatus}
-        />
       </div>
       <div className="border-b border-line">
-        <ExporterAccuracyPanel
-          rows={exporterHealth.data?.rows ?? []}
-          loading={exporterHealth.isLoading}
+        <ExportersPanel
+          devices={deviceList}
+          accuracy={exporterHealth.data?.rows ?? []}
+          loading={devices.isLoading || exporterHealth.isLoading}
+          status={exporterStatus}
           range={range}
         />
       </div>
@@ -504,7 +501,6 @@ function StreamsPanel({
       title="Streams"
       sub={`per source · ${rangeLabel(range)}`}
       right="SOURCE · FLOWS"
-      borderRight
     >
       {loading ? (
         <Loading />
@@ -569,70 +565,171 @@ function prettySource(s: string): string {
 
 /* ---------------------------- Exporters panel --------------------------- */
 
+// ExportersPanel unifies last-seen freshness (one row per exporter) with
+// per-(exporter, source) datagram-loss stats from the ingest tracker.
+// Each row in the body keys on (exporter, source). Exporters seen in
+// flows but without any ingest-tracker snapshots yet get a single row
+// with "—" in the source/datagrams/gaps/loss columns so the operator
+// still sees they exist and how long since last seen.
 function ExportersPanel({
   devices,
+  accuracy,
   loading,
   status,
+  range,
 }: {
   devices: Device[]
+  accuracy: ExporterHealthRow[]
   loading: boolean
   status: ExporterStatus
+  range: TimeRange
 }) {
-  const sorted = [...devices].sort(
-    (a, b) => secondsSince(b.last_seen) - secondsSince(a.last_seen) * -1,
-  )
-  const top = sorted.slice(0, 8)
+  const winLabel = rangeLabel(range)
+  const worstLoss = accuracy.reduce((m, r) => (r.loss_pct > m ? r.loss_pct : m), 0)
+  const lossTone =
+    worstLoss >= 5 ? 'text-crit' : worstLoss >= 0.5 ? 'text-warn' : 'text-ok'
+  const lossLabel =
+    accuracy.length === 0
+      ? 'no datagrams'
+      : worstLoss >= 5
+        ? 'lossy ingest'
+        : worstLoss >= 0.5
+          ? 'minor loss'
+          : 'no loss'
+  // Build merged rows. Use accuracy as the primary source so multi-source
+  // exporters get one row per source. For exporters present in the device
+  // list but missing from accuracy, emit a single "—" row so they still
+  // surface their last-seen tone.
+  const byExporter = new Map<string, Device>()
+  for (const d of devices) byExporter.set(d.exporter, d)
+  const covered = new Set<string>()
+  type Row = {
+    exporter: string
+    sys_name: string
+    source: string | null
+    datagrams: number
+    seq_gaps: number
+    loss_pct: number
+    last_seen: string
+  }
+  const rows: Row[] = []
+  for (const a of accuracy) {
+    covered.add(a.exporter)
+    const d = byExporter.get(a.exporter)
+    rows.push({
+      exporter: a.exporter,
+      sys_name: a.sys_name || d?.sys_name || '',
+      source: a.source,
+      datagrams: a.datagrams,
+      seq_gaps: a.seq_gaps,
+      loss_pct: a.loss_pct,
+      last_seen: d?.last_seen ?? a.last_seen,
+    })
+  }
+  for (const d of devices) {
+    if (covered.has(d.exporter)) continue
+    rows.push({
+      exporter: d.exporter,
+      sys_name: d.sys_name ?? '',
+      source: null,
+      datagrams: 0,
+      seq_gaps: 0,
+      loss_pct: 0,
+      last_seen: d.last_seen,
+    })
+  }
+  // Sort: offline first, then silent, then online; within each tier
+  // sort by worst loss desc so attention lands on the noisy ingest.
+  rows.sort((a, b) => {
+    const aSince = secondsSince(a.last_seen)
+    const bSince = secondsSince(b.last_seen)
+    const aTier = aSince >= 300 ? 0 : aSince >= 60 ? 1 : 2
+    const bTier = bSince >= 300 ? 0 : bSince >= 60 ? 1 : 2
+    if (aTier !== bTier) return aTier - bTier
+    return b.loss_pct - a.loss_pct
+  })
   return (
     <PanelShell
-      title="Exporter status"
-      sub="last-seen freshness · click for details on Devices"
+      title="Exporters"
+      sub={`freshness · per-source loss · ${winLabel}`}
       right={
         <span className="font-mono text-[10px] tracking-[0.06em] flex gap-3">
           <span className="text-ok">{status.online} online</span>
           {status.silent > 0 && <span className="text-warn">{status.silent} silent</span>}
           {status.offline > 0 && <span className="text-crit">{status.offline} offline</span>}
+          <span className={lossTone}>{lossLabel}</span>
         </span>
       }
     >
       {loading ? (
         <Loading />
-      ) : devices.length === 0 ? (
+      ) : rows.length === 0 ? (
         <Empty>no exporters seen in window</Empty>
       ) : (
-        <ul>
-          {top.map((d) => {
-            const since = secondsSince(d.last_seen)
-            const tone = freshnessTone(since)
-            return (
-              <li
-                key={d.exporter}
-                className="px-4 py-2 border-b border-line-soft last:border-b-0 hover:bg-surface flex items-center gap-3"
-              >
-                <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${tone.dot}`} />
-                <div className="min-w-0 flex-1">
-                  <div className="font-mono text-[12.5px] truncate">
-                    {d.sys_name || d.exporter}
-                  </div>
-                  {d.sys_name && (
-                    <div className="font-mono text-[10.5px] text-faint truncate">
-                      {d.exporter}
+        <table className="w-full">
+          <colgroup>
+            <col />
+            <col style={{ width: '110px' }} />
+            <col style={{ width: '120px' }} />
+            <col style={{ width: '100px' }} />
+            <col style={{ width: '90px' }} />
+            <col style={{ width: '110px' }} />
+          </colgroup>
+          <thead>
+            <tr>
+              <th>exporter</th>
+              <th>source</th>
+              <th className="r">datagrams</th>
+              <th className="r">seq gaps</th>
+              <th className="r">loss</th>
+              <th className="r">last seen</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r, i) => {
+              const since = secondsSince(r.last_seen)
+              const fresh = freshnessTone(since)
+              const tone =
+                r.loss_pct >= 5
+                  ? 'text-crit'
+                  : r.loss_pct >= 0.5
+                    ? 'text-warn'
+                    : r.source
+                      ? 'text-ok'
+                      : 'text-faint'
+              return (
+                <tr key={i} className="hover:bg-surface">
+                  <td>
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${fresh.dot}`} />
+                      <div className="min-w-0 flex-1">
+                        <div className="font-mono truncate">
+                          {r.sys_name || r.exporter}
+                        </div>
+                        {r.sys_name && (
+                          <div className="font-mono italic text-faint text-[10.5px] truncate">
+                            {r.exporter}
+                          </div>
+                        )}
+                      </div>
                     </div>
-                  )}
-                </div>
-                <span
-                  className={`font-mono text-[10.5px] tabular shrink-0 ${tone.text}`}
-                >
-                  {formatSince(since)}
-                </span>
-              </li>
-            )
-          })}
-          {devices.length > top.length && (
-            <li className="px-4 py-2 text-[11px] font-mono text-faint border-b border-line-soft last:border-b-0">
-              + {devices.length - top.length} more on Devices
-            </li>
-          )}
-        </ul>
+                  </td>
+                  <td className="font-mono text-dim">{r.source ?? '—'}</td>
+                  <td className="r n">{r.source ? fmt.num(r.datagrams) : '—'}</td>
+                  <td className={`r n ${r.seq_gaps > 0 ? 'text-warn' : 'text-faint'}`}>
+                    {r.source ? fmt.num(r.seq_gaps) : '—'}
+                  </td>
+                  <td className={`r n ${tone}`}>
+                    {r.source ? `${r.loss_pct.toFixed(2)}%` : '—'}
+                  </td>
+                  <td className={`r n tabular ${fresh.text}`}>
+                    {formatSince(since)}
+                  </td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
       )}
     </PanelShell>
   )
@@ -879,99 +976,6 @@ function PairList({
         </ul>
       )}
     </div>
-  )
-}
-
-/* ---------------------- Exporter accuracy panel ---------------------- */
-
-// ExporterAccuracyPanel surfaces per-(exporter, source) loss rate
-// derived from datagram sequence-number gaps in the ingest tracker.
-// 0% loss is healthy; >0.5% paints warn, >5% paints crit. The panel
-// hides the row count when there's been zero traffic in the window
-// — a common state during dev / quiet periods.
-function ExporterAccuracyPanel({
-  rows,
-  loading,
-  range,
-}: {
-  rows: ExporterHealthRow[]
-  loading: boolean
-  range: TimeRange
-}) {
-  const winLabel = rangeLabel(range)
-  const worst = rows.reduce((m, r) => (r.loss_pct > m ? r.loss_pct : m), 0)
-  const worstTone =
-    worst >= 5 ? 'text-crit' : worst >= 0.5 ? 'text-warn' : 'text-ok'
-  const worstLabel =
-    rows.length === 0
-      ? 'no datagrams'
-      : worst >= 5
-        ? 'lossy ingest'
-        : worst >= 0.5
-          ? 'minor loss'
-          : 'no loss'
-  return (
-    <PanelShell
-      title="Exporter accuracy"
-      sub={`per-exporter datagram loss · ${winLabel}`}
-      right={
-        <span className={`font-mono text-[10px] tracking-[0.06em] ${worstTone}`}>
-          {worstLabel}
-        </span>
-      }
-    >
-      {loading ? (
-        <Loading />
-      ) : rows.length === 0 ? (
-        <Empty>
-          no exporter health snapshots yet · the ingest service flushes the seq
-          tracker every 10s after the first datagram from any exporter
-        </Empty>
-      ) : (
-        <table className="w-full">
-          <colgroup>
-            <col style={{ width: '32%' }} />
-            <col style={{ width: '110px' }} />
-            <col />
-            <col />
-            <col style={{ width: '90px' }} />
-          </colgroup>
-          <thead>
-            <tr>
-              <th>exporter</th>
-              <th>source</th>
-              <th className="r">datagrams</th>
-              <th className="r">seq gaps</th>
-              <th className="r">loss</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((r, i) => {
-              const tone =
-                r.loss_pct >= 5 ? 'text-crit' : r.loss_pct >= 0.5 ? 'text-warn' : 'text-ok'
-              return (
-                <tr key={i} className="hover:bg-surface">
-                  <td>
-                    <div className="font-mono truncate">{r.sys_name || r.exporter}</div>
-                    {r.sys_name && (
-                      <div className="font-mono italic text-faint text-[10.5px] truncate">
-                        {r.exporter}
-                      </div>
-                    )}
-                  </td>
-                  <td className="font-mono text-dim">{r.source}</td>
-                  <td className="r n">{fmt.num(r.datagrams)}</td>
-                  <td className={`r n ${r.seq_gaps > 0 ? 'text-warn' : 'text-faint'}`}>
-                    {fmt.num(r.seq_gaps)}
-                  </td>
-                  <td className={`r n ${tone}`}>{r.loss_pct.toFixed(2)}%</td>
-                </tr>
-              )
-            })}
-          </tbody>
-        </table>
-      )}
-    </PanelShell>
   )
 }
 

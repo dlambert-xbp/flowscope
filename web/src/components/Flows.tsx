@@ -988,6 +988,7 @@ function FilterTrigger({
   label,
   keyLabel,
   onAdd,
+  block,
   children,
 }: {
   k: FilterKey
@@ -995,12 +996,17 @@ function FilterTrigger({
   label?: string
   keyLabel?: string
   onAdd: (f: Filter) => void
+  block?: boolean
   children: ReactNode
 }) {
   return (
     <button
       onClick={() => onAdd({ key: k, value, label, keyLabel })}
-      className="hover:text-accent hover:underline decoration-dotted underline-offset-2"
+      className={
+        block
+          ? 'block w-full max-w-full min-w-0 text-left truncate hover:text-accent hover:underline decoration-dotted underline-offset-2'
+          : 'hover:text-accent hover:underline decoration-dotted underline-offset-2'
+      }
     >
       {children}
     </button>
@@ -1359,10 +1365,10 @@ function Investigate({
             <table className="w-full table-fixed">
               <colgroup>
                 <col style={{ width: '110px' }} />
-                <col style={{ width: '160px' }} />
+                <col style={{ width: '240px' }} />
                 <col />
                 <col style={{ width: '70px' }} />
-                <col style={{ width: '80px' }} />
+                <col style={{ width: '90px' }} />
                 <col style={{ width: '90px' }} />
                 <col style={{ width: '100px' }} />
                 <col style={{ width: '76px' }} />
@@ -1471,19 +1477,26 @@ function InvestigateRow({
       className={`hover:bg-surface group ${highlighted ? 'bg-accent-wash' : ''}`}
     >
       <td className="n text-faint">{fmt.time(f.observed).slice(11, 23)}</td>
-      <td>
+      <td className="overflow-hidden">
         <FilterTrigger
           k="exporter"
           value={f.exporter}
           onAdd={onAdd}
           label={f.exporter_name || f.exporter}
+          block
         >
-          <div className="font-mono truncate">
+          <span
+            className="font-mono"
+            title={f.exporter_name || f.exporter}
+          >
             {f.exporter_name || f.exporter}
-          </div>
+          </span>
         </FilterTrigger>
         {f.exporter_name && (
-          <div className="font-mono italic text-faint text-[10.5px] truncate">
+          <div
+            className="font-mono italic text-faint text-[10.5px] truncate"
+            title={f.exporter}
+          >
             {f.exporter}
           </div>
         )}

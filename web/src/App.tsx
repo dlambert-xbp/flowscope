@@ -16,6 +16,8 @@ import { FILTER_KEYS, type Filter } from './filters'
 type Tab = 'overview' | 'flows' | 'devices' | 'alerts' | 'settings'
 
 const LABEL_PREFIX = '_l_'
+const TAB_PARAM = 'tab'
+const DEFAULT_TAB: Tab = 'overview'
 
 const TAB_LABELS: Record<Tab, string> = {
   overview: 'Overview',
@@ -25,10 +27,64 @@ const TAB_LABELS: Record<Tab, string> = {
   settings: 'Settings',
 }
 
+const VALID_TABS: ReadonlySet<Tab> = new Set<Tab>([
+  'overview',
+  'flows',
+  'devices',
+  'alerts',
+  'settings',
+])
+
 const TIME_TABS: ReadonlySet<Tab> = new Set<Tab>(['overview', 'flows', 'devices'])
 
+function readTabFromURL(): Tab {
+  if (typeof window === 'undefined') return DEFAULT_TAB
+  const v = new URLSearchParams(window.location.search).get(TAB_PARAM)
+  return v && VALID_TABS.has(v as Tab) ? (v as Tab) : DEFAULT_TAB
+}
+
+// Params that are scoped to a single tab and should not linger in the
+// URL once the operator navigates elsewhere. ?device= is meaningful
+// only on Devices; ?s= (Settings sub-section) only on Settings.
+const TAB_SCOPED_PARAMS: Partial<Record<Tab, readonly string[]>> = {
+  devices: ['device'],
+  settings: ['s', 'item'],
+}
+
+function writeTabToURL(next: Tab) {
+  if (typeof window === 'undefined') return
+  const sp = new URLSearchParams(window.location.search)
+  if (next === DEFAULT_TAB) sp.delete(TAB_PARAM)
+  else sp.set(TAB_PARAM, next)
+  // Strip any tab-scoped params that don't belong on the destination tab.
+  for (const [tab, params] of Object.entries(TAB_SCOPED_PARAMS) as [Tab, readonly string[]][]) {
+    if (tab === next) continue
+    for (const p of params) sp.delete(p)
+  }
+  const qs = sp.toString()
+  const nextHref = qs ? `${window.location.pathname}?${qs}` : window.location.pathname
+  if (window.location.pathname + window.location.search !== nextHref) {
+    window.history.replaceState({}, '', nextHref)
+  }
+}
+
 export function App() {
-  const [tab, setTab] = useState<Tab>('overview')
+  // Tab lives in the URL via ?tab=…  so a reload or a shared link lands
+  // on the same surface. Default tab (overview) is omitted from the URL
+  // to keep clean links short. The popstate listener restores state on
+  // back/forward navigation.
+  const [tab, setTabState] = useState<Tab>(() => readTabFromURL())
+  useEffect(() => {
+    const onPop = () => setTabState(readTabFromURL())
+    window.addEventListener('popstate', onPop)
+    return () => window.removeEventListener('popstate', onPop)
+  }, [])
+  const setTab = useCallback((next: Tab) => {
+    // Render-on-state-change: flip state synchronously, then write the
+    // URL — so the tab re-renders in the same paint as the click.
+    setTabState(next)
+    writeTabToURL(next)
+  }, [])
   const tr = useTimeRange()
   const showRange = TIME_TABS.has(tab)
   // Cross-tab navigation primitive: writes filter chips into the URL,
@@ -52,7 +108,7 @@ export function App() {
       : window.location.pathname
     window.history.replaceState({}, '', next)
     setTab('flows')
-  }, [])
+  }, [setTab])
   return (
     <div
       className="grid bg-ink text-text overflow-hidden h-screen"

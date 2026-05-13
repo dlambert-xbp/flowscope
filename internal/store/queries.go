@@ -1719,12 +1719,24 @@ agg AS (
         sumIf(packets, direction = 1) AS in_packets,
         sumIf(packets, direction = 2) AS out_packets,
         countIf(direction = 1)        AS in_flows,
-        countIf(direction = 2)        AS out_flows,
-        in_bytes + out_bytes          AS bytes,
-        in_packets + out_packets      AS packets,
-        in_flows + out_flows          AS flows
+        countIf(direction = 2)        AS out_flows
     FROM per_iface
     GROUP BY exporter, ifindex
+),
+totals AS (
+    SELECT
+        exporter,
+        ifindex,
+        in_bytes,
+        out_bytes,
+        in_packets,
+        out_packets,
+        in_flows,
+        out_flows,
+        in_bytes + out_bytes     AS bytes,
+        in_packets + out_packets AS packets,
+        in_flows + out_flows     AS flows
+    FROM agg
 ),
 inv AS (` + sqlLatestInventory + `),
 sif AS (` + sqlLatestSNMPInterfaces + `)
@@ -1738,7 +1750,7 @@ SELECT
     a.in_packets, a.out_packets,
     a.in_flows, a.out_flows,
     a.bytes, a.packets, a.flows
-FROM agg AS a
+FROM totals AS a
 LEFT JOIN inv ON a.exporter = inv.exporter
 LEFT JOIN sif ON a.exporter = sif.exporter AND a.ifindex = sif.ifindex
 ORDER BY ` + sort.orderColumn() + ` DESC
