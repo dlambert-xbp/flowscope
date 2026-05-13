@@ -308,25 +308,76 @@ func (s *Scheduler) shouldWalkNeighbors(target string) bool {
 	return time.Since(last) >= s.neighborInterval
 }
 
-// clientFor returns the SNMP Client to use for target. If a
-// per-exporter credential exists, a new RealClient is built from it.
-// Otherwise the fallback client is used (typically the cluster-wide
-// v2c community or the mock).
+// clientFor returns the SNMP Client to use for target. Resolution
+// order:
+//
+//	1. Per-exporter binding (snmp_credentials)
+//	   - binding_kind=custom: use the inline community / v3 fields.
+//	   - binding_kind=global_v2c: resolve via snmp_global_defaults v2c.
+//	   - binding_kind=global_v3:  resolve via snmp_global_defaults v3.
+//	2. snmp_global_defaults v2c (no per-exporter binding, v2c global set)
+//	3. The env-var fallback client (legacy FLOWSCOPE_SNMP_COMMUNITY).
+//
+// A misconfigured global indirection (binding points at a global that
+// hasn't been configured yet) returns ErrCredNotFound semantics so the
+// walk falls through to the fallback rather than failing the device.
 func (s *Scheduler) clientFor(ctx context.Context, target string) (Client, error) {
 	if s.creds != nil {
 		c, err := s.creds.Get(ctx, target)
 		if err == nil {
-			return NewClient(FromCredential(c)), nil
-		}
-		// ErrCredNotFound is the common case; anything else is logged.
-		if err != ErrCredNotFound {
+			switch c.BindingKind {
+			case BindingKindGlobalV2c:
+				if cl := s.clientFromGlobal(ctx, "v2c", c.Port); cl != nil {
+					return cl, nil
+				}
+			case BindingKindGlobalV3:
+				if cl := s.clientFromGlobal(ctx, "v3", c.Port); cl != nil {
+					return cl, nil
+				}
+			default: // "" or "custom"
+				return NewClient(FromCredential(c)), nil
+			}
+			// Global indirection requested but unconfigured — fall
+			// through to the fallback client below so the device still
+			// gets walked.
+			slog.Warn("snmp: global default not configured, using fallback",
+				"exporter", target, "binding_kind", c.BindingKind)
+		} else if err != ErrCredNotFound {
+			// ErrCredNotFound is the common case; anything else is logged.
 			slog.Warn("snmp: credential lookup failed", "exporter", target, "err", err)
+		} else {
+			// No per-exporter binding — try the v2c global as the
+			// fleet-wide default before the env-var fallback.
+			if cl := s.clientFromGlobal(ctx, "v2c", 0); cl != nil {
+				return cl, nil
+			}
 		}
 	}
 	if s.fallback != nil {
 		return s.fallback, nil
 	}
 	return nil, fmt.Errorf("no credential and no fallback")
+}
+
+// clientFromGlobal builds a Client from the v2c or v3 global default.
+// Returns nil when the global has not been configured (Configured=false),
+// or when a permission / decryption error occurs — callers fall through
+// to the next resolution step. portOverride is non-zero when the
+// per-exporter binding specified a custom port for this device.
+func (s *Scheduler) clientFromGlobal(ctx context.Context, role string, portOverride uint16) Client {
+	g, err := s.creds.GetGlobal(ctx, role)
+	if err != nil {
+		slog.Warn("snmp: global lookup failed", "role", role, "err", err)
+		return nil
+	}
+	if g == nil || !g.Configured {
+		return nil
+	}
+	cfg := FromGlobalDefault(g)
+	if portOverride > 0 {
+		cfg.Port = portOverride
+	}
+	return NewClient(cfg)
 }
 
 // discoverExporters returns the union of:

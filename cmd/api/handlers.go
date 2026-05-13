@@ -638,6 +638,77 @@ func (h *handlers) testCredential(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// getGlobalCredential returns the fleet-wide v2c or v3 default with
+// secrets REDACTED. Missing rows resolve to a Configured=false
+// placeholder so the UI can render an empty form without 404 handling.
+//
+//	GET /api/snmp/globals/{role}    role in {v2c, v3}
+func (h *handlers) getGlobalCredential(w http.ResponseWriter, r *http.Request) {
+	if h.creds == nil {
+		writeError(w, http.StatusServiceUnavailable, "credential management disabled")
+		return
+	}
+	role := chi.URLParam(r, "role")
+	if role != "v2c" && role != "v3" {
+		writeError(w, http.StatusBadRequest, "role must be v2c or v3")
+		return
+	}
+	g, err := h.creds.GetGlobal(r.Context(), role)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	g.Community = ""
+	g.V3AuthPass = ""
+	g.V3PrivPass = ""
+	writeJSON(w, http.StatusOK, g)
+}
+
+// putGlobalCredential upserts the fleet-wide v2c or v3 default. Empty
+// passphrase fields preserve the existing secret (same convention as
+// putCredential) so the UI can render "secret already set" without
+// forcing a retype.
+//
+//	PUT /api/snmp/globals/{role}    role in {v2c, v3}
+func (h *handlers) putGlobalCredential(w http.ResponseWriter, r *http.Request) {
+	if h.creds == nil {
+		writeError(w, http.StatusServiceUnavailable, "credential management disabled")
+		return
+	}
+	role := chi.URLParam(r, "role")
+	if role != "v2c" && role != "v3" {
+		writeError(w, http.StatusBadRequest, "role must be v2c or v3")
+		return
+	}
+	var body snmpx.GlobalDefault
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	body.Role = role
+
+	// Preserve existing secrets when the operator left them blank.
+	if body.Community == "" || body.V3AuthPass == "" || body.V3PrivPass == "" {
+		if existing, err := h.creds.GetGlobal(r.Context(), role); err == nil {
+			if body.Community == "" {
+				body.Community = existing.Community
+			}
+			if body.V3AuthPass == "" {
+				body.V3AuthPass = existing.V3AuthPass
+			}
+			if body.V3PrivPass == "" {
+				body.V3PrivPass = existing.V3PrivPass
+			}
+		}
+	}
+
+	if err := h.creds.SetGlobal(r.Context(), body, actorFromRequest(r)); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "role": role})
+}
+
 // requestSnmpWalk enqueues an immediate SNMP walk for exporter. The
 // snmp scheduler picks the request up on its next dispatch tick (≤ 30s)
 // and walks regardless of the configured cadence. Returns 202 Accepted

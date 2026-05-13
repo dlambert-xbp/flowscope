@@ -378,9 +378,41 @@ export type FlowsListResponse = {
   window: string
 }
 
+// SNMPBindingKind controls how a per-exporter credential resolves at
+// walk time.
+//   'custom'     — inline community / v3 fields on the binding itself.
+//   'global_v2c' — defer to the fleet-wide v2c default.
+//   'global_v3'  — defer to the fleet-wide v3 default.
+// Empty string back-compat: rows written before the column existed
+// read as 'custom'.
+export type SNMPBindingKind = 'custom' | 'global_v2c' | 'global_v3'
+
 export type SNMPCredential = {
   exporter: string
   version: 'v2c' | 'v3'
+  port: number
+  interval_sec: number
+  binding_kind: SNMPBindingKind
+  community?: string
+  v3_username?: string
+  v3_auth_proto?: string
+  v3_auth_pass?: string
+  v3_priv_proto?: string
+  v3_priv_pass?: string
+  v3_context?: string
+  has_community: boolean
+  has_auth_pass: boolean
+  has_priv_pass: boolean
+  updated_at?: string
+  updated_by?: string
+}
+
+// SNMPGlobalDefault is the fleet-wide v2c or v3 fallback. One row per
+// role. configured=true when the row exists and a usable secret /
+// identity is set; the api returns configured=false placeholders
+// rather than 404 so the UI can render an empty form.
+export type SNMPGlobalDefault = {
+  role: 'v2c' | 'v3'
   port: number
   interval_sec: number
   community?: string
@@ -393,6 +425,7 @@ export type SNMPCredential = {
   has_community: boolean
   has_auth_pass: boolean
   has_priv_pass: boolean
+  configured: boolean
   updated_at?: string
   updated_by?: string
 }
@@ -944,6 +977,20 @@ export const api = {
     if (!r.ok) {
       const txt = await r.text()
       throw new Error(`test ${exporter} → ${r.status}: ${txt}`)
+    }
+    return r.json()
+  },
+  getGlobalCredential: (role: 'v2c' | 'v3') =>
+    getJSON<SNMPGlobalDefault>(`/api/snmp/globals/${role}`),
+  putGlobalCredential: async (g: SNMPGlobalDefault) => {
+    const r = await fetch(`/api/snmp/globals/${g.role}`, {
+      method: 'PUT',
+      headers: authHeaders(true),
+      body: JSON.stringify(g),
+    })
+    if (!r.ok) {
+      const txt = await r.text()
+      throw new Error(`PUT global ${g.role} → ${r.status}: ${txt}`)
     }
     return r.json()
   },
