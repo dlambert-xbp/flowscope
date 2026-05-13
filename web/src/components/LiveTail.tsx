@@ -1,8 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api, fmt } from '../api'
 import type { RecentFlow } from '../api'
-import { useLiveInterval } from '../timeRange'
 import { ServiceLabel } from './ServiceLabel'
 import { Th, useTableSort, type SortColumns } from './sortable'
 import { Hostname } from './Hostname'
@@ -42,16 +41,37 @@ export function LiveTail({
       // ignore
     }
   }, [storageKey, collapsed])
+  // Live tail is, by definition, live — it should keep streaming
+  // regardless of the global time-range mode. (Absolute / frozen
+  // range pauses other queries via useLiveInterval; that gate is
+  // exactly the opposite of what this component wants.) Unconditional
+  // 2s cadence with focus-aware refetch so a backgrounded tab doesn't
+  // burn the api.
   const recent = useQuery({
-    queryKey: ['recent'],
+    queryKey: ['recent', 20],
     queryFn: () => api.recentFlows(20),
-    refetchInterval: useLiveInterval(2000),
+    refetchInterval: 2000,
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
   })
   const flows = recent.data?.flows ?? []
   const { sortedRows, sortKey, sortDir, toggle } = useTableSort(flows, FLOW_COLS, {
     key: 'observed',
     dir: 'desc',
   })
+  // Tiny pulse next to the title every time fresh data lands — gives
+  // the operator a visible cue that the stream is moving even when
+  // the rows themselves haven't changed in the last tick (e.g. quiet
+  // window of synth traffic).
+  const [pulse, setPulse] = useState(0)
+  const lastUpdatedRef = useRef<string | undefined>(undefined)
+  useEffect(() => {
+    const ts = recent.dataUpdatedAt
+    if (ts && String(ts) !== lastUpdatedRef.current) {
+      lastUpdatedRef.current = String(ts)
+      setPulse((n) => n + 1)
+    }
+  }, [recent.dataUpdatedAt])
   const thProps = (k: string) => ({
     sortKey: k,
     active: sortKey === k,
@@ -79,8 +99,14 @@ export function LiveTail({
         <span className="font-mono text-[11px] text-faint tabular">
           {recent.isLoading ? 'loading…' : `${flows.length} most recent`}
         </span>
-        <span className="ml-auto font-mono text-[10px] tracking-[0.06em] text-faint">
-          REFRESH · 2s
+        <span
+          key={pulse}
+          aria-hidden
+          className="w-1.5 h-1.5 rounded-full bg-ok animate-pulse"
+          title="streaming"
+        />
+        <span className="ml-auto font-mono text-[10px] tracking-[0.06em] text-ok">
+          STREAMING · 2s
         </span>
       </div>
       {!collapsed && (
