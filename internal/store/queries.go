@@ -555,7 +555,7 @@ WITH
     SELECT exporter,
            argMax(sys_name, polled_at)     AS sys_name,
            argMax(sys_location, polled_at) AS sys_location,
-           max(polled_at)                  AS polled_at
+           max(polled_at)                  AS last_polled
     FROM device_inventory
     WHERE polled_at >= now() - INTERVAL 7 DAY
     GROUP BY exporter
@@ -596,7 +596,7 @@ SELECT
     ifNull(f.first_seen, toDateTime64('1970-01-01 00:00:00', 3, 'UTC')) AS first_seen,
     ifNull(f.last_seen,  toDateTime64('1970-01-01 00:00:00', 3, 'UTC')) AS last_seen,
     ifNull(i.iface_count, toUInt64(0)) AS iface_count,
-    ifNull(inv.polled_at, toDateTime64('1970-01-01 00:00:00', 3, 'UTC')) AS last_walked
+    ifNull(inv.last_polled, toDateTime64('1970-01-01 00:00:00', 3, 'UTC')) AS last_walked
 FROM all_exporters AS a
 LEFT JOIN flow_agg  AS f ON a.exporter = f.exporter
 LEFT JOIN iface_agg AS i ON a.exporter = i.exporter
@@ -672,7 +672,7 @@ GROUP BY exporter`
 SELECT
     argMax(sys_name, polled_at)     AS sys_name,
     argMax(sys_location, polled_at) AS sys_location,
-    max(polled_at)                  AS polled_at
+    max(polled_at)                  AS last_polled
 FROM device_inventory
 WHERE polled_at >= now() - INTERVAL 7 DAY AND exporter = ?
 GROUP BY exporter`
