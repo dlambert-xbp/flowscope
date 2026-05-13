@@ -6,6 +6,7 @@ import type {
   DeviceInventory,
   DeviceResource,
   DeviceResourceKind,
+  ExporterHealthRow,
   InterfaceRow,
   RecentFlow,
   TopService,
@@ -175,7 +176,16 @@ export function Devices({
     queryFn: () => api.devices(apiRange),
     refetchInterval: useLiveInterval(5000),
   })
+  // Per-(exporter, source) freshness powers the source badges in the
+  // left rail. We only need the rows themselves — last_seen drives the
+  // active/stale decision, which is independent of the window length.
+  const health = useQuery({
+    queryKey: ['health-exporters', rangeKey],
+    queryFn: () => api.healthExporters(apiRange),
+    refetchInterval: useLiveInterval(10_000),
+  })
   const devices = list.data?.devices ?? []
+  const healthRows = health.data?.rows ?? []
   // Selected exporter lives in the URL (?device=<ip>) so a refresh or
   // a shared link restores the same detail view. The local mirror is
   // kept in sync via popstate (back/forward) and via the click handler
@@ -208,6 +218,7 @@ export function Devices({
     <div className="grid h-full" style={{ gridTemplateColumns: `${rail.width}px 1fr` }}>
       <Directory
         devices={devices}
+        health={healthRows}
         selected={selected}
         onSelect={setSelected}
         loading={list.isLoading}
@@ -225,10 +236,97 @@ export function Devices({
   )
 }
 
+/* --------------------------- Source badges --------------------------- */
+
+// SourceKind enumerates the data-collection sources we badge in the
+// directory. Multiple flow protocols collapse into NETFLOW because the
+// operator cares about the family, not the wire version.
+type SourceKind = 'snmp' | 'sflow' | 'gnmi' | 'netflow'
+
+// freshSeconds is the window in which a source is considered "active"
+// for badge + green-dot purposes. Flow sources stream every few
+// seconds when traffic is present; SNMP polls every poll-interval
+// (default 60s, but configurable longer). Keeping 5 minutes covers
+// both without flicker — slow walks still light up the SNMP badge.
+const FRESH_SECONDS = 300
+
+function sourceKindFor(s: string): SourceKind | null {
+  switch (s) {
+    case 'sflow':
+      return 'sflow'
+    case 'gnmi':
+      return 'gnmi'
+    case 'netflow_v5':
+    case 'netflow_v9':
+    case 'ipfix':
+      return 'netflow'
+    default:
+      return null
+  }
+}
+
+// activeSourcesFor returns the set of active sources for one exporter.
+// SNMP is active when last_walked is non-epoch AND inside the
+// freshness window. Each flow source is active when at least one
+// ExporterHealthRow for that exporter+source has last_seen inside the
+// freshness window.
+function activeSourcesFor(d: Device, health: ExporterHealthRow[]): Set<SourceKind> {
+  const out = new Set<SourceKind>()
+  if (!isEpoch(d.last_walked) && secondsSince(d.last_walked) < FRESH_SECONDS) {
+    out.add('snmp')
+  }
+  for (const r of health) {
+    if (r.exporter !== d.exporter) continue
+    if (secondsSince(r.last_seen) >= FRESH_SECONDS) continue
+    const k = sourceKindFor(r.source)
+    if (k) out.add(k)
+  }
+  return out
+}
+
+const BADGE_ORDER: SourceKind[] = ['snmp', 'sflow', 'gnmi', 'netflow']
+
+const BADGE_TONE: Record<SourceKind, string> = {
+  // SNMP is enrichment, not data — accent tone to differentiate it from
+  // the flow-source pills.
+  snmp: 'bg-accent-wash text-accent border-accent/40',
+  // Counter-truth sources (sflow, gnmi) share the ok tone — both yield
+  // authoritative bytes/sec rather than flow-derived approximations.
+  sflow: 'bg-ok-wash text-ok border-ok/40',
+  gnmi: 'bg-ok-wash text-ok border-ok/40',
+  // NetFlow is flow-derived — dim tone so it sits behind counter sources.
+  netflow: 'bg-raise text-dim border-line',
+}
+
+const BADGE_LABEL: Record<SourceKind, string> = {
+  snmp: 'SNMP',
+  sflow: 'SFLOW',
+  gnmi: 'GNMI',
+  netflow: 'NETFLOW',
+}
+
+function SourceBadges({ sources }: { sources: Set<SourceKind> }) {
+  const visible = BADGE_ORDER.filter((k) => sources.has(k))
+  if (visible.length === 0) return null
+  return (
+    <div className="flex gap-1 mt-0.5">
+      {visible.map((k) => (
+        <span
+          key={k}
+          className={`font-mono text-[9.5px] leading-none uppercase tracking-[0.06em] px-1 py-px border ${BADGE_TONE[k]}`}
+        >
+          {BADGE_LABEL[k]}
+        </span>
+      ))}
+    </div>
+  )
+}
+
 /* ----------------------------- Directory ----------------------------- */
 
 function Directory({
   devices,
+  health,
   selected,
   onSelect,
   loading,
@@ -236,6 +334,7 @@ function Directory({
   onResizeStart,
 }: {
   devices: Device[]
+  health: ExporterHealthRow[]
   selected: string | null
   onSelect: (e: string) => void
   loading: boolean
@@ -368,6 +467,7 @@ function Directory({
               selected={selected}
               onSelect={onSelect}
               seconds={rangeSeconds(range)}
+              health={health}
             />
           )
         })}
@@ -397,6 +497,7 @@ function DirectoryGroup({
   selected,
   onSelect,
   seconds,
+  health,
 }: {
   group: DeviceGroup
   collapsed: boolean
@@ -404,6 +505,7 @@ function DirectoryGroup({
   selected: string | null
   onSelect: (exporter: string) => void
   seconds: number
+  health: ExporterHealthRow[]
 }) {
   return (
     <div data-testid={`devices-group-${group.slug}`}>
@@ -440,6 +542,7 @@ function DirectoryGroup({
             active={d.exporter === selected}
             onSelect={() => onSelect(d.exporter)}
             seconds={seconds}
+            health={health}
           />
         ))}
     </div>
@@ -451,22 +554,29 @@ function DirectoryRow({
   active,
   onSelect,
   seconds,
+  health,
 }: {
   d: Device
   active: boolean
   onSelect: () => void
   seconds: number
+  health: ExporterHealthRow[]
 }) {
-  // discovered: SNMP has walked this device but no flow records hit the
-  // table inside the window. Render a neutral dot + "—" rate so the
-  // operator can tell at a glance that we know about it via SNMP only.
-  const discovered = isEpoch(d.last_seen)
-  const since = secondsSince(d.last_seen)
-  const dot = discovered
-    ? 'bg-faint'
-    : since < 60
-      ? 'bg-ok'
-      : since < 300
+  // sources is the set of fresh data-collection sources for this
+  // device (SNMP and per-flow-source). The green dot lights up when
+  // any source is fresh — flows OR SNMP, per operator request — so an
+  // SNMP-only device that's actively polled looks just as "alive" as a
+  // device pumping NetFlow. Badges below the hostname mirror the set
+  // so the operator can tell at a glance what we're collecting.
+  const sources = activeSourcesFor(d, health)
+  const anyActive = sources.size > 0
+  const discovered = isEpoch(d.last_seen) && !sources.has('snmp')
+  const sinceFlow = isEpoch(d.last_seen) ? Infinity : secondsSince(d.last_seen)
+  const dot = anyActive
+    ? 'bg-ok'
+    : discovered
+      ? 'bg-faint'
+      : sinceFlow < 300
         ? 'bg-warn'
         : 'bg-crit'
   const lbl = labelExporter(d)
@@ -474,22 +584,29 @@ function DirectoryRow({
     <button
       onClick={onSelect}
       data-testid="device-row"
-      className={`w-full text-left px-3 py-2 border-b border-line-soft flex items-center gap-3 hover:bg-hover ${
+      className={`w-full text-left px-3 py-2 border-b border-line-soft flex items-start gap-3 hover:bg-hover ${
         active ? 'bg-accent-wash' : ''
       }`}
     >
       <span
-        className={`w-1.5 h-1.5 rounded-full ${dot} shrink-0 mt-0.5 self-start`}
-        title={discovered ? 'SNMP walked · no flows in window' : undefined}
+        className={`w-1.5 h-1.5 rounded-full ${dot} shrink-0 mt-1.5`}
+        title={
+          anyActive
+            ? `active · ${[...sources].map((s) => s.toUpperCase()).join(' · ')}`
+            : discovered
+              ? 'SNMP walked · no flows in window'
+              : undefined
+        }
       />
       <div className="min-w-0 flex-1">
         <div className="font-mono text-[12.5px] truncate">{lbl.primary}</div>
+        <SourceBadges sources={sources} />
         {lbl.secondary && (
-          <div className="font-mono text-[10.5px] text-faint truncate">{lbl.secondary}</div>
+          <div className="font-mono text-[10.5px] text-faint truncate mt-0.5">{lbl.secondary}</div>
         )}
       </div>
-      <span className="ml-auto font-mono text-[10.5px] text-faint shrink-0 tabular">
-        {discovered ? '—' : fmt.bps((d.bytes * 8) / Math.max(1, seconds))}
+      <span className="ml-auto font-mono text-[10.5px] text-faint shrink-0 tabular mt-0.5">
+        {isEpoch(d.last_seen) ? '—' : fmt.bps((d.bytes * 8) / Math.max(1, seconds))}
       </span>
     </button>
   )
