@@ -981,9 +981,22 @@ function SummaryTab({
   range: TimeRange
   rangeKey: unknown
 }) {
+  // Subtitle reflects the actual version that walked this device on
+  // the last poll. Falls back to a neutral 'snmp' when the row was
+  // written before migration 000016 added the column.
+  const inv = useQuery({
+    queryKey: ['device-inventory', exporter],
+    queryFn: () =>
+      api
+        .deviceInventory(exporter)
+        .catch(() => undefined as DeviceInventory | undefined),
+    refetchInterval: useLiveInterval(30_000),
+  })
+  const v = inv.data?.snmp_version
+  const sub = v ? `snmp · ${v}` : 'snmp'
   return (
     <div className="px-6 py-5 space-y-5">
-      <Section title="Inventory" sub="snmp · v2c" right="SOURCE · SNMP">
+      <Section title="Inventory" sub={sub} right="SOURCE · SNMP">
         <InventoryPanel exporter={exporter} />
       </Section>
       <Section title="Health" sub="cpu · memory · storage · last 24h" right="SOURCE · SNMP">

@@ -562,13 +562,16 @@ function GlobalDefaultCard({ role }: { role: 'v2c' | 'v3' }) {
   const title = role === 'v2c' ? 'Global v2c default' : 'Global v3 default'
   return (
     <div className="border border-line bg-raise px-3 py-3">
-      <div className="flex items-baseline gap-2 mb-2">
+      <div className="flex items-baseline gap-2 mb-2 flex-wrap">
         <span className="text-[11px] uppercase tracking-[0.1em] font-mono text-dim font-semibold">
           {title}
         </span>
         <Tag tone={g?.configured ? 'ok' : undefined}>
           {g?.configured ? 'configured' : 'unconfigured'}
         </Tag>
+        {g?.default_for_dynamic && (
+          <Tag tone="accent">default for dynamic</Tag>
+        )}
         <button
           onClick={() => setEditing((b) => !b)}
           className="ml-auto font-mono text-[11px] text-accent hover:underline"
@@ -653,6 +656,19 @@ function GlobalDefaultForm({
           />
         </Field>
       </div>
+      <label className="flex items-center gap-2 mb-3 font-mono text-[12px] text-dim cursor-pointer select-none">
+        <input
+          type="checkbox"
+          checked={!!g.default_for_dynamic}
+          onChange={(e) => set('default_for_dynamic', e.target.checked)}
+        />
+        <span>
+          use as default for dynamically-discovered exporters
+          <span className="text-faint">
+            {' '}· walks unbound exporters with this credential before falling back to FLOWSCOPE_SNMP_COMMUNITY
+          </span>
+        </span>
+      </label>
       {g.role === 'v2c' && (
         <Field label={`community ${g.has_community ? '· (already set; leave blank to keep)' : ''}`}>
           <input

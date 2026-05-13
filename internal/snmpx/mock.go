@@ -87,6 +87,7 @@ func (m *MockClient) Walk(_ context.Context, target string) (*Inventory, error) 
 		Resources:      mockResources(seed, model.vendor),
 		PollDurationMs: 12,
 		Status:         "ok",
+		SNMPVersion:    "v2c",
 	}, nil
 }
 

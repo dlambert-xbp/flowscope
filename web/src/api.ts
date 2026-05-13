@@ -124,6 +124,10 @@ export type DeviceInventory = {
   iface_count: number
   poll_duration_ms: number
   poll_status: string
+  // snmp_version is the wire version used to walk this device on the
+  // last poll ('v2c' | 'v3'). Empty string for rows written before
+  // migration 000016 — UI falls back to a neutral label.
+  snmp_version: string
   interfaces: SNMPInterface[]
 }
 
@@ -426,6 +430,10 @@ export type SNMPGlobalDefault = {
   has_auth_pass: boolean
   has_priv_pass: boolean
   configured: boolean
+  // default_for_dynamic marks this role as the credential to use when
+  // an exporter shows up in flows with no per-exporter binding. At most
+  // one global should carry the flag.
+  default_for_dynamic: boolean
   updated_at?: string
   updated_by?: string
 }

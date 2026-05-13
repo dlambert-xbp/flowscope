@@ -31,6 +31,11 @@ type Inventory struct {
 	Neighbors      []Neighbor
 	PollDurationMs uint32
 	Status         string // ok | partial | error
+	// SNMPVersion is the wire version the walk actually used. Tracked so
+	// the device inventory row can surface "snmp · v3" vs "snmp · v2c"
+	// without the UI having to re-resolve the credential. Set by
+	// RealClient.Walk from rc.cfg.Version.
+	SNMPVersion    string // 'v2c' | 'v3' (empty when unknown)
 }
 
 // ResourceKind enumerates the metric families surfaced on the Devices
@@ -231,9 +236,10 @@ func (rc *RealClient) Walk(ctx context.Context, target string) (*Inventory, erro
 	defer g.Conn.Close()
 
 	inv := &Inventory{
-		PolledAt: time.Now().UTC(),
-		Exporter: target,
-		Status:   "ok",
+		PolledAt:    time.Now().UTC(),
+		Exporter:    target,
+		Status:      "ok",
+		SNMPVersion: rc.cfg.Version,
 	}
 
 	// Scalar gets — pack into one Get for efficiency.

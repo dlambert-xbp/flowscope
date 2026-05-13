@@ -35,15 +35,18 @@ import { Hostname, useReverseDNS } from './Hostname'
 // full 5-tuple) to add or replace a filter chip; chips re-narrow
 // every panel's query and persist in the URL.
 
-type TabId = 'talkers' | 'services' | 'protocols' | 'conversations' | 'asn' | 'interfaces'
+type TabId = 'talkers' | 'services' | 'protocols' | 'conversations' | 'interfaces' | 'asn'
 
+// Tab order is also tab-rendering order. Interfaces lands before ASN
+// because counter-sample interfaces are an operator-routine signal —
+// ASN is more situational.
 const TAB_LABELS: Record<TabId, string> = {
   talkers: 'Top talkers',
   services: 'Top services',
   protocols: 'Top protocols',
   conversations: 'Top conversations',
-  asn: 'Top ASN',
   interfaces: 'Top interfaces',
+  asn: 'Top ASN',
 }
 
 const TOP_N_OPTIONS = [10, 25, 50] as const
@@ -53,6 +56,11 @@ const SORT_OPTIONS: { id: TopNSort; label: string }[] = [
   { id: 'flows', label: 'flows' },
 ]
 
+// Flows is the Top-N analysis surface: filter chips on top, then the
+// Top-talkers / services / protocols / conversations / interfaces /
+// ASN tabs with a sort + page-size selector. Live tail and the
+// paginated Investigate table are now their own top-level tabs so the
+// operator can switch contexts without losing scroll position.
 export function Flows({
   range,
   rangeKey,
@@ -69,7 +77,6 @@ export function Flows({
   const [drill, setDrill] = useState<FlowDrillDown | null>(null)
   return (
     <div>
-      <LiveTail />
       <FilterBar
         filters={f.filters}
         onAdd={f.add}
@@ -94,6 +101,53 @@ export function Flows({
         topN={topN}
         onAdd={f.add}
         onDrill={setDrill}
+      />
+      <FlowDrawer
+        drill={drill}
+        pageFilters={qs}
+        range={apiRange}
+        onClose={() => setDrill(null)}
+      />
+    </div>
+  )
+}
+
+// FlowsLive is the standalone Live tail tab. No filters, no auto-
+// refresh control — just the rolling stream of recent flows. Operator
+// can collapse / expand via the panel's own toggle.
+export function FlowsLive() {
+  return (
+    <div>
+      <LiveTail storageKey="flowscope.liveTab.collapsed" />
+    </div>
+  )
+}
+
+// FlowsInvestigate is the standalone Investigate tab — the same
+// paginated, sortable flow table that previously sat at the bottom of
+// the Flows tab. URL-synced filter chips share state with the Flows
+// Top-N tab via useFilters so navigating between the two doesn't
+// drop the operator's narrowing. No auto-scroll on the row highlight
+// unless the move was triggered by j/k keys.
+export function FlowsInvestigate({
+  range,
+  rangeKey,
+}: {
+  range: TimeRange
+  rangeKey: unknown
+}) {
+  const f = useFilters()
+  const qs = toQuery(f.filters)
+  const apiRange = toApi(range)
+  const [drill, setDrill] = useState<FlowDrillDown | null>(null)
+  return (
+    <div>
+      <FilterBar
+        filters={f.filters}
+        onAdd={f.add}
+        onRemove={f.remove}
+        onClear={f.clear}
+        range={range}
       />
       <Investigate
         qs={qs}
@@ -1252,10 +1306,18 @@ function Investigate({
   // each <tr> let us call scrollIntoView when the highlight moves
   // off-screen — keyboard users shouldn't have to mouse to follow
   // their own cursor.
+  //
+  // viaKey tracks whether the last highlight change came from a j/k
+  // keypress vs. a reset/clamp side-effect. Only key-driven moves
+  // trigger scrollIntoView — otherwise the page would jump when the
+  // operator changes filters or pages, which is jarring on a tab
+  // dedicated to investigation.
   const [highlight, setHighlight] = useState(0)
+  const viaKey = useRef(false)
   const rowRefs = useRef<Array<HTMLTableRowElement | null>>([])
   useEffect(() => {
     setHighlight(0)
+    viaKey.current = false
     rowRefs.current = []
   }, [filterKey, rangeKey, pageSize, offset, sort, dir])
   // Clamp if flow count shrinks under the highlighted index between
@@ -1285,9 +1347,11 @@ function Investigate({
       if (flows.length === 0) return
       if (e.key === 'j') {
         e.preventDefault()
+        viaKey.current = true
         setHighlight((h) => (h + 1) % flows.length)
       } else if (e.key === 'k') {
         e.preventDefault()
+        viaKey.current = true
         setHighlight((h) => (h - 1 + flows.length) % flows.length)
       } else if (e.key === 'Enter') {
         const f = flows[highlight]
@@ -1310,6 +1374,8 @@ function Investigate({
     return () => window.removeEventListener('keydown', onKey)
   }, [collapsed, flows, highlight, onDrill])
   useEffect(() => {
+    if (!viaKey.current) return
+    viaKey.current = false
     const row = rowRefs.current[highlight]
     if (row) row.scrollIntoView({ block: 'nearest' })
   }, [highlight])

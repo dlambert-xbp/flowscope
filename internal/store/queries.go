@@ -737,6 +737,10 @@ type DeviceInventory struct {
 	IfaceCount     uint32            `json:"iface_count"`
 	PollDurationMs uint32            `json:"poll_duration_ms"`
 	PollStatus     string            `json:"poll_status"`
+	// SNMPVersion is the wire version used to walk this device on the
+	// latest poll ('v2c' | 'v3'). Empty string for rows written before
+	// migration 000016 added the column.
+	SNMPVersion    string            `json:"snmp_version"`
 	Interfaces     []SNMPInterface   `json:"interfaces"`
 }
 
@@ -766,7 +770,8 @@ func QueryDeviceInventory(ctx context.Context, conn driver.Conn, exporter netip.
 SELECT
     polled_at, sys_descr, sys_object_id, sys_uptime_ms,
     sys_name, sys_location, sys_contact, iface_count,
-    poll_duration_ms, poll_status
+    poll_duration_ms, poll_status,
+    ifNull(snmp_version, '') AS snmp_version
 FROM device_inventory
 WHERE exporter = ?
 ORDER BY polled_at DESC
@@ -777,6 +782,7 @@ LIMIT 1`
 		&inv.PolledAt, &inv.SysDescr, &inv.SysObjectID, &inv.SysUptimeMs,
 		&inv.SysName, &inv.SysLocation, &inv.SysContact, &inv.IfaceCount,
 		&inv.PollDurationMs, &inv.PollStatus,
+		&inv.SNMPVersion,
 	); err != nil {
 		if isNoRows(err) {
 			return nil, ErrNotFound

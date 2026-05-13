@@ -315,7 +315,8 @@ func (s *Scheduler) shouldWalkNeighbors(target string) bool {
 //	   - binding_kind=custom: use the inline community / v3 fields.
 //	   - binding_kind=global_v2c: resolve via snmp_global_defaults v2c.
 //	   - binding_kind=global_v3:  resolve via snmp_global_defaults v3.
-//	2. snmp_global_defaults v2c (no per-exporter binding, v2c global set)
+//	2. Whichever global has default_for_dynamic=1 (operator-controlled;
+//	   defaults to v2c when both are flagged, mirroring legacy behavior).
 //	3. The env-var fallback client (legacy FLOWSCOPE_SNMP_COMMUNITY).
 //
 // A misconfigured global indirection (binding points at a global that
@@ -346,9 +347,12 @@ func (s *Scheduler) clientFor(ctx context.Context, target string) (Client, error
 			// ErrCredNotFound is the common case; anything else is logged.
 			slog.Warn("snmp: credential lookup failed", "exporter", target, "err", err)
 		} else {
-			// No per-exporter binding — try the v2c global as the
-			// fleet-wide default before the env-var fallback.
-			if cl := s.clientFromGlobal(ctx, "v2c", 0); cl != nil {
+			// No per-exporter binding — try whichever global is flagged
+			// as the fleet-wide default for dynamic discovery. v2c wins
+			// when both are flagged (legacy compat); v3 wins when only
+			// v3 is flagged (v3-only deployments). If neither is
+			// flagged we fall through to the env-var fallback.
+			if cl := s.defaultDynamicClient(ctx); cl != nil {
 				return cl, nil
 			}
 		}
@@ -357,6 +361,21 @@ func (s *Scheduler) clientFor(ctx context.Context, target string) (Client, error
 		return s.fallback, nil
 	}
 	return nil, fmt.Errorf("no credential and no fallback")
+}
+
+// defaultDynamicClient picks the global to use for an exporter that
+// has no per-exporter binding. Looks at the default_for_dynamic flag
+// on each global and prefers v2c when both are flagged.
+func (s *Scheduler) defaultDynamicClient(ctx context.Context) Client {
+	v2c, _ := s.creds.GetGlobal(ctx, "v2c")
+	if v2c != nil && v2c.Configured && v2c.DefaultForDynamic {
+		return NewClient(FromGlobalDefault(v2c))
+	}
+	v3, _ := s.creds.GetGlobal(ctx, "v3")
+	if v3 != nil && v3.Configured && v3.DefaultForDynamic {
+		return NewClient(FromGlobalDefault(v3))
+	}
+	return nil
 }
 
 // clientFromGlobal builds a Client from the v2c or v3 global default.
@@ -446,11 +465,11 @@ func (s *Scheduler) persist(ctx context.Context, inv *Inventory) error {
 		`INSERT INTO device_inventory
 		   (polled_at, exporter, sys_descr, sys_object_id, sys_uptime_ms,
 		    sys_name, sys_location, sys_contact, iface_count,
-		    poll_duration_ms, poll_status)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		    poll_duration_ms, poll_status, snmp_version)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		inv.PolledAt, exp16, inv.SysDescr, inv.SysObjectID, inv.SysUpTimeMs,
 		inv.SysName, inv.SysLocation, inv.SysContact, uint32(len(inv.Interfaces)),
-		inv.PollDurationMs, inv.Status,
+		inv.PollDurationMs, inv.Status, inv.SNMPVersion,
 	); err != nil {
 		return fmt.Errorf("insert device_inventory: %w", err)
 	}

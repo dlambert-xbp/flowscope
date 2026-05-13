@@ -85,6 +85,12 @@ type GlobalDefault struct {
 	// identity field is populated. GET surfaces an empty placeholder
 	// with Configured=false when the operator has never set the global.
 	Configured bool `json:"configured"`
+
+	// DefaultForDynamic marks this role as the fleet-wide default for
+	// dynamically-discovered exporters that have no per-exporter
+	// binding. At most one global should carry the flag; the resolver
+	// prefers v2c over v3 when both are flagged (legacy behavior).
+	DefaultForDynamic bool `json:"default_for_dynamic"`
 }
 
 // BindingKind values. Centralised so handlers / scheduler / tests
@@ -334,13 +340,15 @@ SELECT
     community_ct,
     v3_username, v3_auth_proto, v3_auth_pass_ct,
     v3_priv_proto, v3_priv_pass_ct, v3_context,
-    updated_at, updated_by
+    updated_at, updated_by,
+    ifNull(default_for_dynamic, toUInt8(0)) AS default_for_dynamic
 FROM snmp_global_defaults FINAL
 WHERE role = ?`
 	row := s.conn.QueryRow(ctx, q, role)
 	var (
 		g                            GlobalDefault
 		communityCT, authCT, privCT  string
+		defaultForDynamic            uint8
 	)
 	g.Role = role
 	if err := row.Scan(
@@ -349,6 +357,7 @@ WHERE role = ?`
 		&g.V3Username, &g.V3AuthProto, &authCT,
 		&g.V3PrivProto, &privCT, &g.V3Context,
 		&g.UpdatedAt, &g.UpdatedBy,
+		&defaultForDynamic,
 	); err != nil {
 		if err.Error() == "sql: no rows in result set" {
 			// Unconfigured placeholder — defaults preserved on the
@@ -363,6 +372,7 @@ WHERE role = ?`
 	g.HasCommunity = communityCT != ""
 	g.HasAuthPass = authCT != ""
 	g.HasPrivPass = privCT != ""
+	g.DefaultForDynamic = defaultForDynamic == 1
 
 	var err error
 	if g.Community, err = s.crypter.Decrypt(communityCT); err != nil {
@@ -425,13 +435,17 @@ INSERT INTO snmp_global_defaults
    (role, port, interval_sec,
     community_ct, v3_username, v3_auth_proto, v3_auth_pass_ct,
     v3_priv_proto, v3_priv_pass_ct, v3_context,
-    updated_at, updated_by)
- VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    updated_at, updated_by, default_for_dynamic)
+ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	flag := uint8(0)
+	if g.DefaultForDynamic {
+		flag = 1
+	}
 	return s.conn.Exec(ctx, ins,
 		g.Role, g.Port, g.IntervalSec,
 		communityCT, g.V3Username, g.V3AuthProto, authCT,
 		g.V3PrivProto, privCT, g.V3Context,
-		time.Now().UTC(), actorOr(actor),
+		time.Now().UTC(), actorOr(actor), flag,
 	)
 }
 
