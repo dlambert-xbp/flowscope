@@ -25,6 +25,7 @@ type Store struct {
 	Allowlist      AllowlistStore
 	AppSettings    AppSettingsStore
 	AlertRules     AlertRulesStore
+	AlertInstances AlertInstancesStore
 	Webhooks       WebhooksStore
 	OIDC           OIDCStore
 }
@@ -41,6 +42,7 @@ func New(conn driver.Conn, crypter *snmpx.Crypter) *Store {
 		Allowlist:      newAllowlistStore(conn),
 		AppSettings:    newAppSettingsStore(conn),
 		AlertRules:     newAlertRulesStore(conn),
+		AlertInstances: newAlertInstancesStore(conn),
 		Webhooks:       newWebhooksStore(conn, crypter),
 		OIDC:           newOIDCStore(conn, crypter),
 	}

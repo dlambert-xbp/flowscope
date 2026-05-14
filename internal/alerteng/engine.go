@@ -67,12 +67,14 @@ type Engine struct {
 	tick            time.Duration
 	refreshTick     time.Duration
 	stabilityWindow time.Duration
-	src             RuleSettingsSource
+	src             RuleSettingsSource         // legacy override source; nil ok
+	instanceSrc     InstanceSettingsSource     // new instance-aware source; preferred when set
+	registry        TemplateRegistry           // built-in templates keyed by id
 
 	mu      sync.Mutex
 	rules   []Rule    // guarded by mu
 	version time.Time // max(updated_at) at the time `rules` was last loaded
-	open    map[string]openAlert // key = rule_id|scope|group_key
+	open    map[string]openAlert // key = instance_id|scope|group_key (or rule_id| when no instance)
 }
 
 type openAlert struct {
@@ -119,8 +121,25 @@ func (e *Engine) WithStabilityWindow(d time.Duration) *Engine {
 // Calling this before Run captures the initial version stamp so the
 // next refresh tick only fires when an operator has actually changed
 // something.
+//
+// Deprecated: use WithInstanceSource. Kept so callers that haven't
+// migrated still get refresh-tick behavior on the legacy table.
 func (e *Engine) WithSettingsSource(src RuleSettingsSource, version time.Time) *Engine {
 	e.src = src
+	e.version = version
+	return e
+}
+
+// WithInstanceSource wires the instance-based settings source. When
+// set, the refresh tick reloads from alert_rule_instances instead of
+// alert_rule_settings, and the engine writes instance_id on every
+// alert_events row.
+func (e *Engine) WithInstanceSource(src InstanceSettingsSource, registry TemplateRegistry, version time.Time) *Engine {
+	e.instanceSrc = src
+	e.registry = registry
+	if registry == nil {
+		e.registry = BuildTemplateRegistry()
+	}
 	e.version = version
 	return e
 }
@@ -136,7 +155,7 @@ func (e *Engine) Run(ctx context.Context) error {
 	defer t.Stop()
 
 	var refreshC <-chan time.Time
-	if e.src != nil {
+	if e.src != nil || e.instanceSrc != nil {
 		rt := time.NewTicker(e.refreshTick)
 		defer rt.Stop()
 		refreshC = rt.C
@@ -154,14 +173,31 @@ func (e *Engine) Run(ctx context.Context) error {
 	}
 }
 
-// refreshRules reloads from the settings source and swaps the active
-// rule slice when max(updated_at) has advanced. Called on the refresh
-// ticker; cheap when nothing has changed (one small SELECT).
+// refreshRules reloads from the active settings source and swaps the
+// active rule slice when max(updated_at) has advanced. Called on the
+// refresh ticker; cheap when nothing has changed.
+//
+// When both an instance source and a legacy source are wired, the
+// instance source wins — the legacy source is read only for callers
+// that never migrated to instances (deprecated).
 func (e *Engine) refreshRules(ctx context.Context) {
-	if e.src == nil {
+	var (
+		rules   []Rule
+		version time.Time
+		err     error
+	)
+	switch {
+	case e.instanceSrc != nil:
+		registry := e.registry
+		if registry == nil {
+			registry = BuildTemplateRegistry()
+		}
+		rules, version, err = LoadInstanceRules(ctx, e.instanceSrc, registry)
+	case e.src != nil:
+		rules, version, err = LoadRules(ctx, e.src)
+	default:
 		return
 	}
-	rules, version, err := LoadRules(ctx, e.src)
 	if err != nil {
 		slog.Warn("alerteng: refresh load failed", "err", err)
 		return
@@ -177,6 +213,12 @@ func (e *Engine) refreshRules(ctx context.Context) {
 }
 
 // evaluate runs every Rule once and reconciles open state.
+//
+// Open-alert keying uses (instance_id, scope, group_key) when the
+// rule is an InstanceRule, falling back to (rule_id, scope, group_key)
+// for legacy rules. The two key spaces never collide because the
+// instance form uses instance_id (always 'inst_<uuid>' or
+// 'seed_<template_id>') and the legacy form uses the bare template_id.
 func (e *Engine) evaluate(ctx context.Context) {
 	now := time.Now().UTC()
 	e.mu.Lock()
@@ -190,8 +232,9 @@ func (e *Engine) evaluate(ctx context.Context) {
 			slog.Warn("alerteng: rule failed", "rule", r.ID(), "err", err)
 			continue
 		}
+		instanceID := instanceIDOf(r)
 		for _, v := range violations {
-			key := alertKey(r.ID(), v.Scope, v.GroupKey)
+			key := alertKey(keyOwner(r), v.Scope, v.GroupKey)
 			currentlyViolating[key] = true
 
 			if existing, ok := e.open[key]; ok {
@@ -204,7 +247,8 @@ func (e *Engine) evaluate(ctx context.Context) {
 					lastActive: now,
 				}
 				e.write(ctx, alertRow{
-					ts: now, ruleID: r.ID(), severity: existing.severity, state: StateHeartbeat,
+					ts: now, ruleID: r.ID(), instanceID: instanceID,
+					severity: existing.severity, state: StateHeartbeat,
 					scope: v.Scope, groupKey: v.GroupKey, title: v.Title, body: v.Body, runbook: r.Runbook(),
 					labels: v.Labels,
 				})
@@ -215,12 +259,13 @@ func (e *Engine) evaluate(ctx context.Context) {
 				}
 				e.open[key] = openAlert{severity: severity, openedAt: now, lastActive: now}
 				e.write(ctx, alertRow{
-					ts: now, ruleID: r.ID(), severity: severity, state: StateOpened,
+					ts: now, ruleID: r.ID(), instanceID: instanceID,
+					severity: severity, state: StateOpened,
 					scope: v.Scope, groupKey: v.GroupKey, title: v.Title, body: v.Body, runbook: r.Runbook(),
 					labels: v.Labels,
 				})
 				slog.Info("alerteng: opened",
-					"rule", r.ID(), "severity", severity,
+					"rule", r.ID(), "instance", instanceID, "severity", severity,
 					"scope", v.Scope, "title", v.Title,
 				)
 			}
@@ -242,25 +287,77 @@ func (e *Engine) evaluate(ctx context.Context) {
 		if now.Sub(oa.clearedAt) < e.stabilityWindow {
 			continue
 		}
-		ruleID, scope, groupKey := splitAlertKey(key)
+		owner, scope, groupKey := splitAlertKey(key)
+		// Recover a usable rule_id for the close row. If the owner is
+		// an instance_id ('inst_…' or 'seed_<template>'), the
+		// template_id is recoverable from the seed prefix; otherwise
+		// the owner already IS the rule_id.
+		ruleID, instanceID := ruleAndInstanceFromOwner(owner)
 		e.write(ctx, alertRow{
-			ts: now, ruleID: ruleID, severity: oa.severity, state: StateClosed,
+			ts: now, ruleID: ruleID, instanceID: instanceID,
+			severity: oa.severity, state: StateClosed,
 			scope: scope, groupKey: groupKey,
 			title: "auto-closed: condition cleared",
 			body:  "condition cleared at evaluation tick",
 		})
-		slog.Info("alerteng: closed", "rule", ruleID, "scope", scope, "stable_for", now.Sub(oa.clearedAt))
+		slog.Info("alerteng: closed", "rule", ruleID, "instance", instanceID, "scope", scope, "stable_for", now.Sub(oa.clearedAt))
 		delete(e.open, key)
+	}
+}
+
+// instanceIDOf returns the instance_id for an InstanceRule, or "" for
+// legacy rules. Used to populate the alert_events.instance_id column.
+func instanceIDOf(r Rule) string {
+	if ir, ok := r.(InstanceRule); ok {
+		return ir.InstanceID()
+	}
+	return ""
+}
+
+// keyOwner returns the value used as the first segment of an alert
+// key — instance_id when present, rule_id otherwise. Keeps legacy
+// behavior intact for tests + degraded-mode deployments.
+func keyOwner(r Rule) string {
+	if ir, ok := r.(InstanceRule); ok {
+		return ir.InstanceID()
+	}
+	return r.ID()
+}
+
+// ruleAndInstanceFromOwner reverses keyOwner. Recognizes the seed-id
+// form so close events for seed instances carry both the rule_id and
+// the instance_id.
+func ruleAndInstanceFromOwner(owner string) (ruleID, instanceID string) {
+	switch {
+	case strings.HasPrefix(owner, "seed_"):
+		return owner[len("seed_"):], owner
+	case strings.HasPrefix(owner, "inst_"):
+		// We don't carry the template_id in the legacy alertKey shape
+		// for operator-created instances; closing rows leave rule_id
+		// blank rather than misattribute. The api lookups join on
+		// instance_id where it matters.
+		return "", owner
+	default:
+		return owner, ""
 	}
 }
 
 // bootstrapOpenState reconciles the in-memory open set from the
 // existing event ledger so a restart doesn't re-open alerts that
 // were already open and doesn't close ones that should remain open.
+//
+// Open-alert bridge for the instance migration: pre-instance rows
+// carry instance_id = '' on the new column (or the column is
+// freshly-added and defaults to ''). Those rows are reattributed to
+// the seed instance for their rule_id (instance_id = 'seed_' + rule_id)
+// before being placed in the in-memory open map. Net effect: a
+// post-migration restart heartbeats existing alerts under the new
+// keying instead of dupe-firing close + re-open events.
 func (e *Engine) bootstrapOpenState(ctx context.Context) error {
 	const q = `
 SELECT
     rule_id,
+    instance_id,
     scope,
     group_key,
     argMax(severity, ts) AS severity,
@@ -269,31 +366,40 @@ SELECT
     argMax(state, ts) AS state
 FROM alert_events
 WHERE ts >= now() - INTERVAL 7 DAY
-GROUP BY rule_id, scope, group_key`
+GROUP BY rule_id, instance_id, scope, group_key`
 	rows, err := e.conn.Query(ctx, q)
 	if err != nil {
 		return fmt.Errorf("alerteng: bootstrap query: %w", err)
 	}
 	defer rows.Close()
 	loaded := 0
+	bridged := 0
 	for rows.Next() {
 		var (
-			ruleID, scope, groupKey, severity, state string
-			openedAt, lastActiveAt                   time.Time
+			ruleID, instanceID, scope, groupKey, severity, state string
+			openedAt, lastActiveAt                               time.Time
 		)
-		if err := rows.Scan(&ruleID, &scope, &groupKey, &severity, &openedAt, &lastActiveAt, &state); err != nil {
+		if err := rows.Scan(&ruleID, &instanceID, &scope, &groupKey, &severity, &openedAt, &lastActiveAt, &state); err != nil {
 			return err
 		}
 		if state == StateClosed {
 			continue
 		}
-		e.open[alertKey(ruleID, scope, groupKey)] = openAlert{
+		// Bridge legacy events to the seed instance for their rule_id.
+		owner := instanceID
+		if owner == "" && ruleID != "" {
+			owner = "seed_" + ruleID
+			bridged++
+		} else if owner == "" {
+			continue // unattributable — skip
+		}
+		e.open[alertKey(owner, scope, groupKey)] = openAlert{
 			severity: severity, openedAt: openedAt, lastActive: lastActiveAt,
 		}
 		loaded++
 	}
 	if loaded > 0 {
-		slog.Info("alerteng: bootstrap restored open alerts", "count", loaded)
+		slog.Info("alerteng: bootstrap restored open alerts", "count", loaded, "bridged_pre_instance", bridged)
 	}
 	return rows.Err()
 }
@@ -301,7 +407,7 @@ GROUP BY rule_id, scope, group_key`
 // alertRow is what the engine writes to alert_events.
 type alertRow struct {
 	ts                                                 time.Time
-	ruleID, severity, state, scope, groupKey           string
+	ruleID, instanceID, severity, state, scope, groupKey string
 	title, body, runbook                               string
 	actor                                              string
 	labels                                             map[string]string
@@ -316,13 +422,13 @@ func (e *Engine) write(ctx context.Context, r alertRow) {
 	}
 	if err := e.conn.AsyncInsert(ctx,
 		`INSERT INTO alert_events
-		   (ts, rule_id, severity, state, scope, group_key, title, body, runbook, actor, labels)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		   (ts, rule_id, instance_id, severity, state, scope, group_key, title, body, runbook, actor, labels)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		false,
-		r.ts, r.ruleID, r.severity, r.state, r.scope, r.groupKey,
+		r.ts, r.ruleID, r.instanceID, r.severity, r.state, r.scope, r.groupKey,
 		r.title, r.body, r.runbook, r.actor, r.labels,
 	); err != nil {
-		slog.Warn("alerteng: write failed", "rule", r.ruleID, "err", err)
+		slog.Warn("alerteng: write failed", "rule", r.ruleID, "instance", r.instanceID, "err", err)
 	}
 }
 

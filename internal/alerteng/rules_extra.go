@@ -41,20 +41,28 @@ type InterfaceOperStatusChange struct {
 	LookbackHours   int // history window for picking "previous" status; default 24
 }
 
-func (InterfaceOperStatusChange) ID() string       { return "interface_oper_status_change" }
-func (InterfaceOperStatusChange) Severity() string { return SeverityWarning }
+func (InterfaceOperStatusChange) ID() string              { return "interface_oper_status_change" }
+func (InterfaceOperStatusChange) Severity() string        { return SeverityWarning }
+func (InterfaceOperStatusChange) DefaultSeverity() string { return SeverityWarning }
 func (InterfaceOperStatusChange) Runbook() string {
 	return "Fires when an interface's SNMP if_oper_status changes between successive polls. " +
 		"Investigate the device's interface for a hardware fault, an admin shutdown, or upstream " +
 		"link failure. Auto-clears once the new state has held steady through the engine's stability window."
 }
+func (r InterfaceOperStatusChange) DefaultParams() map[string]any {
+	return map[string]any{"debounce_seconds": r.DebounceSeconds, "lookback_hours": r.LookbackHours}
+}
 
 func (r InterfaceOperStatusChange) Evaluate(ctx context.Context, conn driver.Conn) ([]Violation, error) {
-	debounce := r.DebounceSeconds
+	return r.EvaluateScoped(ctx, conn, ScopeSelector{}, r.DefaultParams())
+}
+
+func (r InterfaceOperStatusChange) EvaluateScoped(ctx context.Context, conn driver.Conn, scope ScopeSelector, params map[string]any) ([]Violation, error) {
+	debounce := paramInt(params, "debounce_seconds", r.DebounceSeconds)
 	if debounce <= 0 {
 		debounce = 60
 	}
-	lookbackHours := r.LookbackHours
+	lookbackHours := paramInt(params, "lookback_hours", r.LookbackHours)
 	if lookbackHours <= 0 {
 		lookbackHours = 24
 	}
@@ -68,7 +76,8 @@ func (r InterfaceOperStatusChange) Evaluate(ctx context.Context, conn driver.Con
 	// reliably regardless of merge ordering. The status lookup uses
 	// argMax(... , polled_at) for the most recent and a filtered
 	// argMax with the prior polled_at for the second-most-recent.
-	const q = `
+	scopeFrag, scopeArgs := scopeWhere("exporter", "ifindex", scope)
+	q := `
 SELECT
     IPv6NumToString(exporter) AS exporter_ip,
     ifindex,
@@ -85,14 +94,17 @@ FROM (
         polled_at,
         max(polled_at) OVER (PARTITION BY exporter, ifindex) AS latest
     FROM device_snmp_interfaces
-    WHERE polled_at >= now() - INTERVAL ? HOUR
+    WHERE polled_at >= now() - INTERVAL ? HOUR` + scopeFrag + `
 )
 GROUP BY exporter, ifindex, latest
 HAVING curr_status != ''
    AND prev_status != ''
    AND curr_status != prev_status
    AND latest >= now() - INTERVAL ? SECOND`
-	rows, err := conn.Query(ctx, q, uint64(lookbackHours), uint64(debounce))
+	args := []any{uint64(lookbackHours)}
+	args = append(args, scopeArgs...)
+	args = append(args, uint64(debounce))
+	rows, err := conn.Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("interface_oper_status_change: %w", err)
 	}
@@ -162,25 +174,37 @@ type InterfaceUtilizationHigh struct {
 	WindowSeconds    int // bps measurement window, default 300
 }
 
-func (InterfaceUtilizationHigh) ID() string       { return "interface_utilization_high" }
-func (InterfaceUtilizationHigh) Severity() string { return SeverityWarning }
+func (InterfaceUtilizationHigh) ID() string              { return "interface_utilization_high" }
+func (InterfaceUtilizationHigh) Severity() string        { return SeverityWarning }
+func (InterfaceUtilizationHigh) DefaultSeverity() string { return SeverityWarning }
 func (InterfaceUtilizationHigh) Runbook() string {
 	return "Fires when an interface's recent throughput exceeds the configured percentage of its " +
 		"link speed. Check for a heavy talker, a backup window, or a saturated uplink. Verify " +
 		"if_speed_bps in the SNMP snapshot is correct (mis-set ifSpeed on legacy devices makes the " +
 		"percentage unreliable)."
 }
+func (r InterfaceUtilizationHigh) DefaultParams() map[string]any {
+	return map[string]any{
+		"threshold_pct":     r.ThresholdPct,
+		"critical_bump_pct": r.CriticalBumpPct,
+		"window_seconds":    r.WindowSeconds,
+	}
+}
 
 func (r InterfaceUtilizationHigh) Evaluate(ctx context.Context, conn driver.Conn) ([]Violation, error) {
-	threshold := r.ThresholdPct
+	return r.EvaluateScoped(ctx, conn, ScopeSelector{}, r.DefaultParams())
+}
+
+func (r InterfaceUtilizationHigh) EvaluateScoped(ctx context.Context, conn driver.Conn, scope ScopeSelector, params map[string]any) ([]Violation, error) {
+	threshold := paramInt(params, "threshold_pct", r.ThresholdPct)
 	if threshold <= 0 {
 		threshold = 80
 	}
-	bump := r.CriticalBumpPct
+	bump := paramInt(params, "critical_bump_pct", r.CriticalBumpPct)
 	if bump <= 0 {
 		bump = 15
 	}
-	window := r.WindowSeconds
+	window := paramInt(params, "window_seconds", r.WindowSeconds)
 	if window <= 0 {
 		window = 300
 	}
@@ -190,7 +214,8 @@ func (r InterfaceUtilizationHigh) Evaluate(ctx context.Context, conn driver.Conn
 	// (exporter, ifindex). Counters can wrap on 32-bit interfaces but
 	// most modern gear exports 64-bit ifHC* so we treat negatives as
 	// "skip this interface" rather than complicate the SQL.
-	const q = `
+	scopeFrag, scopeArgs := scopeWhere("exporter", "ifindex", scope)
+	q := `
 SELECT
     IPv6NumToString(s.exporter) AS exporter_ip,
     s.ifindex,
@@ -205,7 +230,7 @@ FROM (
         intDiv(toInt64(max(in_octets) - min(in_octets) + max(out_octets) - min(out_octets)) * 8,
                greatest(toInt64(?), 1)) AS bps
     FROM iface_counter_samples
-    WHERE ts >= now() - INTERVAL ? SECOND
+    WHERE ts >= now() - INTERVAL ? SECOND` + scopeFrag + `
     GROUP BY exporter, ifindex
     HAVING max(in_octets) >= min(in_octets) AND max(out_octets) >= min(out_octets)
 ) AS s
@@ -216,15 +241,17 @@ INNER JOIN (
         argMax(if_descr, polled_at)     AS if_descr,
         argMax(if_speed_bps, polled_at) AS if_speed_bps
     FROM device_snmp_interfaces
-    WHERE polled_at >= now() - INTERVAL 7 DAY
+    WHERE polled_at >= now() - INTERVAL 7 DAY` + scopeFrag + `
     GROUP BY exporter, ifindex
 ) AS iface USING (exporter, ifindex)
 WHERE iface.if_speed_bps > 0
   AND s.bps > 0
 HAVING pct >= ?`
-	rows, err := conn.Query(ctx, q,
-		uint64(window), uint64(window), uint64(threshold),
-	)
+	args := []any{uint64(window), uint64(window)}
+	args = append(args, scopeArgs...)
+	args = append(args, scopeArgs...)
+	args = append(args, uint64(threshold))
+	rows, err := conn.Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("interface_utilization_high: %w", err)
 	}
@@ -299,26 +326,35 @@ type InterfaceErrorsRate struct {
 	ErrorsPerMin  int
 }
 
-func (InterfaceErrorsRate) ID() string       { return "interface_errors_rate" }
-func (InterfaceErrorsRate) Severity() string { return SeverityWarning }
+func (InterfaceErrorsRate) ID() string              { return "interface_errors_rate" }
+func (InterfaceErrorsRate) Severity() string        { return SeverityWarning }
+func (InterfaceErrorsRate) DefaultSeverity() string { return SeverityWarning }
 func (InterfaceErrorsRate) Runbook() string {
 	return "Fires when an interface's combined error+discard rate exceeds the threshold. " +
 		"Common causes: duplex mismatch, faulty optic, oversubscribed buffer, or a misconfigured " +
 		"QoS policy dropping legitimate traffic. Cross-check if_in_errors / if_out_errors trend " +
 		"in the Devices view."
 }
+func (r InterfaceErrorsRate) DefaultParams() map[string]any {
+	return map[string]any{"window_seconds": r.WindowSeconds, "errors_per_min": r.ErrorsPerMin}
+}
 
 func (r InterfaceErrorsRate) Evaluate(ctx context.Context, conn driver.Conn) ([]Violation, error) {
-	window := r.WindowSeconds
+	return r.EvaluateScoped(ctx, conn, ScopeSelector{}, r.DefaultParams())
+}
+
+func (r InterfaceErrorsRate) EvaluateScoped(ctx context.Context, conn driver.Conn, scope ScopeSelector, params map[string]any) ([]Violation, error) {
+	window := paramInt(params, "window_seconds", r.WindowSeconds)
 	if window <= 0 {
 		window = 300
 	}
-	threshold := r.ErrorsPerMin
+	threshold := paramInt(params, "errors_per_min", r.ErrorsPerMin)
 	if threshold <= 0 {
 		threshold = 10
 	}
 	// Sum the deltas across all four counters, normalize to per-minute.
-	const q = `
+	scopeFrag, scopeArgs := scopeWhere("exporter", "ifindex", scope)
+	q := `
 SELECT
     IPv6NumToString(c.exporter) AS exporter_ip,
     c.ifindex,
@@ -336,7 +372,7 @@ FROM (
             (max(out_discards)- min(out_discards))
         ) AS errs
     FROM iface_counter_samples
-    WHERE ts >= now() - INTERVAL ? SECOND
+    WHERE ts >= now() - INTERVAL ? SECOND` + scopeFrag + `
     GROUP BY exporter, ifindex
     HAVING max(in_errors)   >= min(in_errors)
        AND max(out_errors)  >= min(out_errors)
@@ -349,14 +385,16 @@ LEFT JOIN (
         ifindex,
         argMax(if_descr, polled_at) AS if_descr
     FROM device_snmp_interfaces
-    WHERE polled_at >= now() - INTERVAL 7 DAY
+    WHERE polled_at >= now() - INTERVAL 7 DAY` + scopeFrag + `
     GROUP BY exporter, ifindex
 ) AS iface USING (exporter, ifindex)
 WHERE c.errs > 0
 HAVING per_min >= ?`
-	rows, err := conn.Query(ctx, q,
-		uint64(window), uint64(window), uint64(threshold),
-	)
+	args := []any{uint64(window), uint64(window)}
+	args = append(args, scopeArgs...)
+	args = append(args, scopeArgs...)
+	args = append(args, uint64(threshold))
+	rows, err := conn.Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("interface_errors_rate: %w", err)
 	}
@@ -424,8 +462,9 @@ type TopTalkerBaselineAnomaly struct {
 	MinBaselineBytes  uint64
 }
 
-func (TopTalkerBaselineAnomaly) ID() string       { return "top_talker_baseline_anomaly" }
-func (TopTalkerBaselineAnomaly) Severity() string { return SeverityWarning }
+func (TopTalkerBaselineAnomaly) ID() string              { return "top_talker_baseline_anomaly" }
+func (TopTalkerBaselineAnomaly) Severity() string        { return SeverityWarning }
+func (TopTalkerBaselineAnomaly) DefaultSeverity() string { return SeverityWarning }
 func (TopTalkerBaselineAnomaly) Runbook() string {
 	return "Fires when a (src,dst) pair's bytes in the last hour are more than the configured " +
 		"multiplier of the same hour-of-day baseline averaged over the last 7 days. Investigate " +
@@ -433,13 +472,20 @@ func (TopTalkerBaselineAnomaly) Runbook() string {
 		"data exfiltration. Tune min_baseline_bytes upward if quiet exporters dominate the alert " +
 		"stream."
 }
+func (r TopTalkerBaselineAnomaly) DefaultParams() map[string]any {
+	return map[string]any{"multiplier": r.Multiplier, "min_baseline_bytes": r.MinBaselineBytes}
+}
 
 func (r TopTalkerBaselineAnomaly) Evaluate(ctx context.Context, conn driver.Conn) ([]Violation, error) {
-	mult := r.Multiplier
+	return r.EvaluateScoped(ctx, conn, ScopeSelector{}, r.DefaultParams())
+}
+
+func (r TopTalkerBaselineAnomaly) EvaluateScoped(ctx context.Context, conn driver.Conn, _ ScopeSelector, params map[string]any) ([]Violation, error) {
+	mult := paramFloat64(params, "multiplier", r.Multiplier)
 	if mult < 1.0 {
 		mult = 3.0
 	}
-	minBaseline := r.MinBaselineBytes
+	minBaseline := paramUint64(params, "min_baseline_bytes", r.MinBaselineBytes)
 	if minBaseline == 0 {
 		minBaseline = 1_000_000_000 // 1 GB
 	}

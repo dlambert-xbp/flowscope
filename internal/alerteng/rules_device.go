@@ -47,29 +47,41 @@ type DeviceCPUHigh struct {
 	LookbackSeconds int
 }
 
-func (DeviceCPUHigh) ID() string       { return "device_cpu_high" }
-func (DeviceCPUHigh) Severity() string { return SeverityWarning }
+func (DeviceCPUHigh) ID() string              { return "device_cpu_high" }
+func (DeviceCPUHigh) Severity() string        { return SeverityWarning }
+func (DeviceCPUHigh) DefaultSeverity() string { return SeverityWarning }
 func (DeviceCPUHigh) Runbook() string {
 	return "Fires when an SNMP-polled CPU is at or above the configured percentage of its " +
 		"capacity. Common causes: runaway management process, hot path through the data " +
 		"plane, control-plane policer event. Cross-check the Devices summary for the CPU " +
 		"sparkline and inspect the `source` label to see which MIB drove the reading."
 }
+func (r DeviceCPUHigh) DefaultParams() map[string]any {
+	return map[string]any{
+		"threshold_pct":     r.ThresholdPct,
+		"critical_bump_pct": r.CriticalBumpPct,
+		"lookback_seconds":  r.LookbackSeconds,
+	}
+}
 
 func (r DeviceCPUHigh) Evaluate(ctx context.Context, conn driver.Conn) ([]Violation, error) {
-	threshold := r.ThresholdPct
+	return r.EvaluateScoped(ctx, conn, ScopeSelector{}, r.DefaultParams())
+}
+
+func (r DeviceCPUHigh) EvaluateScoped(ctx context.Context, conn driver.Conn, scope ScopeSelector, params map[string]any) ([]Violation, error) {
+	threshold := paramInt(params, "threshold_pct", r.ThresholdPct)
 	if threshold <= 0 {
 		threshold = 80
 	}
-	bump := r.CriticalBumpPct
+	bump := paramInt(params, "critical_bump_pct", r.CriticalBumpPct)
 	if bump <= 0 {
 		bump = 15
 	}
-	lookback := r.LookbackSeconds
+	lookback := paramInt(params, "lookback_seconds", r.LookbackSeconds)
 	if lookback <= 0 {
 		lookback = 1800
 	}
-	rows, err := queryResourcePct(ctx, conn, "cpu", lookback, threshold)
+	rows, err := queryResourcePct(ctx, conn, "cpu", lookback, threshold, scope)
 	if err != nil {
 		return nil, fmt.Errorf("device_cpu_high: %w", err)
 	}
@@ -97,29 +109,41 @@ type DeviceMemoryHigh struct {
 	LookbackSeconds int
 }
 
-func (DeviceMemoryHigh) ID() string       { return "device_memory_high" }
-func (DeviceMemoryHigh) Severity() string { return SeverityWarning }
+func (DeviceMemoryHigh) ID() string              { return "device_memory_high" }
+func (DeviceMemoryHigh) Severity() string        { return SeverityWarning }
+func (DeviceMemoryHigh) DefaultSeverity() string { return SeverityWarning }
 func (DeviceMemoryHigh) Runbook() string {
 	return "Fires when an SNMP-polled memory pool is at or above the configured percentage " +
 		"of its capacity. Percent is computed from value_bytes / max_bytes when both are " +
 		"present; otherwise the device's reported value_percent is used. Common causes: " +
 		"memory leak in a daemon, stuck buffer queue, under-provisioned device."
 }
+func (r DeviceMemoryHigh) DefaultParams() map[string]any {
+	return map[string]any{
+		"threshold_pct":     r.ThresholdPct,
+		"critical_bump_pct": r.CriticalBumpPct,
+		"lookback_seconds":  r.LookbackSeconds,
+	}
+}
 
 func (r DeviceMemoryHigh) Evaluate(ctx context.Context, conn driver.Conn) ([]Violation, error) {
-	threshold := r.ThresholdPct
+	return r.EvaluateScoped(ctx, conn, ScopeSelector{}, r.DefaultParams())
+}
+
+func (r DeviceMemoryHigh) EvaluateScoped(ctx context.Context, conn driver.Conn, scope ScopeSelector, params map[string]any) ([]Violation, error) {
+	threshold := paramInt(params, "threshold_pct", r.ThresholdPct)
 	if threshold <= 0 {
 		threshold = 85
 	}
-	bump := r.CriticalBumpPct
+	bump := paramInt(params, "critical_bump_pct", r.CriticalBumpPct)
 	if bump <= 0 {
 		bump = 10
 	}
-	lookback := r.LookbackSeconds
+	lookback := paramInt(params, "lookback_seconds", r.LookbackSeconds)
 	if lookback <= 0 {
 		lookback = 1800
 	}
-	rows, err := queryResourcePct(ctx, conn, "memory", lookback, threshold)
+	rows, err := queryResourcePct(ctx, conn, "memory", lookback, threshold, scope)
 	if err != nil {
 		return nil, fmt.Errorf("device_memory_high: %w", err)
 	}
@@ -144,8 +168,9 @@ type DeviceStorageHigh struct {
 	LookbackSeconds int
 }
 
-func (DeviceStorageHigh) ID() string       { return "device_storage_high" }
-func (DeviceStorageHigh) Severity() string { return SeverityWarning }
+func (DeviceStorageHigh) ID() string              { return "device_storage_high" }
+func (DeviceStorageHigh) Severity() string        { return SeverityWarning }
+func (DeviceStorageHigh) DefaultSeverity() string { return SeverityWarning }
 func (DeviceStorageHigh) Runbook() string {
 	return "Fires when a filesystem on a polled device crosses the configured percentage " +
 		"of its capacity. On network gear this is typically bootflash, flash, or harddisk; " +
@@ -153,21 +178,32 @@ func (DeviceStorageHigh) Runbook() string {
 		"causes: log directory growth, accumulated crashinfo, retained images from a " +
 		"prior upgrade."
 }
+func (r DeviceStorageHigh) DefaultParams() map[string]any {
+	return map[string]any{
+		"threshold_pct":     r.ThresholdPct,
+		"critical_bump_pct": r.CriticalBumpPct,
+		"lookback_seconds":  r.LookbackSeconds,
+	}
+}
 
 func (r DeviceStorageHigh) Evaluate(ctx context.Context, conn driver.Conn) ([]Violation, error) {
-	threshold := r.ThresholdPct
+	return r.EvaluateScoped(ctx, conn, ScopeSelector{}, r.DefaultParams())
+}
+
+func (r DeviceStorageHigh) EvaluateScoped(ctx context.Context, conn driver.Conn, scope ScopeSelector, params map[string]any) ([]Violation, error) {
+	threshold := paramInt(params, "threshold_pct", r.ThresholdPct)
 	if threshold <= 0 {
 		threshold = 85
 	}
-	bump := r.CriticalBumpPct
+	bump := paramInt(params, "critical_bump_pct", r.CriticalBumpPct)
 	if bump <= 0 {
 		bump = 10
 	}
-	lookback := r.LookbackSeconds
+	lookback := paramInt(params, "lookback_seconds", r.LookbackSeconds)
 	if lookback <= 0 {
 		lookback = 3600
 	}
-	rows, err := queryResourcePct(ctx, conn, "storage", lookback, threshold)
+	rows, err := queryResourcePct(ctx, conn, "storage", lookback, threshold, scope)
 	if err != nil {
 		return nil, fmt.Errorf("device_storage_high: %w", err)
 	}
@@ -195,8 +231,9 @@ type DeviceUnreachable struct {
 	LookbackHours int
 }
 
-func (DeviceUnreachable) ID() string       { return "device_unreachable" }
-func (DeviceUnreachable) Severity() string { return SeverityCritical }
+func (DeviceUnreachable) ID() string              { return "device_unreachable" }
+func (DeviceUnreachable) Severity() string        { return SeverityCritical }
+func (DeviceUnreachable) DefaultSeverity() string { return SeverityCritical }
 func (DeviceUnreachable) Runbook() string {
 	return "Fires when SNMP polling for a previously-seen device is failing or has gone " +
 		"silent. Common causes: device powered off, ACL or firewall change blocking " +
@@ -204,29 +241,38 @@ func (DeviceUnreachable) Runbook() string {
 		"updating the FlowScope binding. The Devices view shows the most recent walk's " +
 		"timestamp and poll_status."
 }
+func (r DeviceUnreachable) DefaultParams() map[string]any {
+	return map[string]any{"stale_seconds": r.StaleSeconds, "lookback_hours": r.LookbackHours}
+}
 
 func (r DeviceUnreachable) Evaluate(ctx context.Context, conn driver.Conn) ([]Violation, error) {
-	stale := r.StaleSeconds
+	return r.EvaluateScoped(ctx, conn, ScopeSelector{}, r.DefaultParams())
+}
+
+func (r DeviceUnreachable) EvaluateScoped(ctx context.Context, conn driver.Conn, scope ScopeSelector, params map[string]any) ([]Violation, error) {
+	stale := paramInt(params, "stale_seconds", r.StaleSeconds)
 	if stale <= 0 {
-		stale = 2700 // 3× the default 15-min walk interval
+		stale = 2700
 	}
-	lookbackHours := r.LookbackHours
+	lookbackHours := paramInt(params, "lookback_hours", r.LookbackHours)
 	if lookbackHours <= 0 {
 		lookbackHours = 24
 	}
-	const q = `
+	scopeFrag, scopeArgs := scopeWhere("exporter", "", scope)
+	q := `
 SELECT IPv6NumToString(exporter)      AS exporter_ip,
        argMax(poll_status, polled_at) AS status,
        argMax(sys_name, polled_at)    AS sys_name,
        max(polled_at)                 AS latest
 FROM device_inventory
-WHERE polled_at >= now() - INTERVAL ? HOUR
+WHERE polled_at >= now() - INTERVAL ? HOUR` + scopeFrag + `
 GROUP BY exporter
 HAVING (status = 'error' AND latest >= now() - INTERVAL ? SECOND)
     OR latest < now() - INTERVAL ? SECOND`
-	rows, err := conn.Query(ctx, q,
-		uint64(lookbackHours), uint64(stale), uint64(stale),
-	)
+	args := []any{uint64(lookbackHours)}
+	args = append(args, scopeArgs...)
+	args = append(args, uint64(stale), uint64(stale))
+	rows, err := conn.Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("device_unreachable: %w", err)
 	}
@@ -270,11 +316,18 @@ type resourceRow struct {
 // bytes_total when both are non-zero (memory / storage), otherwise the
 // device-reported value_percent (cpu, or the bytes-less subset of
 // memory/storage rows).
+//
+// scope filters the inner aggregation by exporter when set. Component-
+// level filtering (alerting on one specific filesystem on one device)
+// is not yet exposed via the scope selector — components are
+// device-specific strings and a label-based scope (phase 3) is the
+// right place to expose that.
 func queryResourcePct(
 	ctx context.Context, conn driver.Conn,
-	kind string, lookbackSeconds, thresholdPct int,
+	kind string, lookbackSeconds, thresholdPct int, scope ScopeSelector,
 ) ([]resourceRow, error) {
-	const q = `
+	scopeFrag, scopeArgs := scopeWhere("exporter", "", scope)
+	q := `
 SELECT
     exporter_ip, component, source, bytes_used, bytes_total, pct
 FROM (
@@ -290,13 +343,14 @@ FROM (
                         / toFloat64(argMax(max_bytes, polled_at)),
                     argMax(value_percent, polled_at))) AS pct
     FROM device_resource_samples
-    WHERE kind = ? AND polled_at >= now() - INTERVAL ? SECOND
+    WHERE kind = ? AND polled_at >= now() - INTERVAL ? SECOND` + scopeFrag + `
     GROUP BY exporter, component
 ) AS s
 WHERE pct >= ?`
-	rows, err := conn.Query(ctx, q,
-		kind, uint64(lookbackSeconds), uint64(thresholdPct),
-	)
+	args := []any{kind, uint64(lookbackSeconds)}
+	args = append(args, scopeArgs...)
+	args = append(args, uint64(thresholdPct))
+	rows, err := conn.Query(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}

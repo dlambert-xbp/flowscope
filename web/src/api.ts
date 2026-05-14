@@ -627,6 +627,58 @@ export type AlertRuleSetting = {
   updated_by?: string
 }
 
+// Per-device alerting (phase 1) — see docs/snmp-per-device-alerting.html.
+//
+// AlertTemplate is one built-in detector the engine knows how to
+// evaluate. The wizard composes (template + scope + params) into an
+// AlertRuleInstance the operator can save.
+export type AlertScopeKind = 'exporter' | 'interface' | 'bgp_peer'
+
+export type AlertTemplate = {
+  template_id: string
+  label: string
+  description: string
+  runbook: string
+  params: AlertRuleParamSpec[]
+  default_params: Record<string, unknown>
+  default_severity: 'critical' | 'warning' | 'info'
+  scope_kinds: AlertScopeKind[]
+}
+
+export type AlertScopeSelector = {
+  exporters?: string[]
+  exporter_cidrs?: string[]
+  exporter_labels?: Record<string, string>
+  ifindex?: number[]
+  ifname_glob?: string
+  bgp_peers?: string[]
+  asn_remote?: number[]
+}
+
+export type AlertRuleInstance = {
+  instance_id: string
+  template_id: string
+  name: string
+  enabled: boolean
+  severity?: string
+  scope: AlertScopeSelector
+  params?: Record<string, unknown>
+  runbook?: string
+  channels?: string[]
+  is_seed: boolean
+  created_at?: string
+  updated_at?: string
+  updated_by?: string
+}
+
+export type AlertScopePreview = {
+  template_id: string
+  matched_all: boolean
+  matched_exporters: string[]
+  matched_ifindex: number[]
+  note?: string
+}
+
 export type Webhook = {
   id: string
   name: string
@@ -1145,6 +1197,33 @@ export const api = {
     ),
   putAlertRule: (s: AlertRuleSetting) =>
     settingsWrite(`/api/settings/alert-rules/${encodeURIComponent(s.rule_id)}`, 'PUT', s),
+
+  /* --------------------- Alert templates + instances (phase 1) --------------------- */
+  listAlertTemplates: () =>
+    getJSON<{ templates: AlertTemplate[] }>(`/api/alerts/templates`),
+  listAlertInstances: (templateID?: string) =>
+    getJSON<{ count: number; rows: AlertRuleInstance[] }>(
+      templateID
+        ? `/api/alerts/instances?template_id=${encodeURIComponent(templateID)}`
+        : `/api/alerts/instances`,
+    ),
+  getAlertInstance: (id: string) =>
+    getJSON<AlertRuleInstance>(`/api/alerts/instances/${encodeURIComponent(id)}`),
+  createAlertInstance: (in_: Partial<AlertRuleInstance>) =>
+    settingsWrite<AlertRuleInstance>(`/api/alerts/instances`, 'POST', in_),
+  updateAlertInstance: (in_: Partial<AlertRuleInstance> & { instance_id: string }) =>
+    settingsWrite<AlertRuleInstance>(
+      `/api/alerts/instances/${encodeURIComponent(in_.instance_id)}`,
+      'PUT',
+      in_,
+    ),
+  deleteAlertInstance: (id: string) =>
+    settingsWrite(`/api/alerts/instances/${encodeURIComponent(id)}`, 'DELETE'),
+  previewAlertInstance: (templateID: string, scope: AlertScopeSelector) =>
+    settingsWrite<AlertScopePreview>(`/api/alerts/instances/preview`, 'POST', {
+      template_id: templateID,
+      scope,
+    }),
 
   /* --------------------- Webhooks --------------------- */
   listWebhooks: () =>
