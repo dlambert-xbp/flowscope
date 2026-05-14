@@ -100,3 +100,82 @@ func TestBgpAdminStatusName(t *testing.T) {
 		t.Errorf("admin 0 should be empty")
 	}
 }
+
+func TestParseAristaBgpV2Index_IPv4(t *testing.T) {
+	// instance=1, IPv4 peer 10.0.0.1 → 1.1.4.10.0.0.1
+	inst, at, addr, ok := parseAristaBgpV2Index("1.1.4.10.0.0.1")
+	if !ok {
+		t.Fatalf("parse failed")
+	}
+	if inst != 1 {
+		t.Errorf("instance = %d; want 1", inst)
+	}
+	if at != 1 {
+		t.Errorf("addrType = %d; want 1 (ipv4)", at)
+	}
+	if addr != "10.0.0.1" {
+		t.Errorf("addr = %q; want 10.0.0.1", addr)
+	}
+}
+
+func TestParseAristaBgpV2Index_NonDefaultInstance(t *testing.T) {
+	// instance=7, IPv4 peer 192.0.2.42 → 7.1.4.192.0.2.42
+	inst, at, addr, ok := parseAristaBgpV2Index("7.1.4.192.0.2.42")
+	if !ok {
+		t.Fatalf("parse failed")
+	}
+	if inst != 7 {
+		t.Errorf("instance = %d; want 7", inst)
+	}
+	if at != 1 || addr != "192.0.2.42" {
+		t.Errorf("addrType/addr = %d/%q; want 1/192.0.2.42", at, addr)
+	}
+}
+
+func TestParseAristaBgpV2Index_IPv6(t *testing.T) {
+	// instance=2, IPv6 peer 2001:db8::1.
+	// Bytes: 20 01 0d b8 00 00 00 00 00 00 00 00 00 00 00 01
+	// Decimal: 32 1 13 184 0×11 1
+	// Suffix: 2.2.16.32.1.13.184.0.0.0.0.0.0.0.0.0.0.0.1
+	inst, at, addr, ok := parseAristaBgpV2Index("2.2.16.32.1.13.184.0.0.0.0.0.0.0.0.0.0.0.1")
+	if !ok {
+		t.Fatalf("parse failed")
+	}
+	if inst != 2 || at != 2 {
+		t.Errorf("instance/addrType = %d/%d; want 2/2", inst, at)
+	}
+	if addr != "2001:db8::1" {
+		t.Errorf("addr = %q; want 2001:db8::1", addr)
+	}
+}
+
+func TestParseAristaBgpV2Index_RejectsBadShape(t *testing.T) {
+	cases := []string{
+		"",
+		"1",
+		"1.1",       // missing addrLen
+		"1.1.4",     // missing addr bytes
+		"1.1.4.10",  // truncated address
+		"1.99.4.10.0.0.1", // unknown InetAddressType
+		"1.1.5.10.0.0.1.0", // wrong addrLen for IPv4
+	}
+	for _, s := range cases {
+		if _, _, _, ok := parseAristaBgpV2Index(s); ok {
+			t.Errorf("parseAristaBgpV2Index(%q) returned ok=true; expected reject", s)
+		}
+	}
+}
+
+func TestAristaInstanceToVRF(t *testing.T) {
+	cases := map[uint32]string{
+		0:  VRFDefault,
+		1:  VRFDefault,
+		2:  "vrf-2",
+		42: "vrf-42",
+	}
+	for in, want := range cases {
+		if got := aristaInstanceToVRF(in); got != want {
+			t.Errorf("aristaInstanceToVRF(%d) = %q; want %q", in, got, want)
+		}
+	}
+}
