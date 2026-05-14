@@ -3,6 +3,7 @@ package snmpx
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net"
 	"strconv"
 	"strings"
@@ -259,18 +260,30 @@ func walkBGPPerVRFArista(ctx context.Context, cfg Config, target string) []BGPPe
 	if cfg.Version == "v3" {
 		// v3 needs ContextName plumbing — TODO. v2c covers the
 		// common Arista deployment.
+		slog.Debug("snmp: bgp per-vrf skipped (v3 not yet supported)", "exporter", target)
 		return nil
 	}
 	if cfg.Community == "" {
+		slog.Debug("snmp: bgp per-vrf skipped (no community)", "exporter", target)
 		return nil
 	}
 	vrfs := discoverAristaVRFs(ctx, cfg, target)
+	slog.Info("snmp: bgp per-vrf vrf discovery",
+		"exporter", target,
+		"vrfs_found", len(vrfs),
+		"vrfs", vrfs,
+	)
 	if len(vrfs) == 0 {
 		return nil
 	}
 	var all []BGPPeer
 	for _, vrf := range vrfs {
 		peers := walkVRFContextBGP(ctx, cfg, target, vrf)
+		slog.Info("snmp: bgp per-vrf walked",
+			"exporter", target,
+			"vrf", vrf,
+			"peers", len(peers),
+		)
 		all = append(all, peers...)
 	}
 	return all
@@ -283,14 +296,16 @@ func walkBGPPerVRFArista(ctx context.Context, cfg Config, target string) []BGPPe
 func discoverAristaVRFs(ctx context.Context, cfg Config, target string) []string {
 	g, err := buildGoSNMP(target, cfg, ctx)
 	if err != nil {
+		slog.Warn("snmp: vrf discovery dial failed", "exporter", target, "err", err)
 		return nil
 	}
 	if err := g.Connect(); err != nil {
+		slog.Warn("snmp: vrf discovery connect failed", "exporter", target, "err", err)
 		return nil
 	}
 	defer g.Conn.Close()
 	var names []string
-	_ = g.BulkWalk(OIDAristaVrfRoutingStatus, func(pdu gosnmp.SnmpPDU) error {
+	walkErr := g.BulkWalk(OIDAristaVrfRoutingStatus, func(pdu gosnmp.SnmpPDU) error {
 		n := strings.TrimPrefix(pdu.Name, ".")
 		if !strings.HasPrefix(n, OIDAristaVrfRoutingStatus+".") {
 			return nil
@@ -303,6 +318,9 @@ func discoverAristaVRFs(ctx context.Context, cfg Config, target string) []string
 		names = append(names, name)
 		return nil
 	})
+	if walkErr != nil {
+		slog.Warn("snmp: vrf discovery walk failed", "exporter", target, "err", walkErr)
+	}
 	return names
 }
 
