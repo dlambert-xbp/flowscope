@@ -199,6 +199,7 @@ function InstanceForm({
   const [ifindexText, setIfindexText] = useState((initial.scope.ifindex ?? []).join(', '))
   const [bgpPeersText, setBgpPeersText] = useState((initial.scope.bgp_peers ?? []).join(', '))
   const [asnRemoteText, setAsnRemoteText] = useState((initial.scope.asn_remote ?? []).join(', '))
+  const [vrfsText, setVrfsText] = useState((initial.scope.vrfs ?? []).join(', '))
   const [error, setError] = useState<string | null>(null)
   const qc = useQueryClient()
 
@@ -222,6 +223,8 @@ function InstanceForm({
         if (peers.length > 0) scope.bgp_peers = peers
         const asns = parseList(asnRemoteText).map(Number).filter((n) => Number.isFinite(n))
         if (asns.length > 0) scope.asn_remote = asns
+        const vrfs = parseList(vrfsText)
+        if (vrfs.length > 0) scope.vrfs = vrfs
       }
       const body: Partial<AlertRuleInstance> & { instance_id?: string } = {
         ...draft,
@@ -330,6 +333,16 @@ function InstanceForm({
                   value={asnRemoteText}
                   onChange={(e) => setAsnRemoteText(e.target.value)}
                   placeholder="65001, 65002"
+                  className="s-input"
+                />
+              </Field>
+            )}
+            {supportsBGPPeer && (
+              <Field label="VRFs" hint="comma-separated VRF names (empty = all VRFs incl. default)">
+                <input
+                  value={vrfsText}
+                  onChange={(e) => setVrfsText(e.target.value)}
+                  placeholder="default, mgmt, CUSTOMER-A"
                   className="s-input"
                 />
               </Field>
@@ -450,6 +463,7 @@ function scopeSummary(scope: AlertScopeSelector, kinds: AlertScopeKind[]): React
   if (scope.ifindex?.length) parts.push(`${scope.ifindex.length} ifindex`)
   if (scope.bgp_peers?.length) parts.push(`${scope.bgp_peers.length} bgp peer${scope.bgp_peers.length === 1 ? '' : 's'}`)
   if (scope.asn_remote?.length) parts.push(`${scope.asn_remote.length} asn`)
+  if (scope.vrfs?.length) parts.push(`vrf=${scope.vrfs.join('|')}`)
   if (scope.exporter_labels && Object.keys(scope.exporter_labels).length > 0) {
     parts.push('label-matched')
   }

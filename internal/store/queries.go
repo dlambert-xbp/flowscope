@@ -2218,3 +2218,112 @@ LIMIT ?`
 	}
 	return out, nil
 }
+
+/* ------------------------------- BGP peers ------------------------------- */
+
+// BGPPeerRow is one entry on /api/devices/{exporter}/bgp. Mirrors
+// argMax(*, polled_at) per (exporter, vrf, peer_addr) so the response
+// shows the most recent observed state for each peer.
+type BGPPeerRow struct {
+	VRF             string    `json:"vrf"`
+	PeerAddr        string    `json:"peer_addr"`
+	PeerASN         uint32    `json:"peer_asn"`
+	LocalASN        uint32    `json:"local_asn"`
+	State           string    `json:"state"`
+	AdminStatus     string    `json:"admin_status"`
+	EstablishedAt   time.Time `json:"established_at"`
+	LastChangeAt    time.Time `json:"last_change_at"`
+	AFI             string    `json:"afi"`
+	SAFI            string    `json:"safi"`
+	PeerDescription string    `json:"peer_description"`
+	Source          string    `json:"source"`
+	PolledAt        time.Time `json:"polled_at"`
+}
+
+// BGPPeersByVRF groups peer rows under their VRF for the device
+// detail page. Order is stable: 'default' VRF first (the common
+// case), then alphabetical so customer / mgmt instances render
+// predictably.
+type BGPPeersByVRF struct {
+	VRF       string       `json:"vrf"`
+	PeerCount int          `json:"peer_count"`
+	UpCount   int          `json:"up_count"`
+	DownCount int          `json:"down_count"`
+	Peers     []BGPPeerRow `json:"peers"`
+}
+
+// QueryDeviceBGP returns the latest peer state per (exporter, vrf,
+// peer_addr), grouped by VRF. Looks back 24h so a peer we stopped
+// seeing recently still surfaces with its last-known state — the UI
+// can render a "stale poll" hint based on PolledAt.
+func QueryDeviceBGP(ctx context.Context, conn driver.Conn, exporter netip.Addr) ([]BGPPeersByVRF, error) {
+	const q = `
+SELECT
+    vrf,
+    IPv6NumToString(peer_addr)            AS peer_ip,
+    argMax(peer_asn, polled_at)           AS peer_asn,
+    argMax(local_asn, polled_at)          AS local_asn,
+    argMax(state, polled_at)              AS state,
+    argMax(admin_status, polled_at)       AS admin_status,
+    argMax(established_at, polled_at)     AS established_at,
+    argMax(last_change_at, polled_at)     AS last_change_at,
+    argMax(afi, polled_at)                AS afi,
+    argMax(safi, polled_at)               AS safi,
+    argMax(peer_description, polled_at)   AS peer_description,
+    argMax(source, polled_at)             AS source,
+    max(polled_at)                        AS latest
+FROM bgp_peers
+WHERE exporter = ? AND polled_at >= now() - INTERVAL 24 HOUR
+GROUP BY vrf, peer_addr
+ORDER BY vrf = 'default' DESC, vrf, peer_ip`
+	expIP := toIPv6(exporter)
+	rows, err := conn.Query(ctx, q, expIP)
+	if err != nil {
+		return nil, fmt.Errorf("store: query device bgp: %w", err)
+	}
+	defer rows.Close()
+	groups := make(map[string]*BGPPeersByVRF)
+	order := []string{}
+	for rows.Next() {
+		var r BGPPeerRow
+		var rawPeer string
+		if err := rows.Scan(
+			&r.VRF, &rawPeer, &r.PeerASN, &r.LocalASN,
+			&r.State, &r.AdminStatus,
+			&r.EstablishedAt, &r.LastChangeAt,
+			&r.AFI, &r.SAFI, &r.PeerDescription, &r.Source,
+			&r.PolledAt,
+		); err != nil {
+			return nil, fmt.Errorf("store: scan bgp peer: %w", err)
+		}
+		// IPv6NumToString returns ::ffff:1.2.3.4 for v4-mapped
+		// addresses; trim the prefix so the response carries clean
+		// dotted-quad form that the UI can chip alongside the rest of
+		// the addresses we render.
+		if len(rawPeer) > 7 && rawPeer[:7] == "::ffff:" {
+			rawPeer = rawPeer[7:]
+		}
+		r.PeerAddr = rawPeer
+		g, ok := groups[r.VRF]
+		if !ok {
+			g = &BGPPeersByVRF{VRF: r.VRF}
+			groups[r.VRF] = g
+			order = append(order, r.VRF)
+		}
+		g.Peers = append(g.Peers, r)
+		g.PeerCount++
+		if r.State == "established" {
+			g.UpCount++
+		} else {
+			g.DownCount++
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	out := make([]BGPPeersByVRF, 0, len(order))
+	for _, v := range order {
+		out = append(out, *groups[v])
+	}
+	return out, nil
+}

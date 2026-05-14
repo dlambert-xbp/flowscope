@@ -2,6 +2,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Fragment, useCallback, useEffect, useState, type ReactNode } from 'react'
 import { api, fmt, isEpoch, labelExporter, labelInterface } from '../api'
 import type {
+  BGPPeerRow,
   Device,
   DeviceInventory,
   DeviceResource,
@@ -600,7 +601,7 @@ function DirectoryRow({
 
 /* ----------------------------- Feature view ----------------------------- */
 
-type SubTab = 'summary' | 'interfaces' | 'flows' | 'neighbors'
+type SubTab = 'summary' | 'interfaces' | 'flows' | 'neighbors' | 'bgp'
 
 function Feature({
   exporter,
@@ -674,6 +675,7 @@ function Feature({
             }}
           />
         )}
+        {sub === 'bgp' && <BGPTab exporter={exporter} />}
       </div>
     </article>
   )
@@ -904,6 +906,7 @@ function SubTabs({ active, onChange }: { active: SubTab; onChange: (s: SubTab) =
       <Tab id="summary" active={active} onChange={onChange}>Summary</Tab>
       <Tab id="interfaces" active={active} onChange={onChange}>Interfaces</Tab>
       <Tab id="neighbors" active={active} onChange={onChange}>Neighbors</Tab>
+      <Tab id="bgp" active={active} onChange={onChange}>BGP</Tab>
       <Tab id="flows" active={active} onChange={onChange}>Flows</Tab>
     </div>
   )
@@ -937,6 +940,111 @@ function NeighborsTab({
       <Section title="Neighbors" sub="per-port adjacency" right="SOURCE · SNMP">
         <NeighborsTable exporter={exporter} />
       </Section>
+    </div>
+  )
+}
+
+/* ----------------------------- BGP tab ----------------------------- */
+
+// BGPTab renders the per-device BGP peer list grouped by VRF. Reads
+// from /api/devices/{exporter}/bgp which the snmp service backs with
+// bgp_peers (BGP4-MIB walks today; cbgpPeer3 / jnxBgpM2 walks coming
+// in a follow-up — until then the only non-default VRFs operators
+// see come from the mock client in dev). Each VRF is a Section with
+// a small "n peers · u up · d down" subtitle so the operator can
+// scan health at a glance before opening the table.
+function BGPTab({ exporter }: { exporter: string }) {
+  const q = useQuery({
+    queryKey: ['device-bgp', exporter],
+    queryFn: () => api.deviceBGP(exporter),
+    refetchInterval: useLiveInterval(15_000),
+  })
+  if (q.isLoading) {
+    return <div className="px-6 py-8 text-dim font-mono text-[12px]">loading…</div>
+  }
+  if (q.isError) {
+    return (
+      <div className="px-6 py-8 text-crit font-mono text-[12px]">
+        failed to load bgp: {String((q.error as Error).message)}
+      </div>
+    )
+  }
+  const groups = q.data?.vrfs ?? []
+  if (groups.length === 0) {
+    return (
+      <div className="px-6 py-8 text-dim font-mono text-[12.5px]">
+        No BGP peers observed in the last 24h. Either this device doesn't run BGP, the SNMP
+        walk hasn't covered it yet, or the BGP4-MIB / cbgpPeer3 tables are empty.
+      </div>
+    )
+  }
+  return (
+    <div className="px-6 py-5 space-y-5">
+      {groups.map((g) => (
+        <Section
+          key={g.vrf}
+          title={`VRF · ${g.vrf}`}
+          sub={`${g.peer_count} peer${g.peer_count === 1 ? '' : 's'} · ${g.up_count} up · ${g.down_count} down`}
+          right="SOURCE · SNMP"
+        >
+          <BGPPeersTable peers={g.peers} />
+        </Section>
+      ))}
+    </div>
+  )
+}
+
+function BGPPeersTable({ peers }: { peers: BGPPeerRow[] }) {
+  const sorted = [...peers].sort((a, b) => {
+    // Established at the bottom so non-Established peers (the actionable
+    // rows) read first. Within each group, sort by peer_addr for stability.
+    const ae = a.state === 'established' ? 1 : 0
+    const be = b.state === 'established' ? 1 : 0
+    if (ae !== be) return ae - be
+    return a.peer_addr.localeCompare(b.peer_addr)
+  })
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full text-[12px] font-mono">
+        <thead>
+          <tr className="text-faint text-[10.5px] uppercase tracking-[0.06em] border-b border-line">
+            <th className="text-left py-1 pr-3">peer</th>
+            <th className="text-left py-1 pr-3">remote ASN</th>
+            <th className="text-left py-1 pr-3">state</th>
+            <th className="text-left py-1 pr-3">afi/safi</th>
+            <th className="text-left py-1 pr-3">description</th>
+            <th className="text-left py-1 pr-3">last change</th>
+          </tr>
+        </thead>
+        <tbody>
+          {sorted.map((p) => (
+            <tr key={`${p.vrf}_${p.peer_addr}`} className="border-b border-line/50 align-top">
+              <td className="py-1.5 pr-3 text-text">{p.peer_addr}</td>
+              <td className="py-1.5 pr-3 text-dim">AS{p.peer_asn}</td>
+              <td className="py-1.5 pr-3">
+                <span
+                  className={`inline-block px-1.5 py-px border text-[10.5px] uppercase tracking-[0.06em] ${
+                    p.state === 'established'
+                      ? 'border-ok text-ok'
+                      : p.state === 'idle'
+                      ? 'border-crit text-crit'
+                      : 'border-warn text-warn'
+                  }`}
+                >
+                  {p.state}
+                </span>
+              </td>
+              <td className="py-1.5 pr-3 text-faint">
+                {p.afi || '?'}/{p.safi || '?'}
+              </td>
+              <td className="py-1.5 pr-3 text-dim">{p.peer_description || '—'}</td>
+              <td className="py-1.5 pr-3 text-faint">
+                {isEpoch(p.last_change_at) ? '—' : new Date(p.last_change_at).toLocaleString()}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   )
 }

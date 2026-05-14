@@ -47,10 +47,16 @@ func (r BGPNeighborDown) Evaluate(ctx context.Context, conn driver.Conn) ([]Viol
 	return r.EvaluateScoped(ctx, conn, ScopeSelector{}, r.DefaultParams())
 }
 
-// EvaluateScoped honors scope.Exporters (which devices to consider)
-// and scope.BGPPeers (which peer addresses to consider). ASN-based
-// matching (scope.ASNRemote) is supported via a HAVING filter on the
+// EvaluateScoped honors scope.Exporters (which devices to consider),
+// scope.BGPPeers (which peer addresses to consider), and scope.VRFs
+// (which routing instances to consider). ASN-based matching
+// (scope.ASNRemote) is supported via a HAVING filter on the
 // argMax(peer_asn).
+//
+// The result aggregation key is (exporter, vrf, peer_addr) so the
+// same peer address showing up in two VRFs (rare, but possible —
+// route-reflector overlap during a migration) fires as two
+// independent alerts.
 func (r BGPNeighborDown) EvaluateScoped(ctx context.Context, conn driver.Conn, scope ScopeSelector, params map[string]any) ([]Violation, error) {
 	dwell := paramInt(params, "established_min_seconds", r.EstablishedMinSeconds)
 	if dwell <= 0 {
@@ -62,6 +68,7 @@ func (r BGPNeighborDown) EvaluateScoped(ctx context.Context, conn driver.Conn, s
 	}
 	exporterFrag, exporterArgs := buildExporterWhere("exporter", scope)
 	peerFrag, peerArgs := buildBGPPeerWhere("peer_addr", scope)
+	vrfFrag, vrfArgs := buildVRFWhere("vrf", scope)
 	asnFrag, asnArgs := buildASNHaving(scope)
 
 	where := "polled_at >= now() - INTERVAL ? SECOND"
@@ -74,6 +81,10 @@ func (r BGPNeighborDown) EvaluateScoped(ctx context.Context, conn driver.Conn, s
 		where += " AND " + peerFrag
 		args = append(args, peerArgs...)
 	}
+	if vrfFrag != "" {
+		where += " AND " + vrfFrag
+		args = append(args, vrfArgs...)
+	}
 	having := `state != 'established'
    AND latest <= now() - INTERVAL ? SECOND
    AND latest >= now() - INTERVAL ? SECOND`
@@ -84,6 +95,7 @@ func (r BGPNeighborDown) EvaluateScoped(ctx context.Context, conn driver.Conn, s
 	}
 	q := `
 SELECT IPv6NumToString(exporter)             AS exporter_ip,
+       vrf,
        IPv6NumToString(peer_addr)            AS peer_ip,
        argMax(peer_asn, polled_at)           AS peer_asn,
        argMax(local_asn, polled_at)          AS local_asn,
@@ -93,7 +105,7 @@ SELECT IPv6NumToString(exporter)             AS exporter_ip,
        max(polled_at)                        AS latest
 FROM bgp_peers
 WHERE ` + where + `
-GROUP BY exporter, peer_addr
+GROUP BY exporter, vrf, peer_addr
 HAVING ` + having
 	rows, err := conn.Query(ctx, q, args...)
 	if err != nil {
@@ -103,18 +115,39 @@ HAVING ` + having
 	var out []Violation
 	for rows.Next() {
 		var (
-			rawExp, rawPeer, state, descr, source string
-			peerASN, localASN                     uint32
-			latest                                time.Time
+			rawExp, vrf, rawPeer, state, descr, source string
+			peerASN, localASN                          uint32
+			latest                                     time.Time
 		)
-		if err := rows.Scan(&rawExp, &rawPeer, &peerASN, &localASN, &state, &descr, &source, &latest); err != nil {
+		if err := rows.Scan(&rawExp, &vrf, &rawPeer, &peerASN, &localASN, &state, &descr, &source, &latest); err != nil {
 			return nil, err
 		}
 		exp := unmap4in6(rawExp)
 		peer := unmap4in6(rawPeer)
-		out = append(out, buildBGPDownViolation(exp, peer, peerASN, localASN, state, descr, source))
+		out = append(out, buildBGPDownViolation(exp, vrf, peer, peerASN, localASN, state, descr, source))
 	}
 	return out, rows.Err()
+}
+
+// buildVRFWhere produces the SQL fragment for scope.VRFs. The vrf
+// column is plain String (not LowCardinality at write time); a
+// straightforward IN comparison is enough.
+func buildVRFWhere(col string, scope ScopeSelector) (string, []any) {
+	if len(scope.VRFs) == 0 {
+		return "", nil
+	}
+	args := make([]any, 0, len(scope.VRFs))
+	for _, v := range scope.VRFs {
+		args = append(args, v)
+	}
+	placeholders := ""
+	for i := range args {
+		if i > 0 {
+			placeholders += ","
+		}
+		placeholders += "?"
+	}
+	return fmt.Sprintf("%s IN (%s)", col, placeholders), args
 }
 
 // buildBGPPeerWhere produces the SQL fragment for scope.BGPPeers. The
@@ -159,30 +192,40 @@ func buildASNHaving(scope ScopeSelector) (string, []any) {
 }
 
 // buildBGPDownViolation formats the alert. Pulled out so unit tests
-// can exercise the copy without ClickHouse.
-func buildBGPDownViolation(exporter, peer string, peerASN, localASN uint32, state, descr, source string) Violation {
+// can exercise the copy without ClickHouse. vrf=="default" suppresses
+// the VRF mention in the title to keep the common case readable;
+// non-default VRFs always render the VRF name explicitly.
+func buildBGPDownViolation(exporter, vrf, peer string, peerASN, localASN uint32, state, descr, source string) Violation {
 	label := peer
 	if descr != "" {
 		label = fmt.Sprintf("%s (%s)", descr, peer)
 	}
-	scope := fmt.Sprintf("%s · %s", exporter, peer)
+	if vrf == "" {
+		vrf = "default"
+	}
+	scope := fmt.Sprintf("%s · %s · %s", exporter, vrf, peer)
+	vrfTitle := ""
+	if vrf != "default" {
+		vrfTitle = fmt.Sprintf(" [vrf %s]", vrf)
+	}
 	return Violation{
 		Scope:    scope,
-		GroupKey: "bgp_" + exporter + "_" + peer,
+		GroupKey: "bgp_" + exporter + "_" + vrf + "_" + peer,
 		Title: fmt.Sprintf(
-			"BGP %s on %s · peer %s (AS%d) state=%s",
-			directionLabel(localASN, peerASN), exporter, label, peerASN, state,
+			"BGP %s on %s%s · peer %s (AS%d) state=%s",
+			directionLabel(localASN, peerASN), exporter, vrfTitle, label, peerASN, state,
 		),
 		Body: fmt.Sprintf(
-			"BGP session from %s (AS%d) to %s (AS%d) is in state %q. The latest poll observed "+
-				"this state via the %s MIB. A session that has been non-established for the "+
-				"configured dwell window indicates either a real outage or a flap exceeding "+
-				"the dwell threshold — verify on the device.",
-			exporter, localASN, peer, peerASN, state, source,
+			"BGP session from %s (AS%d) to %s (AS%d) in routing instance %q is in state %q. "+
+				"The latest poll observed this state via the %s MIB. A session that has been "+
+				"non-established for the configured dwell window indicates either a real "+
+				"outage or a flap exceeding the dwell threshold — verify on the device.",
+			exporter, localASN, peer, peerASN, vrf, state, source,
 		),
 		Severity: SeverityCritical,
 		Labels: map[string]string{
 			"exporter":  exporter,
+			"vrf":       vrf,
 			"peer_addr": peer,
 			"peer_asn":  fmt.Sprintf("%d", peerASN),
 			"local_asn": fmt.Sprintf("%d", localASN),

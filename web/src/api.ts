@@ -653,6 +653,40 @@ export type AlertScopeSelector = {
   ifname_glob?: string
   bgp_peers?: string[]
   asn_remote?: number[]
+  vrfs?: string[]
+}
+
+// BGP / VRF — surfaced on the Device detail page and used by the
+// BGPNeighborDown alert template's scope selector.
+export type BGPPeerRow = {
+  vrf: string
+  peer_addr: string
+  peer_asn: number
+  local_asn: number
+  state: 'idle' | 'connect' | 'active' | 'opensent' | 'openconfirm' | 'established' | 'unknown'
+  admin_status: string
+  established_at: string
+  last_change_at: string
+  afi: string
+  safi: string
+  peer_description: string
+  source: 'bgp4' | 'cbgp' | 'jnxbgp' | string
+  polled_at: string
+}
+
+export type BGPPeersByVRF = {
+  vrf: string
+  peer_count: number
+  up_count: number
+  down_count: number
+  peers: BGPPeerRow[]
+}
+
+export type DeviceBGPResponse = {
+  exporter: string
+  vrf_count: number
+  peer_count: number
+  vrfs: BGPPeersByVRF[]
 }
 
 export type AlertRuleInstance = {
@@ -970,6 +1004,10 @@ export const api = {
   deviceNeighbors: (exporter: string) =>
     getJSON<NeighborsResponse>(
       `/api/devices/${encodeURIComponent(exporter)}/neighbors`,
+    ),
+  deviceBGP: (exporter: string) =>
+    getJSON<DeviceBGPResponse>(
+      `/api/devices/${encodeURIComponent(exporter)}/bgp`,
     ),
   topology: () => getJSON<TopologyResponse>(`/api/topology`),
   alerts: (state?: 'open' | 'acknowledged' | 'closed') =>

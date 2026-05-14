@@ -361,7 +361,7 @@ func (s *Scheduler) persistBGPPeers(ctx context.Context, peers []BGPPeer) error 
 		`INSERT INTO bgp_peers
 		   (polled_at, exporter, peer_addr, peer_asn, local_asn,
 		    state, admin_status, established_at, last_change_at,
-		    afi, safi, peer_description, source)`,
+		    afi, safi, peer_description, source, vrf)`,
 	)
 	if err != nil {
 		return fmt.Errorf("prepare bgp batch: %w", err)
@@ -386,10 +386,16 @@ func (s *Scheduler) persistBGPPeers(ctx context.Context, peers []BGPPeer) error 
 		if chg.IsZero() {
 			chg = time.Unix(0, 0).UTC()
 		}
+		// Empty VRF means "global table"; normalize to the canonical
+		// 'default' name so the read path never has to coalesce.
+		vrf := p.VRF
+		if vrf == "" {
+			vrf = VRFDefault
+		}
 		if err := batch.Append(
 			p.PolledAt, exp16, peer16, p.PeerASN, p.LocalASN,
 			p.State, p.AdminStatus, est, chg,
-			p.AFI, p.SAFI, p.PeerDescription, p.Source,
+			p.AFI, p.SAFI, p.PeerDescription, p.Source, vrf,
 		); err != nil {
 			return fmt.Errorf("append bgp peer: %w", err)
 		}
