@@ -175,20 +175,57 @@ const (
 	OIDBgpPeerFsmEstablishedTime    = "1.3.6.1.2.1.15.3.1.16" // Counter32 (seconds since last Established)
 	OIDBgpPeerInUpdateElapsedTime   = "1.3.6.1.2.1.15.3.1.24" // Counter32 (seconds since last update)
 
-	// CISCO-BGP4-MIB cbgpPeer2Table — IPv4 + IPv6 + 32-bit ASN. Indexed
-	// by (cbgpPeer2Type, cbgpPeer2RemoteAddrLen, cbgpPeer2RemoteAddr...).
-	// cbgpPeer2Type: 1=ipv4, 2=ipv6 (matches the InetAddressType TC).
-	// cbgpPeer2State / AdminStatus mirror the BGP4-MIB INTEGER enum.
-	// cbgpPeer2RemoteAs is Unsigned32 (4-byte ASNs OK).
-	// cbgpPeer2Description is the operator-readable label, often the
-	// "neighbor description" line in the running-config.
-	OIDCbgpPeer2State              = "1.3.6.1.4.1.9.9.187.1.2.5.1.3"
-	OIDCbgpPeer2AdminStatus        = "1.3.6.1.4.1.9.9.187.1.2.5.1.4"
-	OIDCbgpPeer2LocalAs            = "1.3.6.1.4.1.9.9.187.1.2.5.1.8"
-	OIDCbgpPeer2RemoteAs           = "1.3.6.1.4.1.9.9.187.1.2.5.1.11"
-	OIDCbgpPeer2FsmEstablishedTime = "1.3.6.1.4.1.9.9.187.1.2.5.1.18"
-	OIDCbgpPeer2InUpdateElapsedTime = "1.3.6.1.4.1.9.9.187.1.2.5.1.26"
-	OIDCbgpPeer2Description        = "1.3.6.1.4.1.9.9.187.1.2.7.1.1" // separate cbgpPeer2DescrTable
+	// CISCO-BGP4-MIB cbgpPeer3Table — Cisco's VRF-aware BGP table.
+	// Available on IOS 12.4+, IOS-XR, IOS-XE, and most NX-OS releases.
+	// Indexed by:
+	//   cbgpPeer3VrfName          SnmpAdminString  (length-prefixed in OID)
+	//   cbgpPeer3Type             InetAddressType  (1=ipv4, 2=ipv6, 3=ipv4z, 4=ipv6z)
+	//   cbgpPeer3RemoteAddr       InetAddress      (length-prefixed in OID)
+	//
+	// State / AdminStatus enums match BGP4-MIB. RemoteAs / LocalAs are
+	// Unsigned32 so 4-byte ASNs travel cleanly. FsmEstablishedTime is
+	// Gauge32 seconds since the last transition INTO Established;
+	// InUpdateElapsedTime is Gauge32 seconds since the last update.
+	//
+	// cbgpPeer2Table (under .1.2.5) predates this and lacks VRF; we
+	// skip it entirely — anything that runs cbgpPeer2 also runs
+	// cbgpPeer3, and cbgpPeer3 with vrf="default" gives identical
+	// global-table data.
+	OIDCbgpPeer3State               = "1.3.6.1.4.1.9.9.187.1.2.9.1.3"
+	OIDCbgpPeer3AdminStatus         = "1.3.6.1.4.1.9.9.187.1.2.9.1.4"
+	OIDCbgpPeer3LocalAs             = "1.3.6.1.4.1.9.9.187.1.2.9.1.8"
+	OIDCbgpPeer3RemoteAs            = "1.3.6.1.4.1.9.9.187.1.2.9.1.11"
+	OIDCbgpPeer3FsmEstablishedTime  = "1.3.6.1.4.1.9.9.187.1.2.9.1.19"
+	OIDCbgpPeer3InUpdateElapsedTime = "1.3.6.1.4.1.9.9.187.1.2.9.1.27"
+
+	// ARISTA-BGP4V2-MIB — Arista's IETF-BGP4V2-MIB-derived BGP table.
+	// Native on EOS; the only standard MIB Arista exposes that
+	// surfaces non-default routing instances. OID arc:
+	//
+	//   arista                 = 1.3.6.1.4.1.30065
+	//   aristaExperiment       = arista.4
+	//   aristaBgp4V2           = aristaExperiment.1            (.30065.4.1)
+	//   aristaBgp4V2Objects    = aristaBgp4V2.1                (.30065.4.1.1)
+	//   aristaBgp4V2PeerTable  = aristaBgp4V2Objects.2         (.30065.4.1.1.2)
+	//   aristaBgp4V2PeerEntry  = aristaBgp4V2PeerTable.1       (.30065.4.1.1.2.1)
+	//   aristaBgp4V2PeerEventTimesTable  = aristaBgp4V2Objects.4 (.30065.4.1.1.4)
+	//   aristaBgp4V2PeerEventTimesEntry  = ...4.1
+	//
+	// Index for the peer entry: (PeerInstance, RemoteAddrType,
+	// RemoteAddr). PeerInstance is Unsigned32 — one sub-OID. The
+	// RemoteAddr is length-prefixed (InetAddress encoding: length
+	// byte + N address bytes). Per the MIB the instance number is
+	// "1 for single-instance impls"; vendors that support multi-VRF
+	// number them sequentially. ARISTA-BGP4V2-MIB does NOT carry a
+	// VRF-name lookup, so the walker renders instance==1 as
+	// "default" and others as "vrf-<N>".
+	OIDAristaBgp4V2PeerLocalAs        = "1.3.6.1.4.1.30065.4.1.1.2.1.7"
+	OIDAristaBgp4V2PeerRemoteAs       = "1.3.6.1.4.1.30065.4.1.1.2.1.10"
+	OIDAristaBgp4V2PeerAdminStatus    = "1.3.6.1.4.1.30065.4.1.1.2.1.12"
+	OIDAristaBgp4V2PeerState          = "1.3.6.1.4.1.30065.4.1.1.2.1.13"
+	OIDAristaBgp4V2PeerDescription    = "1.3.6.1.4.1.30065.4.1.1.2.1.14"
+	OIDAristaBgp4V2PeerFsmEstTime     = "1.3.6.1.4.1.30065.4.1.1.4.1.1"
+	OIDAristaBgp4V2PeerInUpdElapsed   = "1.3.6.1.4.1.30065.4.1.1.4.1.2"
 
 	// JUNIPER-BGP4-V2-MIB jnxBgpM2PeerTable — Junos's modern BGP MIB.
 	// Indexed by jnxBgpM2PeerInstance + jnxBgpM2PeerLocalAddrType +
