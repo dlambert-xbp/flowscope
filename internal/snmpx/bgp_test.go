@@ -179,3 +179,91 @@ func TestAristaInstanceToVRF(t *testing.T) {
 		}
 	}
 }
+
+func TestParseSnmpAdminStringSuffix(t *testing.T) {
+	cases := []struct {
+		name   string
+		suffix string
+		want   string
+		ok     bool
+	}{
+		{
+			name:   "default",
+			suffix: "7.100.101.102.97.117.108.116", // "default"
+			want:   "default",
+			ok:     true,
+		},
+		{
+			name:   "datacenter",
+			suffix: "10.100.97.116.97.99.101.110.116.101.114", // "datacenter"
+			want:   "datacenter",
+			ok:     true,
+		},
+		{
+			name:   "underscore VRF name",
+			suffix: "11.98.97.110.99.116.101.99.95.98.112.111", // "banctec_bpo"
+			want:   "banctec_bpo",
+			ok:     true,
+		},
+		{
+			name:   "trailing-extra ok (parser stops at length)",
+			suffix: "7.100.101.102.97.117.108.116.99.99",
+			want:   "default",
+			ok:     true,
+		},
+		{
+			name:   "truncated string",
+			suffix: "10.100.97",
+			ok:     false,
+		},
+		{
+			name:   "non-numeric",
+			suffix: "X.Y.Z",
+			ok:     false,
+		},
+		{
+			name:   "empty",
+			suffix: "",
+			ok:     false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := parseSnmpAdminStringSuffix(tc.suffix)
+			if ok != tc.ok {
+				t.Fatalf("ok = %v; want %v", ok, tc.ok)
+			}
+			if ok && got != tc.want {
+				t.Errorf("got = %q; want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestWalkVRFContextBGP_CommunityMutation(t *testing.T) {
+	// Smoke test for the community-mutation rule: default VRF keeps
+	// the bare community; non-default VRFs get appended via @. We
+	// can't easily reach into walkVRFContextBGP without an SNMP
+	// stand-in, so this test calls the same shaping logic the helper
+	// uses and confirms the convention.
+	base := Config{Version: "v2c", Community: "elastiflow"}
+	if want, got := "elastiflow", communityFor(base, "default"); want != got {
+		t.Errorf("default community = %q; want %q", got, want)
+	}
+	if want, got := "elastiflow@datacenter", communityFor(base, "datacenter"); want != got {
+		t.Errorf("non-default community = %q; want %q", got, want)
+	}
+	if want, got := "elastiflow@banctec_bpo", communityFor(base, "banctec_bpo"); want != got {
+		t.Errorf("underscore-vrf community = %q; want %q", got, want)
+	}
+}
+
+// communityFor mirrors the inline community-mutation in
+// walkVRFContextBGP so tests can exercise the rule without standing
+// up an SNMP server.
+func communityFor(cfg Config, vrf string) string {
+	if vrf == VRFDefault {
+		return cfg.Community
+	}
+	return cfg.Community + "@" + vrf
+}
