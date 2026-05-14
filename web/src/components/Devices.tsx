@@ -13,6 +13,7 @@ import { InterfaceChart } from './InterfaceChart'
 import { TimeseriesChart, resolveColor } from './TimeseriesChart'
 import { FlowsTopN, FlowsInvestigate } from './Flows'
 import { NeighborsTable, TopologyGraph } from './TopologyGraph'
+import type { Filter } from '../filters'
 import {
   rangeLabel,
   rangeSeconds,
@@ -145,9 +146,15 @@ function TwoLine({
 export function Devices({
   range,
   rangeKey,
+  onInvestigate,
 }: {
   range: TimeRange
   rangeKey: unknown
+  // onInvestigate hands chips off to the host shell which navigates
+  // to Flows → Investigate. Threaded through Feature so the per-device
+  // surfaces (Interfaces tab, etc.) can launch an investigation
+  // without owning tab state.
+  onInvestigate?: (chips: Filter[]) => void
 }) {
   const apiRange = toApi(range)
   const list = useQuery({
@@ -209,6 +216,7 @@ export function Devices({
         range={range}
         rangeKey={rangeKey}
         onSelectExporter={setSelected}
+        onInvestigate={onInvestigate}
       />
     </div>
   )
@@ -599,11 +607,13 @@ function Feature({
   range,
   rangeKey,
   onSelectExporter,
+  onInvestigate,
 }: {
   exporter: string | null
   range: TimeRange
   rangeKey: unknown
   onSelectExporter: (exporter: string) => void
+  onInvestigate?: (chips: Filter[]) => void
 }) {
   const [sub, setSub] = useState<SubTab>('summary')
   // Reuse the same query key FeatureHeader uses so TanStack dedupes —
@@ -634,7 +644,15 @@ function Feature({
       <SubTabs active={sub} onChange={setSub} />
       <div>
         {sub === 'summary' && <SummaryTab exporter={exporter} range={range} rangeKey={rangeKey} />}
-        {sub === 'interfaces' && <InterfacesTab exporter={exporter} range={range} rangeKey={rangeKey} />}
+        {sub === 'interfaces' && (
+          <InterfacesTab
+            exporter={exporter}
+            exporterLabel={exporterLabel}
+            range={range}
+            rangeKey={rangeKey}
+            onInvestigate={onInvestigate}
+          />
+        )}
         {sub === 'flows' && (
           <FlowsTab
             exporter={exporter}
@@ -1591,12 +1609,16 @@ function Section({
 
 function InterfacesTab({
   exporter,
+  exporterLabel,
   range,
   rangeKey,
+  onInvestigate,
 }: {
   exporter: string
+  exporterLabel: string
   range: TimeRange
   rangeKey: unknown
+  onInvestigate?: (chips: Filter[]) => void
 }) {
   // Multiple charts can be open at once. Stored as a Set keyed by
   // ifindex. Reset whenever the selected exporter changes — many
@@ -1684,11 +1706,39 @@ function InterfacesTab({
             {sortedRows.map((i: InterfaceRow) => {
               const lbl = labelInterface(i)
               const isActive = activeIfindexes.has(i.ifindex)
+              const ifaceChipLabel = i.if_descr || i.if_alias || `ifindex ${i.ifindex}`
+              const investigate = onInvestigate
+                ? () =>
+                    onInvestigate([
+                      {
+                        key: 'exporter',
+                        value: exporter,
+                        label: exporterLabel || undefined,
+                      },
+                      {
+                        key: 'output_ifindex',
+                        value: String(i.ifindex),
+                        label: ifaceChipLabel,
+                        keyLabel: 'out iface',
+                      },
+                    ])
+                : undefined
               return (
                 <Fragment key={i.ifindex}>
-                  <tr className="hover:bg-surface">
+                  <tr className="hover:bg-surface group">
                     <td>
-                      <TwoLine primary={lbl.primary} secondary={lbl.secondary || undefined} />
+                      {investigate ? (
+                        <button
+                          type="button"
+                          onClick={investigate}
+                          title="filter & investigate this interface"
+                          className="block w-full text-left hover:text-accent hover:underline decoration-dotted underline-offset-2"
+                        >
+                          <TwoLine primary={lbl.primary} secondary={lbl.secondary || undefined} />
+                        </button>
+                      ) : (
+                        <TwoLine primary={lbl.primary} secondary={lbl.secondary || undefined} />
+                      )}
                     </td>
                     <td className="r n">{fmt.bps(i.in_bps_latest)}</td>
                     <td className="r n">{fmt.bps(i.out_bps_latest)}</td>
@@ -1696,12 +1746,23 @@ function InterfacesTab({
                     <td className="r n text-ok">{fmt.bps(i.out_bps_peak)}</td>
                     <td className="r n text-faint">{fmt.time(i.last_seen).slice(11, 19)}</td>
                     <td className="r">
-                      <button
-                        className={`text-[11px] font-mono ${isActive ? 'text-text' : 'text-accent hover:underline'}`}
-                        onClick={() => toggleChart(i.ifindex)}
-                      >
-                        {isActive ? '× close' : 'chart →'}
-                      </button>
+                      <div className="inline-flex items-center gap-3">
+                        {investigate && (
+                          <button
+                            type="button"
+                            onClick={investigate}
+                            className="text-[10.5px] font-mono tracking-[0.06em] text-accent opacity-0 group-hover:opacity-100 hover:underline"
+                          >
+                            investigate →
+                          </button>
+                        )}
+                        <button
+                          className={`text-[11px] font-mono ${isActive ? 'text-text' : 'text-accent hover:underline'}`}
+                          onClick={() => toggleChart(i.ifindex)}
+                        >
+                          {isActive ? '× close' : 'chart →'}
+                        </button>
+                      </div>
                     </td>
                   </tr>
                   {isActive && (

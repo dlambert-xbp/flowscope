@@ -22,6 +22,7 @@ import { ServiceLabel, useServiceName } from './ServiceLabel'
 import { LiveTail } from './LiveTail'
 import { FlowDrawer, type FlowDrillDown } from './FlowDrawer'
 import { Hostname, useReverseDNS } from './Hostname'
+import { FilterTrigger } from './FilterTrigger'
 
 // Flows tab — page chrome:
 //   Live tail (collapsible, expanded by default)
@@ -87,11 +88,23 @@ function writeSubTabToURL(next: FlowSubTab) {
   }
 }
 
+// FilterAPI is the shape returned by useFilters() — passed down from
+// Flows() so the parent owns the chip set and child sub-views read
+// the same source. Lifted because LiveTail also needs to push chips
+// (and switch sub-tab) without remounting the underlying state.
+export type FilterAPI = {
+  filters: Filter[]
+  add: (f: Filter) => void
+  remove: (key: FilterKey, value?: string) => void
+  clear: () => void
+}
+
 // Flows is the parent surface — a sub-tab bar (Top-N / Live tail /
 // Investigate) plus the active sub-view. Filter chips live at the
-// parent level so they carry across switches without remounting.
-// LiveTail is filter-agnostic by design (operator wants every flow,
-// not the filtered slice); Top-N and Investigate both narrow by chips.
+// parent level so they carry across switches without remounting,
+// and so LiveTail can push a chip and switch sub-tab atomically.
+// Top-N and Investigate both narrow by chips; LiveTail was filter-
+// agnostic but now chips a value-and-jumps-to-Investigate on click.
 export function Flows({
   range,
   rangeKey,
@@ -109,15 +122,33 @@ export function Flows({
     setSubState(next)
     writeSubTabToURL(next)
   }, [])
+  const filterApi = useFilters()
+  // Live tail chip handler: add the chip and switch to Investigate
+  // so the operator sees the filtered slice immediately. The pause
+  // state on LiveTail is in-memory; sub-tab swap unmounts it, which
+  // means streaming will resume when the operator comes back. That's
+  // intentional — chip-and-investigate is a forward motion.
+  const liveTailAdd = useCallback(
+    (f: Filter) => {
+      filterApi.add(f)
+      setSub('investigate')
+    },
+    [filterApi, setSub],
+  )
   return (
     <div>
       <FlowSubTabs active={sub} onChange={setSub} />
-      {sub === 'top' && <FlowsTopN range={range} rangeKey={rangeKey} />}
+      {sub === 'top' && (
+        <FlowsTopN range={range} rangeKey={rangeKey} filterApi={filterApi} />
+      )}
       {sub === 'live' && (
-        <LiveTail storageKey="flowscope.liveTab.collapsed" />
+        <LiveTail
+          storageKey="flowscope.liveTab.collapsed"
+          onAdd={liveTailAdd}
+        />
       )}
       {sub === 'investigate' && (
-        <FlowsInvestigate range={range} rangeKey={rangeKey} />
+        <FlowsInvestigate range={range} rangeKey={rangeKey} filterApi={filterApi} />
       )}
     </div>
   )
@@ -170,22 +201,35 @@ function FlowSubTabBtn({
 // Top talkers / services / protocols / conversations / interfaces /
 // ASN tabs with a sort + page-size selector.
 //
-// When lockedExporter is set (Devices → Flows sub-tab), filter state
-// is local (not URL-backed), the exporter dimension is hidden from
-// the filter builder, and every API query is forced to scope to the
-// locked exporter regardless of chip state.
+// filterApi may be passed by the parent (Flows page lifts state so
+// LiveTail and sub-tabs share one chip set). If absent, falls back
+// to an internal useFilters — local when lockedExporter is set, so
+// chips on the Devices → Flows sub-tab don't leak into the global
+// Flows-tab URL state.
+//
+// When lockedExporter is set (Devices → Flows sub-tab), the exporter
+// dimension is hidden from the filter builder and every API query is
+// forced to scope to the locked exporter regardless of chip state.
 export function FlowsTopN({
   range,
   rangeKey,
   lockedExporter,
   lockedExporterLabel,
+  filterApi,
 }: {
   range: TimeRange
   rangeKey: unknown
   lockedExporter?: string
   lockedExporterLabel?: string
+  filterApi?: FilterAPI
 }) {
-  const f = useFilters({ local: !!lockedExporter })
+  // Internal useFilters fires when filterApi isn't supplied (Devices
+  // → Flows sub-tab path). Calling the hook unconditionally keeps the
+  // hook order stable across renders.
+  // Force local mode when filterApi is passed in so the unused internal
+  // hook doesn't trample the parent's URL writes.
+  const internal = useFilters({ local: !!lockedExporter || !!filterApi })
+  const f = filterApi ?? internal
   const add = lockedExporter
     ? (filt: Filter) => {
         if (filt.key === 'exporter') return
@@ -211,6 +255,7 @@ export function FlowsTopN({
         onClear={f.clear}
         range={range}
         excludeKeys={lockedExporter ? EXPORTER_ONLY : undefined}
+        lockedExporter={lockedExporter}
         lockedNote={
           lockedExporter
             ? { label: 'scoped to', value: lockedExporterLabel || lockedExporter }
@@ -248,23 +293,29 @@ export function FlowsTopN({
 const EXPORTER_ONLY: FilterKey[] = ['exporter']
 
 // FlowsInvestigate renders the paginated, sortable flow table.
-// URL-synced filter chips share state with FlowsTopN. When
-// lockedExporter is set (Devices → Flows sub-tab), filter state is
-// local and the exporter is always pinned to the selected device —
-// so the empty-filter prompt is suppressed (the locked exporter is
-// itself a narrowing) and the table renders immediately.
+// URL-synced filter chips share state with FlowsTopN via the lifted
+// FilterAPI in the Flows() parent. When lockedExporter is set
+// (Devices → Flows sub-tab), filter state is local and the exporter
+// is always pinned to the selected device — so the empty-filter
+// prompt is suppressed (the locked exporter is itself a narrowing)
+// and the table renders immediately.
 export function FlowsInvestigate({
   range,
   rangeKey,
   lockedExporter,
   lockedExporterLabel,
+  filterApi,
 }: {
   range: TimeRange
   rangeKey: unknown
   lockedExporter?: string
   lockedExporterLabel?: string
+  filterApi?: FilterAPI
 }) {
-  const f = useFilters({ local: !!lockedExporter })
+  // Force local mode when filterApi is passed in so the unused internal
+  // hook doesn't trample the parent's URL writes.
+  const internal = useFilters({ local: !!lockedExporter || !!filterApi })
+  const f = filterApi ?? internal
   const add = lockedExporter
     ? (filt: Filter) => {
         if (filt.key === 'exporter') return
@@ -288,6 +339,7 @@ export function FlowsInvestigate({
         onClear={f.clear}
         range={range}
         excludeKeys={lockedExporter ? EXPORTER_ONLY : undefined}
+        lockedExporter={lockedExporter}
         lockedNote={
           lockedExporter
             ? { label: 'scoped to', value: lockedExporterLabel || lockedExporter }
@@ -322,6 +374,13 @@ export function FlowsInvestigate({
 
 /* ----------------------------- Filter bar ----------------------------- */
 
+// FilterBar layout:
+//   Row 1 — prominent inputs: Device + Interface. These are the two
+//           dimensions the operator usually knows by name. Hidden on
+//           the Devices → Flows sub-tab where exporter is locked
+//           (the locked-note chip in row 2 carries that context).
+//   Row 2 — active chips strip with "+ More filters" overflow for
+//           src/dst IP, ports, proto, ASN, raw ifindex.
 function FilterBar({
   filters,
   onAdd,
@@ -329,6 +388,7 @@ function FilterBar({
   onClear,
   range,
   excludeKeys,
+  lockedExporter,
   lockedNote,
 }: {
   filters: Filter[]
@@ -340,15 +400,50 @@ function FilterBar({
   // exporter is locked by parent context — the dropdown shouldn't
   // offer to add another exporter filter).
   excludeKeys?: FilterKey[]
+  // lockedExporter pins the exporter IP for the InterfacePicker so
+  // the operator can filter an interface by name even on a locked
+  // (Devices → Flows) view where there is no exporter chip to read.
+  lockedExporter?: string
   // lockedNote renders a neutral "scoped to <X>" chip next to the
   // window chip so the operator can see the active locked context.
   lockedNote?: { label: string; value: string }
 }) {
   const has = filters.length > 0
   const [building, setBuilding] = useState(false)
+  const showDeviceInput = !excludeKeys?.some((k) => k === 'exporter')
+  const exporterChip = filters.find((f) => f.key === 'exporter')
+  const activeExporter = lockedExporter ?? exporterChip?.value
+  // "+ More filters" intentionally hides exporter (Device input above
+  // already covers it). Raw ifindex stays available as a power-user
+  // fallback for cases where the operator only knows the number.
+  const overflowExcludeKeys: FilterKey[] = [
+    ...(excludeKeys ?? []),
+    ...(showDeviceInput ? (['exporter'] as FilterKey[]) : []),
+  ]
   return (
     <div className="border-b border-line bg-surface">
-      <div className="flex items-center gap-2 px-4 py-3 flex-wrap">
+      {/* Row 1 — Device + Interface (the two name-based primaries) */}
+      <div className="flex items-center gap-4 px-4 py-3 border-b border-line-soft flex-wrap">
+        {showDeviceInput && (
+          <DeviceInput
+            current={exporterChip}
+            onSubmit={onAdd}
+            onClear={() => onRemove('exporter')}
+          />
+        )}
+        <InterfacePicker
+          exporter={activeExporter}
+          exporterName={
+            exporterChip?.label ??
+            (lockedExporter ? lockedNote?.value : undefined)
+          }
+          existing={filters}
+          onSubmit={onAdd}
+          onClear={(k) => onRemove(k)}
+        />
+      </div>
+      {/* Row 2 — chips strip + "+ More" + clear */}
+      <div className="flex items-center gap-2 px-4 py-2 flex-wrap">
         <span className="text-[10.5px] uppercase tracking-[0.1em] text-faint font-semibold mr-1">
           Filters
         </span>
@@ -372,7 +467,7 @@ function FilterBar({
           className="font-mono text-[11px] inline-flex items-center gap-1.5 px-2 py-1 border border-line text-dim hover:border-accent hover:text-text"
         >
           <span aria-hidden className="text-accent">+</span>
-          add filter
+          More filters
         </button>
         {has && (
           <button
@@ -384,14 +479,14 @@ function FilterBar({
         )}
         {!has && !building && (
           <span className="ml-auto font-mono text-[11px] text-faint italic">
-            click any row, or use <span className="text-dim">+ add filter</span>
+            click any row, or use the inputs above
           </span>
         )}
       </div>
       {building && (
         <FilterBuilder
           existing={filters}
-          excludeKeys={excludeKeys}
+          excludeKeys={overflowExcludeKeys}
           onAdd={(f) => {
             onAdd(f)
             setBuilding(false)
@@ -400,6 +495,308 @@ function FilterBar({
         />
       )}
     </div>
+  )
+}
+
+/* ----------------------------- Device input ----------------------------- */
+
+// DeviceInput is the prominent Device field. Resolves a typed name
+// (sys_name fuzzy match) to the exporter IP, chips it, and renders
+// as a confirmed selection (with × to clear) once set. The chip
+// also appears in the row-2 strip — this input is the discovery
+// surface, the chip is the persistent representation.
+function DeviceInput({
+  current,
+  onSubmit,
+  onClear,
+}: {
+  current?: Filter
+  onSubmit: (f: Filter) => void
+  onClear: () => void
+}) {
+  const [text, setText] = useState('')
+  const [open, setOpen] = useState(false)
+  const devices = useQuery({
+    queryKey: ['devices', 'filter-bar'],
+    queryFn: () => api.devices(86_400),
+    refetchInterval: false,
+    staleTime: 60_000,
+  })
+  const rows = devices.data?.devices ?? []
+  const t = text.trim().toLowerCase()
+  const matches = t
+    ? rows
+        .filter(
+          (d) =>
+            (d.sys_name && d.sys_name.toLowerCase().includes(t)) ||
+            d.exporter.toLowerCase().includes(t),
+        )
+        .slice(0, 8)
+    : rows.slice(0, 8)
+  const submit = (d: { exporter: string; sys_name: string }) => {
+    onSubmit({
+      key: 'exporter',
+      value: d.exporter,
+      label: d.sys_name || d.exporter,
+    })
+    setText('')
+    setOpen(false)
+  }
+  // Confirmed-selection mode: a chip-like read-only display with ×.
+  // Reads "Device · troy-leaf-01" so the operator can see the dimension
+  // at a glance without scanning the row-2 chip strip.
+  if (current) {
+    return (
+      <div className="flex items-center gap-2 min-w-0">
+        <span className="text-[10.5px] uppercase tracking-[0.1em] text-faint font-semibold">
+          Device
+        </span>
+        <span className="font-mono text-[12px] inline-flex items-center gap-2 pl-2 pr-1 py-1 border border-accent/40 bg-accent-wash text-text">
+          <span className="truncate max-w-[220px]">{current.label ?? current.value}</span>
+          <button
+            type="button"
+            onClick={onClear}
+            aria-label="clear device"
+            className="text-faint hover:text-crit text-[12px] leading-none px-1"
+          >
+            ×
+          </button>
+        </span>
+      </div>
+    )
+  }
+  return (
+    <div className="relative flex items-center gap-2">
+      <span className="text-[10.5px] uppercase tracking-[0.1em] text-faint font-semibold">
+        Device
+      </span>
+      <input
+        value={text}
+        onChange={(e) => {
+          setText(e.target.value)
+          setOpen(true)
+        }}
+        onFocus={() => setOpen(true)}
+        onBlur={() => window.setTimeout(() => setOpen(false), 150)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') {
+            if (matches.length > 0) submit(matches[0])
+          } else if (e.key === 'Escape') {
+            setOpen(false)
+          }
+        }}
+        placeholder="device name or IP"
+        data-testid="filter-device-input"
+        className="font-mono text-[12px] bg-ink border border-line text-text px-2 py-1 outline-none focus:border-accent w-[240px]"
+      />
+      {open && matches.length > 0 && (
+        <ul className="absolute z-20 top-full left-[60px] mt-1 max-h-[280px] overflow-auto bg-ink border border-line shadow-lg min-w-[260px]">
+          {matches.map((d) => (
+            <li key={d.exporter}>
+              <button
+                type="button"
+                onMouseDown={(e) => {
+                  e.preventDefault()
+                  submit(d)
+                }}
+                className="block w-full text-left px-3 py-1.5 font-mono text-[12px] hover:bg-surface"
+              >
+                <div className="text-text truncate">{d.sys_name || d.exporter}</div>
+                {d.sys_name && (
+                  <div className="text-faint text-[10.5px] italic truncate">
+                    {d.exporter}
+                  </div>
+                )}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
+/* ----------------------------- Interface picker ----------------------------- */
+
+// InterfacePicker is the prominent Interface field. It resolves an
+// interface name (if_descr or if_alias substring match) against the
+// SNMP-walked inventory of the selected exporter and chips the
+// resulting ifindex. The chip's label is the human name, so the URL
+// round-trip ("_l_output_ifindex=Gi1/0/24") keeps the chip readable
+// after a hard refresh. Disabled until an exporter is selected —
+// interfaces are not globally addressable; "Gi1/0/24" is meaningful
+// only in the context of a specific device.
+function InterfacePicker({
+  exporter,
+  exporterName,
+  existing,
+  onSubmit,
+  onClear,
+}: {
+  exporter?: string
+  exporterName?: string
+  existing: Filter[]
+  onSubmit: (f: Filter) => void
+  onClear: (k: FilterKey) => void
+}) {
+  const [text, setText] = useState('')
+  // Default to output (egress) — the more common spike-investigation
+  // lens. Operator can flip to ingress before submit.
+  const [direction, setDirection] =
+    useState<'output_ifindex' | 'input_ifindex'>('output_ifindex')
+  const [open, setOpen] = useState(false)
+  const inv = useQuery({
+    queryKey: ['device-inventory', exporter ?? ''],
+    queryFn: () => api.deviceInventory(exporter!),
+    enabled: !!exporter,
+    staleTime: 60_000,
+    refetchInterval: false,
+  })
+  const ifaces = inv.data?.interfaces ?? []
+  const t = text.trim().toLowerCase()
+  const matches = t
+    ? ifaces
+        .filter(
+          (i) =>
+            (i.if_descr && i.if_descr.toLowerCase().includes(t)) ||
+            (i.if_alias && i.if_alias.toLowerCase().includes(t)) ||
+            String(i.ifindex) === t,
+        )
+        .slice(0, 12)
+    : ifaces.slice(0, 12)
+  const submit = (i: { ifindex: number; if_descr: string; if_alias: string }) => {
+    onSubmit({
+      key: direction,
+      value: String(i.ifindex),
+      label: i.if_descr || i.if_alias || `ifindex ${i.ifindex}`,
+      keyLabel: direction === 'input_ifindex' ? 'in iface' : 'out iface',
+    })
+    setText('')
+    setOpen(false)
+  }
+  // Confirmed-selection mode for the active direction. If both
+  // directions are chipped (rare), each shows; if neither, the input
+  // is editable.
+  const inChip = existing.find((x) => x.key === 'input_ifindex')
+  const outChip = existing.find((x) => x.key === 'output_ifindex')
+  const directionChip = direction === 'input_ifindex' ? inChip : outChip
+  const labelText = exporter
+    ? exporterName
+      ? `interface name (on ${exporterName})`
+      : 'interface name (e.g. Gi1/0/24)'
+    : 'pick a device first'
+  return (
+    <div className="relative flex items-center gap-2 flex-1 min-w-[280px]">
+      <span className="text-[10.5px] uppercase tracking-[0.1em] text-faint font-semibold">
+        Interface
+      </span>
+      <div className="inline-flex border border-line overflow-hidden">
+        <DirectionToggle
+          active={direction === 'input_ifindex'}
+          onClick={() => setDirection('input_ifindex')}
+          disabled={!exporter}
+        >
+          in
+        </DirectionToggle>
+        <DirectionToggle
+          active={direction === 'output_ifindex'}
+          onClick={() => setDirection('output_ifindex')}
+          disabled={!exporter}
+        >
+          out
+        </DirectionToggle>
+      </div>
+      {directionChip ? (
+        <span className="font-mono text-[12px] inline-flex items-center gap-2 pl-2 pr-1 py-1 border border-accent/40 bg-accent-wash text-text">
+          <span className="truncate max-w-[200px]">
+            {directionChip.label ?? directionChip.value}
+          </span>
+          <button
+            type="button"
+            onClick={() => onClear(direction)}
+            aria-label="clear interface"
+            className="text-faint hover:text-crit text-[12px] leading-none px-1"
+          >
+            ×
+          </button>
+        </span>
+      ) : (
+        <input
+          value={text}
+          onChange={(e) => {
+            setText(e.target.value)
+            setOpen(true)
+          }}
+          onFocus={() => exporter && setOpen(true)}
+          onBlur={() => window.setTimeout(() => setOpen(false), 150)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && matches.length > 0) submit(matches[0])
+            else if (e.key === 'Escape') setOpen(false)
+          }}
+          disabled={!exporter}
+          placeholder={labelText}
+          data-testid="filter-interface-input"
+          className="font-mono text-[12px] bg-ink border border-line text-text px-2 py-1 outline-none focus:border-accent w-[260px] disabled:bg-surface disabled:text-faint disabled:cursor-not-allowed"
+        />
+      )}
+      {open && matches.length > 0 && !directionChip && (
+        <ul className="absolute z-20 top-full left-[120px] mt-1 max-h-[320px] overflow-auto bg-ink border border-line shadow-lg min-w-[300px]">
+          {matches.map((i) => (
+            <li key={i.ifindex}>
+              <button
+                type="button"
+                onMouseDown={(e) => {
+                  e.preventDefault()
+                  submit(i)
+                }}
+                className="block w-full text-left px-3 py-1.5 font-mono text-[12px] hover:bg-surface"
+              >
+                <div className="flex items-baseline gap-2">
+                  <span className="text-text truncate">
+                    {i.if_descr || `ifindex ${i.ifindex}`}
+                  </span>
+                  <span className="text-faint text-[10.5px]">
+                    ifindex {i.ifindex}
+                  </span>
+                </div>
+                {i.if_alias && (
+                  <div className="text-faint text-[10.5px] italic truncate">
+                    {i.if_alias}
+                  </div>
+                )}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
+function DirectionToggle({
+  active,
+  onClick,
+  disabled,
+  children,
+}: {
+  active: boolean
+  onClick: () => void
+  disabled?: boolean
+  children: ReactNode
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className={`font-mono text-[11px] px-2 py-1 ${
+        active
+          ? 'bg-accent-wash text-text'
+          : 'bg-ink text-dim hover:text-text'
+      } disabled:opacity-50 disabled:cursor-not-allowed`}
+    >
+      {children}
+    </button>
   )
 }
 
@@ -1283,39 +1680,6 @@ function ConversationLeft({ r, onAdd }: { r: TopConversation; onAdd: (f: Filter)
         <span className="text-faint">· {fmt.proto(r.proto)}</span>
       </FilterTrigger>
     </span>
-  )
-}
-
-/* ----------------------------- Filter trigger ----------------------------- */
-
-function FilterTrigger({
-  k,
-  value,
-  label,
-  keyLabel,
-  onAdd,
-  block,
-  children,
-}: {
-  k: FilterKey
-  value: string
-  label?: string
-  keyLabel?: string
-  onAdd: (f: Filter) => void
-  block?: boolean
-  children: ReactNode
-}) {
-  return (
-    <button
-      onClick={() => onAdd({ key: k, value, label, keyLabel })}
-      className={
-        block
-          ? 'block w-full max-w-full min-w-0 text-left truncate hover:text-accent hover:underline decoration-dotted underline-offset-2'
-          : 'hover:text-accent hover:underline decoration-dotted underline-offset-2'
-      }
-    >
-      {children}
-    </button>
   )
 }
 

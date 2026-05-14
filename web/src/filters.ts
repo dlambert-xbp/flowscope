@@ -169,3 +169,33 @@ export function toQuery(filters: Filter[]): URLSearchParams {
   }
   return sp
 }
+
+// setURLFilters replaces all filter chips in the URL with the supplied
+// set in one shot, plus any extra non-filter params (e.g. fs=investigate).
+// Used by cross-tab navigation — chipping an interface on the Devices
+// tab and then switching to Flows → Investigate happens as a single
+// URL write so the Flows page mounts with the chips already in place.
+// Mirrors readFromURL / writeToURL's contract on label round-tripping.
+export function setURLFilters(
+  chips: Filter[],
+  extra?: Record<string, string>,
+): void {
+  if (typeof window === 'undefined') return
+  const sp = new URLSearchParams(window.location.search)
+  for (const k of ALLOWED) {
+    sp.delete(k)
+    sp.delete(LABEL_PARAM_PREFIX + k)
+  }
+  for (const f of chips) {
+    sp.set(f.key, f.value)
+    if (f.label && f.label !== f.value) {
+      sp.set(LABEL_PARAM_PREFIX + f.key, f.label)
+    }
+  }
+  if (extra) {
+    for (const [k, v] of Object.entries(extra)) sp.set(k, v)
+  }
+  const qs = sp.toString()
+  const next = qs ? `${window.location.pathname}?${qs}` : window.location.pathname
+  window.history.replaceState({}, '', next)
+}

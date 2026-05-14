@@ -11,6 +11,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { ThemeToggle } from './theme'
 import { useTimeRange, useLiveInterval, type TimeRange } from './timeRange'
 import { TimeRangeSelector } from './components/TimeRangeSelector'
+import { setURLFilters, type Filter } from './filters'
 type Tab = 'overview' | 'flows' | 'devices' | 'alerts' | 'settings'
 
 const TAB_PARAM = 'tab'
@@ -82,6 +83,17 @@ export function App() {
     setTabState(next)
     writeTabToURL(next)
   }, [])
+  // navigateToFlowsInvestigate lets any tab hand off to Flows →
+  // Investigate with a pre-seeded chip set. Chips are written to the
+  // URL before the tab swap so when Flows() mounts and reads from URL
+  // they're already in place — render-on-state-change.
+  const navigateToFlowsInvestigate = useCallback(
+    (chips: Filter[]) => {
+      setURLFilters(chips, { fs: 'investigate' })
+      setTab('flows')
+    },
+    [setTab],
+  )
   const tr = useTimeRange()
   const showRange = TIME_TABS.has(tab)
   return (
@@ -100,7 +112,11 @@ export function App() {
           <Flows range={tr.range} rangeKey={tr.queryKey} />
         )}
         {tab === 'devices' && (
-          <Devices range={tr.range} rangeKey={tr.queryKey} />
+          <Devices
+            range={tr.range}
+            rangeKey={tr.queryKey}
+            onInvestigate={navigateToFlowsInvestigate}
+          />
         )}
         {tab === 'alerts' && <Alerts />}
         {tab === 'settings' && <Settings />}
