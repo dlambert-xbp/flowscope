@@ -103,14 +103,18 @@ func loadApplied(ctx context.Context, conn driver.Conn) (map[string]bool, error)
 }
 
 // splitStatements breaks a SQL file into individual statements on `;`.
-// `--` line comments are stripped first so semicolons inside comments
-// do not fragment what follows. Migrations must not embed semicolons
+// Both line-leading and inline `--` comments are stripped first so
+// that a semicolon inside an inline comment (e.g.
+// `peer_asn UInt32, -- 32-bit ASN; 16-bit fits naturally`) does not
+// fragment the surrounding statement. `--` inside a single-quoted
+// string literal is preserved. Migrations must not embed semicolons
 // inside string literals.
 func splitStatements(body string) []string {
 	var stripped strings.Builder
 	for _, line := range strings.Split(body, "\n") {
+		line = stripInlineComment(line)
 		t := strings.TrimSpace(line)
-		if t == "" || strings.HasPrefix(t, "--") {
+		if t == "" {
 			continue
 		}
 		stripped.WriteString(line)
@@ -124,4 +128,30 @@ func splitStatements(body string) []string {
 		}
 	}
 	return out
+}
+
+// stripInlineComment returns line truncated at the first `--` that is
+// not inside a single-quoted string literal. SQL `--` comments run to
+// end-of-line, so removing them at split time is equivalent to
+// letting ClickHouse skip them at parse time — but it also keeps
+// semicolons inside those comments from breaking the `;`-split.
+func stripInlineComment(line string) string {
+	inStr := false
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		if c == '\'' {
+			// Doubled '' is a SQL escape for a literal apostrophe and
+			// stays inside the string. Treat it as one paired character.
+			if inStr && i+1 < len(line) && line[i+1] == '\'' {
+				i++
+				continue
+			}
+			inStr = !inStr
+			continue
+		}
+		if !inStr && c == '-' && i+1 < len(line) && line[i+1] == '-' {
+			return line[:i]
+		}
+	}
+	return line
 }

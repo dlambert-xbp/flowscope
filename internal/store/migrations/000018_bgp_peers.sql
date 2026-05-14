@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS bgp_peers
     polled_at        DateTime64(3, 'UTC'),
     exporter         IPv6,                                -- canonical exporter id
     peer_addr        IPv6,                                -- v4-mapped for IPv4 peers
-    peer_asn         UInt32,                              -- 32-bit ASN; 16-bit fits naturally
+    peer_asn         UInt32,                              -- 32-bit ASN (16-bit fits naturally)
     local_asn        UInt32,
     state            LowCardinality(String),              -- 'idle' | 'connect' | 'active' | 'opensent' | 'openconfirm' | 'established' | 'unknown'
     admin_status     LowCardinality(String) DEFAULT '',   -- 'start' | 'stop' | ''
