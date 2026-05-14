@@ -193,21 +193,27 @@ func uint32Value(pdu gosnmp.SnmpPDU) uint32 {
 //
 // Resolution order:
 //
-//  1. ARISTA-BGP4V2-MIB (Arista EOS). Returns peers across every
-//     routing instance the device exposes. Renders instance==1 as
-//     "default" and others as "vrf-<N>" (the MIB does not carry a
-//     VRF-name lookup).
-//  2. cbgpPeer3Table (Cisco VRF-aware) — TODO stub.
-//  3. jnxBgpM2PeerTable (Junos VRF-aware) — TODO stub.
-//  4. RFC 4273 BGP4-MIB. Global routing table only (vrf="default"),
-//     IPv4 peers only, 16-bit ASN. Always works on standards-
-//     compliant gear that runs BGP.
+//  1. ARISTA-VRF-MIB context walk (Arista EOS): discover VRFs on
+//     the device, then walk RFC 4273 BGP4-MIB once per VRF using
+//     `community@vrfname` SNMP context addressing. This is the only
+//     SNMP-accessible source of per-VRF BGP on Arista EOS — no
+//     Arista BGP MIB carries the correlation, but every VRF has its
+//     own SNMP context with a complete BGP4-MIB view.
+//  2. ARISTA-BGP4V2-MIB (Arista EOS, global table only): used as a
+//     fallback when no VRFs are exposed (single-VRF deployments).
+//     Returns peers in the global routing instance with
+//     PeerInstance=1 → vrf="default".
+//  3. cbgpPeer3Table (Cisco VRF-aware) — TODO stub.
+//  4. jnxBgpM2PeerTable (Junos VRF-aware) — TODO stub.
+//  5. RFC 4273 BGP4-MIB (no VRF context). Global routing table
+//     only (vrf="default"), IPv4 peers only, 16-bit ASN. Always
+//     works on standards-compliant gear that runs BGP.
 //
-// The first walker that returns non-empty wins. The chain runs
-// vendor-richest first so the same Cisco / Arista device doesn't
-// produce both global-only BGP4-MIB rows and richer vendor rows
-// (which would dupe under (exporter, peer_addr) at read time).
+// The first walker that returns non-empty wins.
 func (rc *RealClient) WalkBGP(ctx context.Context, target string) ([]BGPPeer, error) {
+	if peers := walkBGPPerVRFArista(ctx, rc.cfg, target); len(peers) > 0 {
+		return peers, nil
+	}
 	g, err := buildGoSNMP(target, rc.cfg, ctx)
 	if err != nil {
 		return nil, fmt.Errorf("snmpx: bgp dial %s: %w", target, err)
@@ -226,6 +232,138 @@ func (rc *RealClient) WalkBGP(ctx context.Context, target string) ([]BGPPeer, er
 		return peers, nil
 	}
 	return walkBGPPeers(g, target)
+}
+
+// walkBGPPerVRFArista is the per-VRF context walker for Arista EOS.
+// Two-step:
+//
+//  1. Open a default-context session and walk aristaVrfTable to get
+//     the list of configured VRFs (banctec_bpo, datacenter,
+//     exela_cloud, …).
+//  2. For each VRF, open a fresh session with community = base@vrf
+//     (v2c) and walk RFC 4273 bgpPeerTable. Tag the resulting
+//     BGPPeer rows with the real VRF name and Source="bgp4-vrf".
+//
+// Returns nil when:
+//   - The device doesn't expose ARISTA-VRF-MIB (not an Arista, or
+//     EOS too old). Caller falls through to the next walker.
+//   - aristaVrfTable returns zero rows (single-VRF EOS deployment
+//     with no configured VRFs). Caller falls through.
+//
+// SNMPv3 contexts are not yet supported by this walker — the
+// per-VRF session keeps cfg.Version="v2c" and only mutates the
+// community. v3 would set ContextName on the gosnmp instance
+// instead; tracked as a follow-up. Most EOS deployments use v2c
+// for SNMP today so this covers the common case.
+func walkBGPPerVRFArista(ctx context.Context, cfg Config, target string) []BGPPeer {
+	if cfg.Version == "v3" {
+		// v3 needs ContextName plumbing — TODO. v2c covers the
+		// common Arista deployment.
+		return nil
+	}
+	if cfg.Community == "" {
+		return nil
+	}
+	vrfs := discoverAristaVRFs(ctx, cfg, target)
+	if len(vrfs) == 0 {
+		return nil
+	}
+	var all []BGPPeer
+	for _, vrf := range vrfs {
+		peers := walkVRFContextBGP(ctx, cfg, target, vrf)
+		all = append(all, peers...)
+	}
+	return all
+}
+
+// discoverAristaVRFs walks aristaVrfTable in the default context and
+// returns the configured VRF names. The OID suffix of any column
+// under the entry is the VRF name encoded as a length-prefixed
+// SnmpAdminString.
+func discoverAristaVRFs(ctx context.Context, cfg Config, target string) []string {
+	g, err := buildGoSNMP(target, cfg, ctx)
+	if err != nil {
+		return nil
+	}
+	if err := g.Connect(); err != nil {
+		return nil
+	}
+	defer g.Conn.Close()
+	var names []string
+	_ = g.BulkWalk(OIDAristaVrfRoutingStatus, func(pdu gosnmp.SnmpPDU) error {
+		n := strings.TrimPrefix(pdu.Name, ".")
+		if !strings.HasPrefix(n, OIDAristaVrfRoutingStatus+".") {
+			return nil
+		}
+		suffix := strings.TrimPrefix(n, OIDAristaVrfRoutingStatus+".")
+		name, ok := parseSnmpAdminStringSuffix(suffix)
+		if !ok {
+			return nil
+		}
+		names = append(names, name)
+		return nil
+	})
+	return names
+}
+
+// parseSnmpAdminStringSuffix decodes an OID-encoded SnmpAdminString:
+// the first sub-OID is the byte length, then `length` sub-OIDs each
+// representing one ASCII byte of the string. Returns the decoded
+// string. Used for aristaVrfTable's vrfName index.
+func parseSnmpAdminStringSuffix(suffix string) (string, bool) {
+	parts := strings.Split(suffix, ".")
+	if len(parts) < 1 {
+		return "", false
+	}
+	n, err := strconv.Atoi(parts[0])
+	if err != nil || n < 0 || n > 255 {
+		return "", false
+	}
+	if len(parts) < 1+n {
+		return "", false
+	}
+	bs := make([]byte, n)
+	for i := 0; i < n; i++ {
+		b, err := strconv.Atoi(parts[1+i])
+		if err != nil || b < 0 || b > 255 {
+			return "", false
+		}
+		bs[i] = byte(b)
+	}
+	return string(bs), true
+}
+
+// walkVRFContextBGP opens a fresh SNMP session against target with
+// community mutated to `base@vrf` (or the bare base for the default
+// VRF), walks RFC 4273 bgpPeerTable, and tags every returned peer
+// with the VRF name. Source is "bgp4-vrf" so reads can distinguish
+// these rows from the global-only "bgp4" walker.
+//
+// Errors are silent (return nil): Arista returns "no such object"
+// when there are no BGP peers in a VRF, and we don't want to spam
+// logs for every empty VRF on every poll cycle.
+func walkVRFContextBGP(ctx context.Context, cfg Config, target, vrf string) []BGPPeer {
+	scoped := cfg
+	if vrf != VRFDefault {
+		scoped.Community = cfg.Community + "@" + vrf
+	}
+	g, err := buildGoSNMP(target, scoped, ctx)
+	if err != nil {
+		return nil
+	}
+	if err := g.Connect(); err != nil {
+		return nil
+	}
+	defer g.Conn.Close()
+	peers, err := walkBGPPeers(g, target)
+	if err != nil {
+		return nil
+	}
+	for i := range peers {
+		peers[i].VRF = vrf
+		peers[i].Source = "bgp4-vrf"
+	}
+	return peers
 }
 
 // walkAristaBGPV2 walks aristaBgp4V2PeerTable + aristaBgp4V2PeerEventTimesTable.

@@ -227,6 +227,32 @@ const (
 	OIDAristaBgp4V2PeerFsmEstTime     = "1.3.6.1.4.1.30065.4.1.1.4.1.1"
 	OIDAristaBgp4V2PeerInUpdElapsed   = "1.3.6.1.4.1.30065.4.1.1.4.1.2"
 
+	// ARISTA-VRF-MIB — operator-configured VRF inventory. Used by
+	// the BGP walker to discover the list of VRFs on the device,
+	// then walk RFC 4273 BGP4-MIB once per VRF using SNMP context
+	// addressing (`community@vrfname` for v2c, contextName for v3).
+	// EOS exposes BGP per VRF via per-context BGP4-MIB views — no
+	// vendor-specific BGP MIB carries the correlation, but every VRF
+	// has its own SNMP context with a complete BGP4-MIB.
+	//
+	//   arista          = 1.3.6.1.4.1.30065
+	//   aristaMibs      = arista.3
+	//   aristaVrfMIB    = aristaMibs.18                 (.30065.3.18)
+	//   aristaVrfMibObjects = aristaVrfMIB.1            (.30065.3.18.1)
+	//   aristaVrfTable  = aristaVrfMibObjects.1         (.30065.3.18.1.1)
+	//   aristaVrfEntry  = aristaVrfTable.1              (.30065.3.18.1.1.1)
+	//
+	// aristaVrfEntry columns:
+	//   .1 aristaVrfName            (index, SnmpAdminString)
+	//   .2 aristaVrfRoutingStatus
+	//   .3 aristaVrfRouteDistinguisher
+	//   .4 aristaVrfState
+	//
+	// We only need the row keys (the VRF names) — those are the
+	// suffixes of any column under the entry. Walking column 4
+	// (RoutingStatus) is cheap and gives us the index per row.
+	OIDAristaVrfRoutingStatus = "1.3.6.1.4.1.30065.3.18.1.1.1.2"
+
 	// JUNIPER-BGP4-V2-MIB jnxBgpM2PeerTable — Junos's modern BGP MIB.
 	// Indexed by jnxBgpM2PeerInstance + jnxBgpM2PeerLocalAddrType +
 	// jnxBgpM2PeerLocalAddr + jnxBgpM2PeerRemoteAddrType +
