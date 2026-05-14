@@ -8,13 +8,10 @@ import type {
   DeviceResourceKind,
   ExporterHealthRow,
   InterfaceRow,
-  RecentFlow,
-  TopService,
-  TopTalker,
 } from '../api'
 import { InterfaceChart } from './InterfaceChart'
 import { TimeseriesChart, resolveColor } from './TimeseriesChart'
-import { ServiceLabel } from './ServiceLabel'
+import { FlowsTopN, FlowsInvestigate } from './Flows'
 import { NeighborsTable, TopologyGraph } from './TopologyGraph'
 import {
   rangeLabel,
@@ -34,13 +31,6 @@ import {
   saveCollapsedGroups,
   type DeviceGroup,
 } from '../lib/deviceGroups'
-import type { Filter } from '../filters'
-
-// NavigateToFlows is the cross-tab navigation primitive injected by
-// the App shell. Devices "Investigate →" buttons use it to deep-link
-// into Flows with the supplied filter chips pre-applied.
-type NavigateToFlows = (filters: Filter[]) => void
-
 const DEVICE_IFACE_COLS: SortColumns<InterfaceRow> = {
   interface: (r) => labelInterface(r).primary,
   in_latest: (r) => r.in_bps_latest,
@@ -48,15 +38,6 @@ const DEVICE_IFACE_COLS: SortColumns<InterfaceRow> = {
   in_peak: (r) => r.in_bps_peak,
   out_peak: (r) => r.out_bps_peak,
   last_seen: (r) => r.last_seen,
-}
-
-const DEVICE_FLOW_COLS: SortColumns<RecentFlow> = {
-  observed: (r) => r.observed,
-  source: (r) => r.source,
-  src_dst: (r) => `${r.src_addr}:${r.src_port} ${r.dst_addr}:${r.dst_port}`,
-  proto: (r) => r.proto,
-  packets: (r) => r.packets,
-  bytes: (r) => r.bytes,
 }
 
 const RAIL_WIDTH_KEY = 'flowscope.devices.railWidth'
@@ -164,11 +145,9 @@ function TwoLine({
 export function Devices({
   range,
   rangeKey,
-  onNavigateToFlows,
 }: {
   range: TimeRange
   rangeKey: unknown
-  onNavigateToFlows: NavigateToFlows
 }) {
   const apiRange = toApi(range)
   const list = useQuery({
@@ -229,7 +208,6 @@ export function Devices({
         exporter={selected}
         range={range}
         rangeKey={rangeKey}
-        onNavigateToFlows={onNavigateToFlows}
         onSelectExporter={setSelected}
       />
     </div>
@@ -620,13 +598,11 @@ function Feature({
   exporter,
   range,
   rangeKey,
-  onNavigateToFlows,
   onSelectExporter,
 }: {
   exporter: string | null
   range: TimeRange
   rangeKey: unknown
-  onNavigateToFlows: NavigateToFlows
   onSelectExporter: (exporter: string) => void
 }) {
   const [sub, setSub] = useState<SubTab>('summary')
@@ -663,7 +639,8 @@ function Feature({
           <FlowsTab
             exporter={exporter}
             exporterLabel={exporterLabel}
-            onNavigateToFlows={onNavigateToFlows}
+            range={range}
+            rangeKey={rangeKey}
           />
         )}
         {sub === 'neighbors' && (
@@ -1746,282 +1723,92 @@ function InterfacesTab({
 
 /* ----------------------------- Flows tab ----------------------------- */
 
+// FlowsTab on the Devices page reuses the Flows-page surfaces (Top-N
+// + Investigate) with the exporter locked to the selected device.
+// The "Live tail" sub-tab from the global Flows page is intentionally
+// omitted here — the operator is in a device context, not a network-
+// wide one, and live tail is filter-agnostic by design.
+type DeviceFlowsSubTab = 'top' | 'investigate'
+
 function FlowsTab({
   exporter,
   exporterLabel,
-  onNavigateToFlows,
+  range,
+  rangeKey,
 }: {
   exporter: string
   exporterLabel: string
-  onNavigateToFlows: NavigateToFlows
+  range: TimeRange
+  rangeKey: unknown
 }) {
-  const q = useQuery({
-    queryKey: ['device-flows', exporter],
-    queryFn: () => api.recentFlows(50, exporter),
-    refetchInterval: useLiveInterval(2000),
-  })
-  const flows = q.data?.flows ?? []
-  const { sortedRows, sortKey, sortDir, toggle } = useTableSort(flows, DEVICE_FLOW_COLS, {
-    key: 'observed',
-    dir: 'desc',
-  })
-  const thProps = (k: string) => ({
-    sortKey: k,
-    active: sortKey === k,
-    dir: sortDir,
-    onToggle: toggle,
-  })
-  const investigateExporter = () =>
-    onNavigateToFlows([{ key: 'exporter', value: exporter, label: exporterLabel }])
+  const [sub, setSub] = useState<DeviceFlowsSubTab>('top')
   return (
     <div>
-      <div className="flex items-baseline gap-3 px-4 py-3 border-b border-line">
-        <span className="text-[11px] uppercase tracking-[0.1em] text-dim font-semibold">
-          Recent flows reported by this exporter
-        </span>
-        <span className="font-mono text-[11px] text-faint">
-          {q.isLoading ? 'loading…' : `${flows.length} most recent`}
-        </span>
-        <button
-          onClick={investigateExporter}
-          className="ml-auto font-mono text-[10.5px] tracking-[0.06em] text-accent hover:underline"
-        >
-          Investigate on Flows →
-        </button>
-      </div>
       <p className="px-4 py-2 text-[11.5px] text-dim border-b border-line bg-surface leading-[1.5]">
         Switches export flows for traffic they <span className="text-text">forward</span>, not just
         traffic addressed to themselves. Source and destination IPs here are endpoints elsewhere on
         the network — this device just observed the conversation.
       </p>
-      {flows.length === 0 ? (
-        <div className="px-4 py-8 text-center text-[12px] font-mono text-dim">
-          no flows yet for this exporter
-        </div>
-      ) : (
-        <table className="w-full table-fixed">
-          <colgroup>
-            <col style={{ width: '110px' }} />
-            <col style={{ width: '90px' }} />
-            <col />
-            <col style={{ width: '70px' }} />
-            <col style={{ width: '90px' }} />
-            <col style={{ width: '90px' }} />
-          </colgroup>
-          <thead>
-            <tr>
-              <Th {...thProps('observed')}>time</Th>
-              <Th {...thProps('source')}>source</Th>
-              <Th {...thProps('src_dst')}>src → dst</Th>
-              <Th {...thProps('proto')}>proto</Th>
-              <Th {...thProps('packets')} align="r">packets</Th>
-              <Th {...thProps('bytes')} align="r">bytes</Th>
-            </tr>
-          </thead>
-          <tbody>
-            {sortedRows.map((f: RecentFlow, i: number) => (
-              <tr key={i} className="hover:bg-surface">
-                <td className="n text-faint">{fmt.time(f.observed).slice(11, 23)}</td>
-                <td className="n text-dim">{f.source}</td>
-                <td className="n truncate">
-                  {f.src_addr}:{f.src_port}{' '}
-                  <span className="text-faint">→</span>{' '}
-                  {f.dst_addr}:{f.dst_port}
-                </td>
-                <td className="font-mono text-accent">{fmt.proto(f.proto)}</td>
-                <td className="r n">{fmt.num(f.packets)}</td>
-                <td className="r n">{fmt.bytes(f.bytes)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+      <FlowsSubTabBar active={sub} onChange={setSub} />
+      {sub === 'top' && (
+        <FlowsTopN
+          range={range}
+          rangeKey={rangeKey}
+          lockedExporter={exporter}
+          lockedExporterLabel={exporterLabel}
+        />
       )}
-      <div className="grid grid-cols-1 lg:grid-cols-2 border-t border-line">
-        <MiniTalkers
-          exporter={exporter}
-          exporterLabel={exporterLabel}
-          onNavigateToFlows={onNavigateToFlows}
+      {sub === 'investigate' && (
+        <FlowsInvestigate
+          range={range}
+          rangeKey={rangeKey}
+          lockedExporter={exporter}
+          lockedExporterLabel={exporterLabel}
         />
-        <MiniServices
-          exporter={exporter}
-          exporterLabel={exporterLabel}
-          onNavigateToFlows={onNavigateToFlows}
-        />
-      </div>
+      )}
     </div>
   )
 }
 
-/* ----------------------- Top-5 mini panels ----------------------- */
-
-function MiniPanelHead({
-  title,
-  sub,
-  onInvestigate,
-  borderRight,
+function FlowsSubTabBar({
+  active,
+  onChange,
 }: {
-  title: string
-  sub: string
-  onInvestigate: () => void
-  borderRight?: boolean
+  active: DeviceFlowsSubTab
+  onChange: (s: DeviceFlowsSubTab) => void
 }) {
   return (
-    <div
-      className={`flex items-baseline gap-3 px-4 py-3 border-b border-line ${
-        borderRight ? 'lg:border-r' : ''
+    <div className="flex border-b border-line bg-ink">
+      <FlowsSubTabBtn id="top" active={active} onChange={onChange}>Top-N</FlowsSubTabBtn>
+      <FlowsSubTabBtn id="investigate" active={active} onChange={onChange}>Investigate</FlowsSubTabBtn>
+    </div>
+  )
+}
+
+function FlowsSubTabBtn({
+  id,
+  active,
+  onChange,
+  children,
+}: {
+  id: DeviceFlowsSubTab
+  active: DeviceFlowsSubTab
+  onChange: (s: DeviceFlowsSubTab) => void
+  children: ReactNode
+}) {
+  const selected = id === active
+  return (
+    <button
+      type="button"
+      onClick={() => onChange(id)}
+      data-testid={`device-flows-subtab-${id}`}
+      className={`relative px-4 py-2.5 text-[13px] border-r border-line ${
+        selected ? 'text-text' : 'text-dim hover:text-text hover:bg-surface'
       }`}
     >
-      <span className="text-[11px] uppercase tracking-[0.1em] text-dim font-semibold">
-        {title}
-      </span>
-      <span className="font-mono text-[11px] text-faint">{sub}</span>
-      <button
-        onClick={onInvestigate}
-        className="ml-auto font-mono text-[10.5px] tracking-[0.06em] text-accent hover:underline"
-      >
-        Investigate →
-      </button>
-    </div>
-  )
-}
-
-function MiniBars<T>({
-  rows,
-  loading,
-  empty,
-  keyOf,
-  renderLeft,
-  renderRight,
-  valueOf,
-}: {
-  rows: T[]
-  loading: boolean
-  empty: string
-  keyOf: (r: T) => string
-  renderLeft: (r: T) => ReactNode
-  renderRight: (r: T) => ReactNode
-  valueOf: (r: T) => number
-}) {
-  if (loading) {
-    return <div className="px-4 py-6 text-faint font-mono text-[12px]">loading…</div>
-  }
-  if (rows.length === 0) {
-    return <div className="px-4 py-6 text-center text-[12px] font-mono text-dim">{empty}</div>
-  }
-  const total = rows.reduce((a, r) => a + valueOf(r), 0)
-  return (
-    <ul>
-      {rows.map((r) => {
-        const v = valueOf(r)
-        const pct = total > 0 ? (v / total) * 100 : 0
-        return (
-          <li
-            key={keyOf(r)}
-            className="px-4 py-2 border-b border-line-soft last:border-b-0 hover:bg-surface"
-          >
-            <div className="flex items-baseline justify-between gap-3">
-              <div className="min-w-0 truncate">{renderLeft(r)}</div>
-              <div className="font-mono text-[12px] tabular text-text shrink-0">
-                {renderRight(r)}
-              </div>
-            </div>
-            <div className="mt-1.5 h-px bg-line w-full overflow-hidden">
-              <div
-                className="h-full bg-accent"
-                style={{ width: `${Math.min(100, Math.max(0, pct))}%` }}
-              />
-            </div>
-          </li>
-        )
-      })}
-    </ul>
-  )
-}
-
-function MiniTalkers({
-  exporter,
-  exporterLabel,
-  onNavigateToFlows,
-}: {
-  exporter: string
-  exporterLabel: string
-  onNavigateToFlows: NavigateToFlows
-}) {
-  const qs = new URLSearchParams({ exporter })
-  const q = useQuery({
-    queryKey: ['device-mini-talkers', exporter],
-    queryFn: () => api.topTalkers(qs, 300, 5, 'bytes'),
-    refetchInterval: useLiveInterval(5000),
-  })
-  return (
-    <section className="lg:border-r lg:border-line">
-      <MiniPanelHead
-        title="Top talkers"
-        sub="this exporter · 5min · by bytes"
-        onInvestigate={() =>
-          onNavigateToFlows([{ key: 'exporter', value: exporter, label: exporterLabel }])
-        }
-      />
-      <MiniBars
-        rows={q.data?.rows ?? []}
-        loading={q.isLoading}
-        empty="no talkers in last 5 min"
-        keyOf={(r: TopTalker) => `${r.src_addr}>${r.dst_addr}`}
-        renderLeft={(r) => (
-          <span className="font-mono text-[12px]">
-            <span className="text-text">{r.src_addr}</span>{' '}
-            <span className="text-faint">→</span>{' '}
-            <span className="text-text">{r.dst_addr}</span>
-          </span>
-        )}
-        renderRight={(r) => fmt.bytes(r.bytes)}
-        valueOf={(r) => r.bytes}
-      />
-    </section>
-  )
-}
-
-function MiniServices({
-  exporter,
-  exporterLabel,
-  onNavigateToFlows,
-}: {
-  exporter: string
-  exporterLabel: string
-  onNavigateToFlows: NavigateToFlows
-}) {
-  const qs = new URLSearchParams({ exporter })
-  const q = useQuery({
-    queryKey: ['device-mini-services', exporter],
-    queryFn: () => api.topServices(qs, 300, 5, 'bytes'),
-    refetchInterval: useLiveInterval(5000),
-  })
-  return (
-    <section>
-      <MiniPanelHead
-        title="Top services"
-        sub="this exporter · 5min · by bytes"
-        onInvestigate={() =>
-          onNavigateToFlows([{ key: 'exporter', value: exporter, label: exporterLabel }])
-        }
-      />
-      <MiniBars
-        rows={q.data?.rows ?? []}
-        loading={q.isLoading}
-        empty="no services in last 5 min"
-        keyOf={(r: TopService) => `${r.dst_port}_${r.proto}`}
-        renderLeft={(r) => (
-          <span className="font-mono text-[12px] text-text">
-            <ServiceLabel proto={r.proto} port={r.dst_port} />{' '}
-            <span className="text-faint">
-              · {fmt.proto(r.proto)} {r.dst_port}
-            </span>
-          </span>
-        )}
-        renderRight={(r) => fmt.bytes(r.bytes)}
-        valueOf={(r) => r.bytes}
-      />
-    </section>
+      {children}
+      {selected && <span className="absolute left-0 right-0 -bottom-px h-0.5 bg-accent" />}
+    </button>
   )
 }
 

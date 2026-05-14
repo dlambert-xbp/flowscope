@@ -11,11 +11,8 @@ import { useQueryClient } from '@tanstack/react-query'
 import { ThemeToggle } from './theme'
 import { useTimeRange, useLiveInterval, type TimeRange } from './timeRange'
 import { TimeRangeSelector } from './components/TimeRangeSelector'
-import { FILTER_KEYS, type Filter } from './filters'
-
 type Tab = 'overview' | 'flows' | 'devices' | 'alerts' | 'settings'
 
-const LABEL_PREFIX = '_l_'
 const TAB_PARAM = 'tab'
 const DEFAULT_TAB: Tab = 'overview'
 
@@ -87,28 +84,6 @@ export function App() {
   }, [])
   const tr = useTimeRange()
   const showRange = TIME_TABS.has(tab)
-  // Cross-tab navigation primitive: writes filter chips into the URL,
-  // then switches tabs. Devices "Investigate →" links use this to
-  // deep-link into Flows pre-filtered to the current exporter.
-  const navigateToFlows = useCallback((filters: Filter[]) => {
-    const sp = new URLSearchParams(window.location.search)
-    for (const k of FILTER_KEYS) {
-      sp.delete(k)
-      sp.delete(LABEL_PREFIX + k)
-    }
-    for (const f of filters) {
-      sp.set(f.key, f.value)
-      if (f.label && f.label !== f.value) {
-        sp.set(LABEL_PREFIX + f.key, f.label)
-      }
-    }
-    const qs = sp.toString()
-    const next = qs
-      ? `${window.location.pathname}?${qs}`
-      : window.location.pathname
-    window.history.replaceState({}, '', next)
-    setTab('flows')
-  }, [setTab])
   return (
     <div
       className="grid bg-ink text-text overflow-hidden h-screen"
@@ -125,11 +100,7 @@ export function App() {
           <Flows range={tr.range} rangeKey={tr.queryKey} />
         )}
         {tab === 'devices' && (
-          <Devices
-            range={tr.range}
-            rangeKey={tr.queryKey}
-            onNavigateToFlows={navigateToFlows}
-          />
+          <Devices range={tr.range} rangeKey={tr.queryKey} />
         )}
         {tab === 'alerts' && <Alerts />}
         {tab === 'settings' && <Settings />}

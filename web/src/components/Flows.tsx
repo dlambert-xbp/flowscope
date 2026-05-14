@@ -169,15 +169,34 @@ function FlowSubTabBtn({
 // FlowsTopN is the Top-N analysis surface: filter chips on top, then
 // Top talkers / services / protocols / conversations / interfaces /
 // ASN tabs with a sort + page-size selector.
-function FlowsTopN({
+//
+// When lockedExporter is set (Devices → Flows sub-tab), filter state
+// is local (not URL-backed), the exporter dimension is hidden from
+// the filter builder, and every API query is forced to scope to the
+// locked exporter regardless of chip state.
+export function FlowsTopN({
   range,
   rangeKey,
+  lockedExporter,
+  lockedExporterLabel,
 }: {
   range: TimeRange
   rangeKey: unknown
+  lockedExporter?: string
+  lockedExporterLabel?: string
 }) {
-  const f = useFilters()
-  const qs = toQuery(f.filters)
+  const f = useFilters({ local: !!lockedExporter })
+  const add = lockedExporter
+    ? (filt: Filter) => {
+        if (filt.key === 'exporter') return
+        f.add(filt)
+      }
+    : f.add
+  const visibleFilters = lockedExporter
+    ? f.filters.filter((x) => x.key !== 'exporter')
+    : f.filters
+  const qs = toQuery(visibleFilters)
+  if (lockedExporter) qs.set('exporter', lockedExporter)
   const apiRange = toApi(range)
   const [tab, setTab] = useState<TabId>('talkers')
   const [sortBy, setSortBy] = useState<TopNSort>('bytes')
@@ -186,11 +205,17 @@ function FlowsTopN({
   return (
     <div>
       <FilterBar
-        filters={f.filters}
-        onAdd={f.add}
+        filters={visibleFilters}
+        onAdd={add}
         onRemove={f.remove}
         onClear={f.clear}
         range={range}
+        excludeKeys={lockedExporter ? EXPORTER_ONLY : undefined}
+        lockedNote={
+          lockedExporter
+            ? { label: 'scoped to', value: lockedExporterLabel || lockedExporter }
+            : undefined
+        }
       />
       <TabBar
         tab={tab}
@@ -207,7 +232,7 @@ function FlowsTopN({
         rangeKey={rangeKey}
         sortBy={sortBy}
         topN={topN}
-        onAdd={f.add}
+        onAdd={add}
         onDrill={setDrill}
       />
       <FlowDrawer
@@ -220,33 +245,56 @@ function FlowsTopN({
   )
 }
 
+const EXPORTER_ONLY: FilterKey[] = ['exporter']
+
 // FlowsInvestigate renders the paginated, sortable flow table.
-// URL-synced filter chips share state with FlowsTopN. The body is
-// only meaningful when at least one filter narrows the set — without
-// filters the table would just be a window-wide flow dump, which
-// isn't what "investigation" is for. Empty-filter state shows a
-// prompt to add a filter.
-function FlowsInvestigate({
+// URL-synced filter chips share state with FlowsTopN. When
+// lockedExporter is set (Devices → Flows sub-tab), filter state is
+// local and the exporter is always pinned to the selected device —
+// so the empty-filter prompt is suppressed (the locked exporter is
+// itself a narrowing) and the table renders immediately.
+export function FlowsInvestigate({
   range,
   rangeKey,
+  lockedExporter,
+  lockedExporterLabel,
 }: {
   range: TimeRange
   rangeKey: unknown
+  lockedExporter?: string
+  lockedExporterLabel?: string
 }) {
-  const f = useFilters()
-  const qs = toQuery(f.filters)
+  const f = useFilters({ local: !!lockedExporter })
+  const add = lockedExporter
+    ? (filt: Filter) => {
+        if (filt.key === 'exporter') return
+        f.add(filt)
+      }
+    : f.add
+  const visibleFilters = lockedExporter
+    ? f.filters.filter((x) => x.key !== 'exporter')
+    : f.filters
+  const qs = toQuery(visibleFilters)
+  if (lockedExporter) qs.set('exporter', lockedExporter)
   const apiRange = toApi(range)
   const [drill, setDrill] = useState<FlowDrillDown | null>(null)
+  const showEmptyPrompt = !lockedExporter && visibleFilters.length === 0
   return (
     <div>
       <FilterBar
-        filters={f.filters}
-        onAdd={f.add}
+        filters={visibleFilters}
+        onAdd={add}
         onRemove={f.remove}
         onClear={f.clear}
         range={range}
+        excludeKeys={lockedExporter ? EXPORTER_ONLY : undefined}
+        lockedNote={
+          lockedExporter
+            ? { label: 'scoped to', value: lockedExporterLabel || lockedExporter }
+            : undefined
+        }
       />
-      {f.filters.length === 0 ? (
+      {showEmptyPrompt ? (
         <div className="px-6 py-10 text-center text-[13px] font-mono text-dim">
           Add a filter above to investigate matching flows.{' '}
           <span className="text-faint">
@@ -258,7 +306,7 @@ function FlowsInvestigate({
           qs={qs}
           range={apiRange}
           rangeKey={rangeKey}
-          onAdd={f.add}
+          onAdd={add}
           onDrill={setDrill}
         />
       )}
@@ -280,12 +328,21 @@ function FilterBar({
   onRemove,
   onClear,
   range,
+  excludeKeys,
+  lockedNote,
 }: {
   filters: Filter[]
   onAdd: (f: Filter) => void
   onRemove: (key: FilterKey, value?: string) => void
   onClear: () => void
   range: TimeRange
+  // excludeKeys hides dimensions from the FilterBuilder (e.g. when an
+  // exporter is locked by parent context — the dropdown shouldn't
+  // offer to add another exporter filter).
+  excludeKeys?: FilterKey[]
+  // lockedNote renders a neutral "scoped to <X>" chip next to the
+  // window chip so the operator can see the active locked context.
+  lockedNote?: { label: string; value: string }
 }) {
   const has = filters.length > 0
   const [building, setBuilding] = useState(false)
@@ -296,6 +353,12 @@ function FilterBar({
           Filters
         </span>
         <Chip neutral>window · {rangeLabel(range)}</Chip>
+        {lockedNote && (
+          <Chip neutral>
+            <span className="text-faint">{lockedNote.label} ·</span>{' '}
+            <span className="text-text">{lockedNote.value}</span>
+          </Chip>
+        )}
         {filters.map((f) => (
           <Chip key={`${f.key}_${f.value}`} onRemove={() => onRemove(f.key, f.value)}>
             <span className="text-faint">{f.keyLabel ?? keyLabelFor(f.key)} ·</span>{' '}
@@ -328,6 +391,7 @@ function FilterBar({
       {building && (
         <FilterBuilder
           existing={filters}
+          excludeKeys={excludeKeys}
           onAdd={(f) => {
             onAdd(f)
             setBuilding(false)
@@ -349,14 +413,22 @@ function FilterBar({
 // (one-value-per-key invariant in useFilters).
 function FilterBuilder({
   existing,
+  excludeKeys,
   onAdd,
   onCancel,
 }: {
   existing: Filter[]
+  // excludeKeys removes dimensions from the dropdown — used when the
+  // caller pins a dimension externally (e.g. a device-scoped view
+  // that already forces exporter).
+  excludeKeys?: FilterKey[]
   onAdd: (f: Filter) => void
   onCancel: () => void
 }) {
-  const [key, setKey] = useState<FilterKey>('exporter')
+  const excluded = new Set<FilterKey>(excludeKeys ?? [])
+  const availableKeys = FILTER_KEYS.filter((k) => !excluded.has(k))
+  const defaultKey: FilterKey = availableKeys[0] ?? 'src_addr'
+  const [key, setKey] = useState<FilterKey>(defaultKey)
   const [value, setValue] = useState<string>('')
   const [label, setLabel] = useState<string>('')
   const [error, setError] = useState<string | null>(null)
@@ -463,7 +535,7 @@ function FilterBuilder({
         }}
         className="font-mono text-[12px] bg-surface border border-line text-text px-2 py-1 outline-none focus:border-accent"
       >
-        {FILTER_KEYS.map((k) => (
+        {availableKeys.map((k) => (
           <option key={k} value={k}>
             {keyLabelFor(k)}
           </option>

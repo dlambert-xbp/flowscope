@@ -112,28 +112,33 @@ function writeToURL(filters: Filter[]) {
   }
 }
 
-// useFilters is the single source of truth for Flows-tab filter chips.
-// Components consuming filters subscribe to {filters, add, remove,
-// clear} and pass the same array to the api wrappers.
-export function useFilters(): {
+// useFilters is the source of truth for filter chips. By default it
+// reads/writes the URL (shared, shareable state for the main Flows
+// tab). When called with { local: true } it uses pure local state —
+// used by the Devices → Flows sub-tab so chips on a device-scoped
+// view don't leak into the global Flows-tab URL state.
+export function useFilters(opts?: { local?: boolean }): {
   filters: Filter[]
   add: (f: Filter) => void
   remove: (key: FilterKey, value?: string) => void
   clear: () => void
 } {
-  const [filters, setFilters] = useState<Filter[]>(() => readFromURL())
+  const local = !!opts?.local
+  const [filters, setFilters] = useState<Filter[]>(() => (local ? [] : readFromURL()))
 
   // React to back/forward navigation that may change the URL.
   useEffect(() => {
+    if (local) return
     const onPop = () => setFilters(readFromURL())
     window.addEventListener('popstate', onPop)
     return () => window.removeEventListener('popstate', onPop)
-  }, [])
+  }, [local])
 
   // Sync URL whenever filters change.
   useEffect(() => {
+    if (local) return
     writeToURL(filters)
-  }, [filters])
+  }, [filters, local])
 
   const add = useCallback((f: Filter) => {
     setFilters((curr) => {
