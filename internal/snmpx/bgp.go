@@ -257,19 +257,28 @@ func (rc *RealClient) WalkBGP(ctx context.Context, target string) ([]BGPPeer, er
 // instead; tracked as a follow-up. Most EOS deployments use v2c
 // for SNMP today so this covers the common case.
 func walkBGPPerVRFArista(ctx context.Context, cfg Config, target string) []BGPPeer {
-	if cfg.Version == "v3" {
-		// v3 needs ContextName plumbing — TODO. v2c covers the
-		// common Arista deployment.
-		slog.Debug("snmp: bgp per-vrf skipped (v3 not yet supported)", "exporter", target)
-		return nil
-	}
-	if cfg.Community == "" {
-		slog.Debug("snmp: bgp per-vrf skipped (no community)", "exporter", target)
+	// Both v2c and v3 are supported. v2c uses community@vrf
+	// addressing; v3 uses ContextName on the gosnmp session. Bail
+	// only if we don't have credentials of either flavor.
+	switch cfg.Version {
+	case "", "v2c":
+		if cfg.Community == "" {
+			slog.Info("snmp: bgp per-vrf skipped (v2c with no community)", "exporter", target)
+			return nil
+		}
+	case "v3":
+		if cfg.V3Username == "" {
+			slog.Info("snmp: bgp per-vrf skipped (v3 with no username)", "exporter", target)
+			return nil
+		}
+	default:
+		slog.Info("snmp: bgp per-vrf skipped (unsupported version)", "exporter", target, "version", cfg.Version)
 		return nil
 	}
 	vrfs := discoverAristaVRFs(ctx, cfg, target)
 	slog.Info("snmp: bgp per-vrf vrf discovery",
 		"exporter", target,
+		"version", cfg.Version,
 		"vrfs_found", len(vrfs),
 		"vrfs", vrfs,
 	)
@@ -351,11 +360,17 @@ func parseSnmpAdminStringSuffix(suffix string) (string, bool) {
 	return string(bs), true
 }
 
-// walkVRFContextBGP opens a fresh SNMP session against target with
-// community mutated to `base@vrf` (or the bare base for the default
-// VRF), walks RFC 4273 bgpPeerTable, and tags every returned peer
-// with the VRF name. Source is "bgp4-vrf" so reads can distinguish
-// these rows from the global-only "bgp4" walker.
+// walkVRFContextBGP opens a fresh SNMP session targeting the named
+// VRF context, walks RFC 4273 bgpPeerTable, and tags every returned
+// peer with the VRF name. Source is "bgp4-vrf" so reads can
+// distinguish these rows from the global-only "bgp4" walker.
+//
+// Per-VRF addressing depends on SNMP version:
+//   - v2c: mutate community to `base@vrfname` (Arista convention).
+//   - v3:  set ContextName on the gosnmp session via cfg.V3Context.
+//
+// Default VRF queries the device's default context (bare community
+// for v2c, empty ContextName for v3).
 //
 // Errors are silent (return nil): Arista returns "no such object"
 // when there are no BGP peers in a VRF, and we don't want to spam
@@ -363,7 +378,14 @@ func parseSnmpAdminStringSuffix(suffix string) (string, bool) {
 func walkVRFContextBGP(ctx context.Context, cfg Config, target, vrf string) []BGPPeer {
 	scoped := cfg
 	if vrf != VRFDefault {
-		scoped.Community = cfg.Community + "@" + vrf
+		switch cfg.Version {
+		case "", "v2c":
+			scoped.Community = cfg.Community + "@" + vrf
+		case "v3":
+			// buildGoSNMP forwards V3Context → gosnmp.ContextName
+			// so the v3 PDU carries the per-VRF context name.
+			scoped.V3Context = vrf
+		}
 	}
 	g, err := buildGoSNMP(target, scoped, ctx)
 	if err != nil {
