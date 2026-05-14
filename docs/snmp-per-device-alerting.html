@@ -1,0 +1,649 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>FlowScope · per-device SNMP alerting</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root {
+      --ink:     #0c0f14;
+      --surface: #131820;
+      --raise:   #1a212c;
+      --line:    #232b39;
+      --text:    #e6e9ef;
+      --dim:     #a6adba;
+      --faint:   #5d6776;
+      --accent:  #ff7a47;
+      --ok:      #4ec98c;
+      --warn:    #e8c45a;
+      --crit:    #e26b6b;
+      --info:    #6da9e8;
+      --mono:    ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    }
+    * { box-sizing: border-box; }
+    html, body { background: var(--ink); color: var(--text); margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, system-ui, sans-serif; line-height: 1.55; }
+    main { max-width: 1180px; margin: 0 auto; padding: 32px 24px 64px; }
+    h1 { font-size: 22px; letter-spacing: -0.01em; margin: 0 0 4px; font-weight: 600; }
+    .eyebrow { font-family: var(--mono); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.16em; color: var(--faint); font-weight: 600; }
+    p { color: var(--dim); font-size: 14px; max-width: 82ch; margin: 8px 0 0; }
+    p + p { margin-top: 10px; }
+    section { margin-top: 40px; padding-top: 24px; border-top: 1px solid var(--line); }
+    h2 { font-size: 13px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--dim); font-weight: 600; margin: 0 0 16px; font-family: var(--mono); }
+    h3 { font-size: 12.5px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text); font-weight: 600; margin: 24px 0 8px; font-family: var(--mono); }
+    code { font-family: var(--mono); font-size: 12.5px; background: var(--raise); padding: 1px 6px; border: 1px solid var(--line); color: var(--text); }
+    pre { font-family: var(--mono); font-size: 12.5px; background: var(--surface); border: 1px solid var(--line); padding: 14px 16px; overflow-x: auto; color: var(--text); margin: 12px 0 0; line-height: 1.55; }
+    pre .kw { color: var(--accent); }
+    pre .ty { color: var(--info); }
+    pre .lit { color: var(--ok); }
+    pre .cm { color: var(--faint); font-style: italic; }
+    pre .id { color: var(--text); }
+    .diagram { background: var(--surface); border: 1px solid var(--line); padding: 12px; overflow-x: auto; }
+    svg { display: block; margin: 0 auto; max-width: 100%; height: auto; }
+    .legend { display: flex; gap: 18px; flex-wrap: wrap; margin-top: 18px; font-family: var(--mono); font-size: 11.5px; color: var(--dim); }
+    .legend .pill { display: inline-flex; align-items: center; gap: 6px; }
+    .legend .pill::before { content: ""; width: 10px; height: 10px; border-radius: 2px; }
+    .legend .tmpl::before  { background: var(--accent); }
+    .legend .inst::before  { background: var(--info); }
+    .legend .scope::before { background: var(--warn); }
+    .legend .store::before { background: var(--ok); }
+    .legend .arrow::before { background: var(--faint); width: 14px; height: 2px; border-radius: 0; }
+    .table { margin-top: 16px; font-family: var(--mono); font-size: 12px; width: 100%; border-collapse: collapse; }
+    .table th, .table td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    .table th { color: var(--faint); text-transform: uppercase; letter-spacing: 0.06em; font-size: 10.5px; font-weight: 600; }
+    .table td { color: var(--dim); }
+    .table td:first-child { color: var(--text); white-space: nowrap; }
+    .table td.t { color: var(--info); }
+    .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px; }
+    .row3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; margin-top: 16px; }
+    .card { border: 1px solid var(--line); background: var(--raise); padding: 14px 16px; }
+    .card h3 { margin: 0 0 6px; font-size: 11.5px; letter-spacing: 0.08em; text-transform: uppercase; font-family: var(--mono); color: var(--dim); }
+    .card p { margin: 0; font-size: 13px; color: var(--dim); }
+    .card .num { font-family: var(--mono); color: var(--accent); font-weight: 600; font-size: 11px; letter-spacing: 0.06em; }
+    .tag { display: inline-block; font-family: var(--mono); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em; padding: 1px 6px; border: 1px solid var(--line); margin-right: 6px; color: var(--dim); }
+    .tag.accent { color: var(--accent); border-color: var(--accent); }
+    .tag.ok     { color: var(--ok); border-color: var(--ok); }
+    .tag.info   { color: var(--info); border-color: var(--info); }
+    .tag.warn   { color: var(--warn); border-color: var(--warn); }
+    .tag.crit   { color: var(--crit); border-color: var(--crit); }
+    .phase { border: 1px solid var(--line); background: var(--surface); padding: 16px 18px; margin-top: 14px; }
+    .phase header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 6px; }
+    .phase header .num { font-family: var(--mono); color: var(--accent); font-weight: 600; font-size: 11px; letter-spacing: 0.1em; }
+    .phase header h3 { margin: 0; font-size: 13.5px; letter-spacing: 0; text-transform: none; color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, system-ui, sans-serif; font-weight: 600; }
+    .phase header .meta { margin-left: auto; font-family: var(--mono); font-size: 10.5px; color: var(--faint); letter-spacing: 0.06em; }
+    .phase ul { margin: 8px 0 0; padding-left: 18px; color: var(--dim); font-size: 13.5px; }
+    .phase ul li { margin-bottom: 4px; }
+    .phase ul li code { font-size: 12px; }
+    .callout { border-left: 2px solid var(--accent); background: var(--raise); padding: 10px 14px; margin-top: 14px; font-size: 13.5px; color: var(--dim); }
+    .callout strong { color: var(--text); font-weight: 600; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="eyebrow">FlowScope · design · alerting</div>
+    <h1>Per-device SNMP alerting<span style="color:var(--accent)">.</span></h1>
+    <p>Today every alert rule is a Go struct in <code>internal/alerteng</code> with one global parameter set. Operators want to say <em>"this WAN interface alerts at 70%, those backbone uplinks at 90%"</em>, <em>"page if the BGP peer to AS65001 on edge-1 goes down"</em>, or <em>"alert when this vendor-specific power-supply OID returns notOK on any chassis I tag as core"</em> — none of which the current shape expresses. This document lays out a templates-and-instances model with two flavors of template (built-in code and user-defined GUI-built), the schema and migrations to land it, and the order to ship the work in so each phase ships standalone value.</p>
+
+    <section>
+      <h2>The model</h2>
+      <p>Three concepts. <strong>Templates</strong> are the existing Go-coded rule types — they own the SQL, the violation copy, and the parameter shape. <strong>Instances</strong> are operator-created bindings of <em>one template + one scope selector + one parameter set</em>. <strong>Scope selectors</strong> are the small structured matcher language that binds an instance to a subset of devices, interfaces, or peers.</p>
+
+      <div class="diagram" style="margin-top:16px">
+        <svg viewBox="0 0 1100 460" role="img" aria-label="Templates, instances, and scope selectors">
+          <defs>
+            <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="#a6adba" />
+            </marker>
+            <style>
+              .nd rect { stroke: #232b39; stroke-width: 1.5; }
+              .nd text { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+              .tmpl rect  { fill: #2a1e15; stroke: #ff7a47; }
+              .tmpl text  { fill: #ff7a47; font-weight: 600; }
+              .tmpl .sub  { fill: #d6b8a3; font-weight: 400; }
+              .inst rect  { fill: #16243a; stroke: #6da9e8; }
+              .inst text  { fill: #6da9e8; font-weight: 600; }
+              .inst .sub  { fill: #b3cdf2; font-weight: 400; }
+              .scope rect { fill: #2a2510; stroke: #e8c45a; }
+              .scope text { fill: #e8c45a; font-weight: 600; }
+              .scope .sub { fill: #f0dfa3; font-weight: 400; }
+              .store rect { fill: #112a1d; stroke: #4ec98c; }
+              .store text { fill: #4ec98c; font-weight: 600; }
+              .store .sub { fill: #b8e6cd; font-weight: 400; font-size: 10.5px; }
+              .lbl  { font-family: ui-monospace, monospace; fill: #5d6776; font-size: 10.5px; letter-spacing: 0.18em; text-transform: uppercase; font-weight: 600; }
+              .edge { stroke: #5d6776; stroke-width: 1.5; fill: none; }
+              .edge-strong { stroke: #a6adba; stroke-width: 1.8; fill: none; }
+              .elbl { font-family: ui-monospace, monospace; fill: #5d6776; font-size: 10.5px; }
+            </style>
+          </defs>
+
+          <text x="40" y="36" class="lbl">templates · code</text>
+
+          <g class="nd tmpl">
+            <rect x="40" y="56" width="240" height="56" rx="6" />
+            <text x="160" y="80" text-anchor="middle" font-size="12.5">InterfaceUtilizationHigh</text>
+            <text x="160" y="98" text-anchor="middle" font-size="10.5" class="sub">params: threshold_pct, window_s</text>
+          </g>
+          <g class="nd tmpl">
+            <rect x="40" y="124" width="240" height="56" rx="6" />
+            <text x="160" y="148" text-anchor="middle" font-size="12.5">InterfaceOperStatusChange</text>
+            <text x="160" y="166" text-anchor="middle" font-size="10.5" class="sub">params: debounce_s, lookback_h</text>
+          </g>
+          <g class="nd tmpl">
+            <rect x="40" y="192" width="240" height="56" rx="6" />
+            <text x="160" y="216" text-anchor="middle" font-size="12.5">DeviceCPUHigh</text>
+            <text x="160" y="234" text-anchor="middle" font-size="10.5" class="sub">params: threshold_pct, lookback_s</text>
+          </g>
+          <g class="nd tmpl">
+            <rect x="40" y="260" width="240" height="56" rx="6" />
+            <text x="160" y="284" text-anchor="middle" font-size="12.5">BGPNeighborDown <tspan fill="#5d6776" font-weight="400">(new)</tspan></text>
+            <text x="160" y="302" text-anchor="middle" font-size="10.5" class="sub">params: established_min_s</text>
+          </g>
+
+          <text x="430" y="36" class="lbl">instances · settings</text>
+
+          <g class="nd inst">
+            <rect x="430" y="56" width="240" height="56" rx="6" />
+            <text x="550" y="78" text-anchor="middle" font-size="12.5">"WAN edges 90%"</text>
+            <text x="550" y="96" text-anchor="middle" font-size="10.5" class="sub">tmpl=iface_util · pct=90</text>
+          </g>
+          <g class="nd inst">
+            <rect x="430" y="124" width="240" height="56" rx="6" />
+            <text x="550" y="146" text-anchor="middle" font-size="12.5">"Backbone 70%"</text>
+            <text x="550" y="164" text-anchor="middle" font-size="10.5" class="sub">tmpl=iface_util · pct=70</text>
+          </g>
+          <g class="nd inst">
+            <rect x="430" y="192" width="240" height="56" rx="6" />
+            <text x="550" y="214" text-anchor="middle" font-size="12.5">"Edge BGP peers"</text>
+            <text x="550" y="232" text-anchor="middle" font-size="10.5" class="sub">tmpl=bgp_down · est_min_s=120</text>
+          </g>
+          <g class="nd inst">
+            <rect x="430" y="260" width="240" height="56" rx="6" />
+            <text x="550" y="282" text-anchor="middle" font-size="12.5">"Default · all devices"</text>
+            <text x="550" y="300" text-anchor="middle" font-size="10.5" class="sub">tmpl=iface_util · pct=80 · seed</text>
+          </g>
+
+          <text x="800" y="36" class="lbl">scope selectors</text>
+
+          <g class="nd scope">
+            <rect x="800" y="56" width="260" height="56" rx="6" />
+            <text x="930" y="78" text-anchor="middle" font-size="12.5">role=wan_edge</text>
+            <text x="930" y="96" text-anchor="middle" font-size="10.5" class="sub">→ edge-1, edge-2 · all ifIndex</text>
+          </g>
+          <g class="nd scope">
+            <rect x="800" y="124" width="260" height="56" rx="6" />
+            <text x="930" y="146" text-anchor="middle" font-size="12.5">exporter=10.10.0.0/16 ifIdx in (1,2)</text>
+            <text x="930" y="164" text-anchor="middle" font-size="10.5" class="sub">→ core-sw-* uplinks only</text>
+          </g>
+          <g class="nd scope">
+            <rect x="800" y="192" width="260" height="56" rx="6" />
+            <text x="930" y="214" text-anchor="middle" font-size="12.5">exporter in (edge-1) peer=192.0.2.1</text>
+            <text x="930" y="232" text-anchor="middle" font-size="10.5" class="sub">→ AS65001 transit only</text>
+          </g>
+          <g class="nd scope">
+            <rect x="800" y="260" width="260" height="56" rx="6" />
+            <text x="930" y="282" text-anchor="middle" font-size="12.5">{} (empty)</text>
+            <text x="930" y="300" text-anchor="middle" font-size="10.5" class="sub">→ matches everything</text>
+          </g>
+
+          <!-- template → instance edges -->
+          <path class="edge" d="M280,84  L430,84"  marker-end="url(#arr)" />
+          <path class="edge" d="M280,84  C320,84 380,152 430,152"  marker-end="url(#arr)" />
+          <path class="edge" d="M280,84  C320,84 380,288 430,288"  marker-end="url(#arr)" />
+          <path class="edge" d="M280,288 L430,220" marker-end="url(#arr)" />
+
+          <!-- instance → scope edges -->
+          <path class="edge-strong" d="M670,84  L800,84"  marker-end="url(#arr)" />
+          <path class="edge-strong" d="M670,152 L800,152" marker-end="url(#arr)" />
+          <path class="edge-strong" d="M670,220 L800,220" marker-end="url(#arr)" />
+          <path class="edge-strong" d="M670,288 L800,288" marker-end="url(#arr)" />
+
+          <!-- engine output -->
+          <g class="nd store">
+            <rect x="380" y="370" width="340" height="60" rx="6" />
+            <text x="550" y="394" text-anchor="middle" font-size="12.5">alert engine</text>
+            <text x="550" y="412" text-anchor="middle" class="sub">for each instance: template.Evaluate(scope, params)</text>
+          </g>
+          <path class="edge" d="M550,316 L550,370" marker-end="url(#arr)" />
+        </svg>
+        <div class="legend">
+          <span class="pill tmpl">template (Go code)</span>
+          <span class="pill inst">instance (settings row)</span>
+          <span class="pill scope">scope selector</span>
+          <span class="pill store">engine</span>
+          <span class="pill arrow">implements / scopes</span>
+        </div>
+      </div>
+
+      <p style="margin-top:18px">A template knows how to evaluate one kind of condition; it has no opinion about which devices it applies to. An instance picks a template, names it, sets parameters, and binds a scope. The engine no longer iterates rules — it iterates instances, and each violation is tagged with both the template ID (for grouping in the UI) and the instance ID (for ack/silence/dedup).</p>
+
+      <h3>Two flavors of template</h3>
+      <div class="row2">
+        <div class="card">
+          <h3><span class="tag accent">built-in</span> code</h3>
+          <p>Go structs in <code>internal/alerteng/</code>. Hand-tuned SQL, full read of any ClickHouse table, reviewed in PRs, shipped with the binary. This is where <code>InterfaceUtilizationHigh</code>, <code>BGPNeighborDown</code>, <code>DeviceCPUHigh</code> live. Adding one is a code change.</p>
+        </div>
+        <div class="card">
+          <h3><span class="tag info">user-defined</span> GUI</h3>
+          <p>Constrained shape: <em>data source × metric × comparison × threshold × dwell</em>. No raw SQL. Stored as rows in <code>alert_user_templates</code>; evaluated by a single shared Go template that knows how to render any user-defined spec into a safe parameterized query. This is where "alert when this OID equals 2 for 60s" lives.</p>
+        </div>
+      </div>
+      <p style="margin-top:14px">Both flavors register against the same <code>template_id</code> namespace and both are targets for instances. The UI presents them in one list with a small badge; operators don't need to care which kind backs a given rule, except that built-in templates can't be edited from the GUI (only their default-instance parameters can).</p>
+    </section>
+
+    <section>
+      <h2>Schema</h2>
+      <p>One new table, one column added to the existing event ledger, and the existing <code>alert_rule_settings</code> table stays in place as the seed source for one release. Migrations stay forward-only and idempotent per <a href="../CLAUDE.md">CLAUDE.md</a>.</p>
+
+      <h3>New · alert_rule_instances</h3>
+      <pre><span class="cm">-- 000017_alert_rule_instances.sql</span>
+<span class="cm">-- One row per operator-created instance. The engine evaluates each</span>
+<span class="cm">-- instance once per tick. ReplacingMergeTree on updated_at lets the</span>
+<span class="cm">-- settings UI do upsert-by-instance_id with no application-side</span>
+<span class="cm">-- versioning.</span>
+
+<span class="kw">CREATE TABLE IF NOT EXISTS</span> alert_rule_instances
+(
+    instance_id      <span class="ty">String</span>,                              <span class="cm">-- UUIDv4, generated by api</span>
+    template_id      <span class="ty">LowCardinality(String)</span>,              <span class="cm">-- 'interface_utilization_high', 'bgp_neighbor_down', …</span>
+    name             <span class="ty">String</span>,                              <span class="cm">-- operator label, displayed in UI + alert title</span>
+    enabled          <span class="ty">UInt8</span>   <span class="kw">DEFAULT</span> 1,
+    severity         <span class="ty">LowCardinality(String)</span> <span class="kw">DEFAULT</span> <span class="lit">''</span>,    <span class="cm">-- empty = inherit from template default</span>
+    scope_json       <span class="ty">String</span>  <span class="kw">DEFAULT</span> <span class="lit">'{}'</span>,                   <span class="cm">-- ScopeSelector — see below</span>
+    params_json      <span class="ty">String</span>  <span class="kw">DEFAULT</span> <span class="lit">'{}'</span>,                   <span class="cm">-- template-specific, validated by template loader</span>
+    runbook          <span class="ty">String</span>  <span class="kw">DEFAULT</span> <span class="lit">''</span>,
+    channels         <span class="ty">String</span>  <span class="kw">DEFAULT</span> <span class="lit">'[]'</span>,                   <span class="cm">-- JSON array of webhook IDs</span>
+    is_seed          <span class="ty">UInt8</span>   <span class="kw">DEFAULT</span> 0,                     <span class="cm">-- 1 = auto-created from old alert_rule_settings; UI flags but allows edit</span>
+    created_at       <span class="ty">DateTime64(3, 'UTC')</span>,
+    updated_at       <span class="ty">DateTime64(3, 'UTC')</span>,
+    updated_by       <span class="ty">String</span>  <span class="kw">DEFAULT</span> <span class="lit">'anonymous'</span>
+)
+<span class="kw">ENGINE</span> = ReplacingMergeTree(updated_at)
+<span class="kw">ORDER BY</span> instance_id;</pre>
+
+      <h3>Altered · alert_events</h3>
+      <p>Add an <code>instance_id</code> column so each event row carries which instance fired it. Backwards-compatible: rows written by the pre-instance engine carry the empty string and the API treats that as "global default instance".</p>
+      <pre><span class="kw">ALTER TABLE</span> alert_events <span class="kw">ADD COLUMN IF NOT EXISTS</span>
+    instance_id <span class="ty">String</span> <span class="kw">DEFAULT</span> <span class="lit">''</span> <span class="kw">AFTER</span> rule_id;</pre>
+
+      <h3>Scope selector — JSON shape</h3>
+      <p>The selector is a structured matcher, not a DSL. Each field is a filter; an instance fires on the intersection of all non-empty filters. An empty selector matches everything (that's how default instances work).</p>
+      <pre>{
+  <span class="lit">"exporters"</span>:        [<span class="lit">"10.1.1.1"</span>, <span class="lit">"10.1.1.2"</span>],   <span class="cm">// exact IPs (canonical exporter ID)</span>
+  <span class="lit">"exporter_cidrs"</span>:   [<span class="lit">"10.10.0.0/16"</span>],            <span class="cm">// CIDR matchers, OR'd with exporters</span>
+  <span class="lit">"exporter_labels"</span>:  { <span class="lit">"role"</span>: <span class="lit">"wan_edge"</span> },    <span class="cm">// match against device_inventory labels</span>
+  <span class="lit">"ifindex"</span>:          [1, 2, 3],                  <span class="cm">// only meaningful for interface-scoped templates</span>
+  <span class="lit">"ifname_glob"</span>:      <span class="lit">"Gi0/0*"</span>,                  <span class="cm">// glob on ifDescr / ifAlias</span>
+  <span class="lit">"interface_labels"</span>: { <span class="lit">"role"</span>: <span class="lit">"uplink"</span> },
+  <span class="lit">"bgp_peers"</span>:        [<span class="lit">"192.0.2.1"</span>],              <span class="cm">// only meaningful for BGP-scoped templates</span>
+  <span class="lit">"asn_remote"</span>:       [65001, 65002]              <span class="cm">// ditto, by neighbor ASN</span>
+}</pre>
+
+      <h3>Template registry — Go side</h3>
+      <pre><span class="cm">// internal/alerteng/template.go</span>
+
+<span class="kw">type</span> ScopeSelector <span class="kw">struct</span> {
+    Exporters       []netip.Addr
+    ExporterCIDRs   []netip.Prefix
+    ExporterLabels  <span class="kw">map</span>[<span class="ty">string</span>]<span class="ty">string</span>
+    IfIndex         []<span class="ty">uint32</span>
+    IfNameGlob      <span class="ty">string</span>
+    InterfaceLabels <span class="kw">map</span>[<span class="ty">string</span>]<span class="ty">string</span>
+    BGPPeers        []netip.Addr
+    ASNRemote       []<span class="ty">uint32</span>
+}
+
+<span class="kw">type</span> Template <span class="kw">interface</span> {
+    ID() <span class="ty">string</span>                                    <span class="cm">// stable, e.g. "interface_utilization_high"</span>
+    DefaultParams() <span class="kw">map</span>[<span class="ty">string</span>]<span class="kw">any</span>
+    DefaultSeverity() <span class="ty">string</span>
+    Runbook() <span class="ty">string</span>
+    Evaluate(ctx context.Context, conn driver.Conn,
+             scope ScopeSelector, params <span class="kw">map</span>[<span class="ty">string</span>]<span class="kw">any</span>) ([]Violation, <span class="ty">error</span>)
+}
+
+<span class="cm">// Existing rule structs become Templates. Their Evaluate methods learn</span>
+<span class="cm">// to translate ScopeSelector into WHERE-clause fragments via a shared</span>
+<span class="cm">// helper (scopeWhere) so we don't duplicate selector → SQL across rules.</span></pre>
+
+      <h3>API surface (new)</h3>
+      <table class="table">
+        <thead><tr><th>method</th><th>path</th><th>purpose</th></tr></thead>
+        <tbody>
+          <tr><td>GET</td><td class="t">/api/alerts/templates</td><td>List built-in templates with default params and parameter schema (drives the UI form).</td></tr>
+          <tr><td>GET</td><td class="t">/api/alerts/instances</td><td>List instances, optionally filtered by <code>?template_id=…</code> or <code>?enabled=true</code>.</td></tr>
+          <tr><td>POST</td><td class="t">/api/alerts/instances</td><td>Create. Body: <code>{template_id, name, scope, params, severity?, runbook?, channels?}</code>.</td></tr>
+          <tr><td>PUT</td><td class="t">/api/alerts/instances/{id}</td><td>Update. Same body shape as POST.</td></tr>
+          <tr><td>DELETE</td><td class="t">/api/alerts/instances/{id}</td><td>Delete. Engine drops it on next refresh tick.</td></tr>
+          <tr><td>POST</td><td class="t">/api/alerts/instances/{id}/preview</td><td>Dry-run: returns what the instance <em>would</em> match right now (devices/interfaces) without writing events. Critical for trust.</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>Engine changes</h2>
+      <p>The current engine loop in <code>internal/alerteng/engine.go</code> iterates a <code>[]Rule</code> and calls <code>r.Evaluate(ctx, conn)</code>. Two surgical changes:</p>
+      <ol style="color:var(--dim); font-size:14px; max-width:82ch">
+        <li><strong>Loader switches to instances.</strong> <code>LoadRules</code> becomes <code>LoadInstances</code>: it returns <code>[]InstanceRule</code> where each <code>InstanceRule</code> closes over <code>(template, scope, params, instance_id, severity)</code>. Refresh-tick semantics (max(updated_at) version stamp) carry over unchanged.</li>
+        <li><strong>Templates accept scope.</strong> Each existing rule struct gets a refactor: pull the SQL into a method that takes a <code>scopeWhere</code> string, accept <code>params</code> as a typed struct via the loader, return violations. The same helper that generates <code>scopeWhere</code> from <code>ScopeSelector</code> is shared across templates so the matching semantics stay consistent.</li>
+      </ol>
+      <p>The alert-key shape changes from <code>(rule_id, scope, group_key)</code> to <code>(instance_id, scope, group_key)</code>. This is the breaking part: in-flight open alerts created under the old keying need a one-time bridge so a deploy doesn't dupe-fire every open alert. The bootstrap logic at <code>engine.go:260</code> handles this — see <a href="#migration">Migration path</a> below.</p>
+
+      <div class="callout">
+        <strong>Why instance-keyed and not (template + scope)-keyed?</strong> Two instances of the same template with overlapping scopes are legitimate (e.g. "all WAN at 80% warn" + "transit-only at 70% page"). Keying on instance_id keeps them as separate alerts the operator can ack independently. Cross-instance dedup is a UI grouping concern, not an engine concern.
+      </div>
+    </section>
+
+    <section>
+      <h2>User-defined templates</h2>
+      <p>Operators build these in the GUI. The constraint model is small on purpose — you pick from a list of vetted data sources and a list of comparison ops, never write SQL. The shared evaluator translates the spec into a parameterized ClickHouse query at runtime; if the operator's spec doesn't compile (unknown source, bad comparison), the API rejects the row at write time, not at evaluate time.</p>
+
+      <h3>The five-field spec</h3>
+      <table class="table">
+        <thead><tr><th>field</th><th>options</th><th>example</th></tr></thead>
+        <tbody>
+          <tr><td>source</td><td><code>device_resource_samples</code> · <code>iface_counter_samples</code> · <code>bgp_peers</code> · <code>device_inventory</code> · <code>device_oid_samples</code></td><td><code>device_oid_samples</code></td></tr>
+          <tr><td>metric</td><td>source-specific column the form fills in dynamically — for OID samples it's <code>value_numeric</code> or <code>value_string</code>; for resource samples it's <code>value_percent</code>; for counters it's a per-second delta; etc.</td><td><code>value_numeric</code></td></tr>
+          <tr><td>filter</td><td>structured WHERE fragment limiting the rows the comparison applies to (e.g. <code>oid = '1.3.6.1.4.1.9.9.117.1.1.2.1.2'</code>). Built from another small form, not freehand.</td><td><code>oid = '1.3.6.1.4.1.9.9.117…'</code></td></tr>
+          <tr><td>comparison</td><td><code>&gt;=</code> · <code>&lt;=</code> · <code>==</code> · <code>!=</code> · <code>&gt;</code> · <code>&lt;</code> · <code>delta_pct &gt;=</code></td><td><code>==</code></td></tr>
+          <tr><td>threshold + dwell</td><td>numeric or string threshold + minimum seconds the condition must hold</td><td><code>2</code> for <code>60s</code></td></tr>
+        </tbody>
+      </table>
+      <p>Scope is <em>not</em> part of the template — it lives on the instance, same as for built-in templates. So one user-defined template ("PSU not OK") can have three instances scoped to different device groups with different severities and channels.</p>
+
+      <h3>New · alert_user_templates</h3>
+      <pre><span class="cm">-- 000020_user_templates.sql</span>
+<span class="kw">CREATE TABLE IF NOT EXISTS</span> alert_user_templates
+(
+    template_id     <span class="ty">String</span>,                              <span class="cm">-- UUID, prefixed 'ut_' to namespace from built-ins</span>
+    name            <span class="ty">String</span>,                              <span class="cm">-- displayed in the template picker</span>
+    description     <span class="ty">String</span>  <span class="kw">DEFAULT</span> <span class="lit">''</span>,
+    source          <span class="ty">LowCardinality(String)</span>,              <span class="cm">-- whitelist enforced by api</span>
+    metric          <span class="ty">LowCardinality(String)</span>,              <span class="cm">-- whitelist per source</span>
+    filter_json     <span class="ty">String</span>  <span class="kw">DEFAULT</span> <span class="lit">'{}'</span>,                   <span class="cm">-- structured WHERE clauses (oid, kind, component, …)</span>
+    comparison      <span class="ty">LowCardinality(String)</span>,              <span class="cm">-- '>=', '==', etc — closed enum</span>
+    threshold_num   <span class="ty">Float64</span> <span class="kw">DEFAULT</span> 0,
+    threshold_str   <span class="ty">String</span>  <span class="kw">DEFAULT</span> <span class="lit">''</span>,
+    dwell_seconds   <span class="ty">UInt32</span>  <span class="kw">DEFAULT</span> 0,
+    default_severity <span class="ty">LowCardinality(String)</span> <span class="kw">DEFAULT</span> <span class="lit">'warning'</span>,
+    runbook         <span class="ty">String</span>  <span class="kw">DEFAULT</span> <span class="lit">''</span>,
+    enabled         <span class="ty">UInt8</span>   <span class="kw">DEFAULT</span> 1,
+    created_at      <span class="ty">DateTime64(3, 'UTC')</span>,
+    updated_at      <span class="ty">DateTime64(3, 'UTC')</span>,
+    updated_by      <span class="ty">String</span>  <span class="kw">DEFAULT</span> <span class="lit">'anonymous'</span>
+)
+<span class="kw">ENGINE</span> = ReplacingMergeTree(updated_at)
+<span class="kw">ORDER BY</span> template_id;</pre>
+
+      <h3>New · snmp_custom_oids + device_oid_samples</h3>
+      <p>To alert on an OID, the SNMP service needs to be polling it. The first table is the operator's "tell SNMP what to walk" instruction; the second is where samples land for templates to read.</p>
+      <pre><span class="cm">-- 000021_custom_oids.sql</span>
+<span class="kw">CREATE TABLE IF NOT EXISTS</span> snmp_custom_oids
+(
+    oid_id          <span class="ty">String</span>,                              <span class="cm">-- UUID</span>
+    oid             <span class="ty">String</span>,                              <span class="cm">-- e.g. '1.3.6.1.4.1.9.9.117.1.1.2.1.2'</span>
+    name            <span class="ty">String</span>,                              <span class="cm">-- 'Cisco PSU oper status'</span>
+    scope_json      <span class="ty">String</span>  <span class="kw">DEFAULT</span> <span class="lit">'{}'</span>,                   <span class="cm">-- which exporters to walk — same ScopeSelector shape as instances</span>
+    walk_seconds    <span class="ty">UInt32</span>  <span class="kw">DEFAULT</span> 60,                    <span class="cm">-- per-OID cadence; scheduler enforces a floor</span>
+    is_table        <span class="ty">UInt8</span>   <span class="kw">DEFAULT</span> 0,                     <span class="cm">-- 0=GET, 1=GETNEXT walk; affects how many samples land per cycle</span>
+    value_kind      <span class="ty">LowCardinality(String)</span> <span class="kw">DEFAULT</span> <span class="lit">'numeric'</span>, <span class="cm">-- 'numeric' | 'string' | 'octets'</span>
+    enabled         <span class="ty">UInt8</span>   <span class="kw">DEFAULT</span> 1,
+    created_at      <span class="ty">DateTime64(3, 'UTC')</span>,
+    updated_at      <span class="ty">DateTime64(3, 'UTC')</span>,
+    updated_by      <span class="ty">String</span>  <span class="kw">DEFAULT</span> <span class="lit">'anonymous'</span>
+)
+<span class="kw">ENGINE</span> = ReplacingMergeTree(updated_at)
+<span class="kw">ORDER BY</span> oid_id;
+
+<span class="kw">CREATE TABLE IF NOT EXISTS</span> device_oid_samples
+(
+    polled_at       <span class="ty">DateTime64(3, 'UTC')</span>,
+    exporter        <span class="ty">IPv6</span>,                                <span class="cm">-- canonical exporter ID, v4-mapped for IPv4</span>
+    oid_id          <span class="ty">String</span>,                              <span class="cm">-- FK to snmp_custom_oids.oid_id (no enforced constraint, just convention)</span>
+    oid             <span class="ty">String</span>,                              <span class="cm">-- denormalized for query convenience</span>
+    instance_index  <span class="ty">String</span>  <span class="kw">DEFAULT</span> <span class="lit">''</span>,                    <span class="cm">-- for table OIDs, the trailing index (e.g. '.1', '.2')</span>
+    value_numeric   <span class="ty">Float64</span> <span class="kw">DEFAULT</span> 0,
+    value_string    <span class="ty">String</span>  <span class="kw">DEFAULT</span> <span class="lit">''</span>,
+    walk_status     <span class="ty">LowCardinality(String)</span>               <span class="cm">-- 'ok' | 'timeout' | 'noSuchObject' | 'authFail'</span>
+)
+<span class="kw">ENGINE</span> = MergeTree
+<span class="kw">PARTITION BY</span> toYYYYMMDD(polled_at)
+<span class="kw">ORDER BY</span> (exporter, oid_id, polled_at)
+<span class="kw">TTL</span> polled_at + INTERVAL 30 DAY;</pre>
+
+      <h3>The shared evaluator</h3>
+      <pre><span class="cm">// internal/alerteng/user_template.go</span>
+<span class="cm">//</span>
+<span class="cm">// UserDefinedThreshold is the single Go template that backs every</span>
+<span class="cm">// row in alert_user_templates. The engine instantiates one of these</span>
+<span class="cm">// per user-defined template at load time, closes over the spec, and</span>
+<span class="cm">// reuses the same Evaluate path as built-in templates.</span>
+
+<span class="kw">type</span> UserDefinedThreshold <span class="kw">struct</span> {
+    spec UserTemplateSpec  <span class="cm">// loaded from alert_user_templates row</span>
+}
+
+<span class="kw">func</span> (t UserDefinedThreshold) Evaluate(
+    ctx context.Context, conn driver.Conn,
+    scope ScopeSelector, params <span class="kw">map</span>[<span class="ty">string</span>]<span class="kw">any</span>,
+) ([]Violation, <span class="ty">error</span>) {
+    sql, args := buildUserQuery(t.spec, scope)   <span class="cm">// pure function, fully tested</span>
+    rows, err := conn.Query(ctx, sql, args...)
+    <span class="cm">// … standard violation construction, dwell-window check, etc.</span>
+}</pre>
+
+      <div class="callout">
+        <strong>Why a single Go template instead of generating one struct per user template?</strong> Keeps the safe surface tiny: one place where source × metric × comparison turn into SQL, one place to test for injection, one place to add a new data source. Operator-defined rows in <code>alert_user_templates</code> are pure data — no codegen, no plugin loader, no Wasm sandbox.
+      </div>
+
+      <h3>API surface (additional)</h3>
+      <table class="table">
+        <thead><tr><th>method</th><th>path</th><th>purpose</th></tr></thead>
+        <tbody>
+          <tr><td>GET</td><td class="t">/api/alerts/sources</td><td>List allowed data sources and their available metrics + filter fields. Drives the user-template builder form so the operator only sees valid choices.</td></tr>
+          <tr><td>GET</td><td class="t">/api/alerts/user-templates</td><td>List user-defined templates.</td></tr>
+          <tr><td>POST</td><td class="t">/api/alerts/user-templates</td><td>Create. API validates source ∈ whitelist, metric ∈ whitelist-for-source, comparison ∈ enum, filter shape.</td></tr>
+          <tr><td>PUT</td><td class="t">/api/alerts/user-templates/{id}</td><td>Update. Same validation.</td></tr>
+          <tr><td>DELETE</td><td class="t">/api/alerts/user-templates/{id}</td><td>Delete. Refuses if any instance still references this template_id (prevents orphan instances).</td></tr>
+          <tr><td>GET</td><td class="t">/api/snmp/custom-oids</td><td>List operator-configured OIDs the SNMP service is polling.</td></tr>
+          <tr><td>POST</td><td class="t">/api/snmp/custom-oids</td><td>Add an OID to the polling rotation. Body includes scope (which exporters), cadence, value kind.</td></tr>
+          <tr><td>POST</td><td class="t">/api/snmp/custom-oids/{id}/test</td><td>Walk the OID once against one exporter and return the raw value. Lets the operator verify the OID + scope before committing.</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="migration">
+      <h2>Migration path</h2>
+      <p>Five phases. Each ships standalone — phase 1 alone gets you per-device thresholds for everything except BGP, and phase 2 lights up BGP. Phases 3–5 sand off the rough edges.</p>
+
+      <div class="phase">
+        <header>
+          <span class="num">PHASE 0</span>
+          <h3>Today · what already works</h3>
+          <span class="meta">no code changes</span>
+        </header>
+        <ul>
+          <li>Rules live in <code>internal/alerteng/rules*.go</code>, <code>DefaultRules()</code> is the static set.</li>
+          <li>Operators tweak parameters globally via <code>alert_rule_settings</code> (<code>migrations/000005_settings.sql:124</code>).</li>
+          <li>Per-(exporter,component) granularity already exists for the device-health rules — just no per-(exporter,component) <em>thresholds</em>.</li>
+        </ul>
+      </div>
+
+      <div class="phase">
+        <header>
+          <span class="num">PHASE 1</span>
+          <h3>Land the instance model · ship the per-device thresholds for existing rules</h3>
+          <span class="meta">migration 000017 · alerteng refactor · settings UI v2</span>
+        </header>
+        <ul>
+          <li>Migration <code>000017_alert_rule_instances.sql</code>: <code>CREATE TABLE alert_rule_instances</code> + <code>ALTER alert_events ADD COLUMN instance_id</code>.</li>
+          <li>Refactor existing rule structs to implement the new <code>Template</code> interface; introduce <code>scopeWhere</code> helper; rewrite engine loop to iterate instances.</li>
+          <li><strong>Seed step (one-shot, in migration 000017):</strong> for every <code>alert_rule_settings</code> row, <code>INSERT INTO alert_rule_instances</code> a row with <code>template_id = old.rule_id</code>, <code>scope_json = '{}'</code>, <code>params_json = old.params_json</code>, <code>is_seed = 1</code>. For built-in rules with no override row, the API inserts a default-instance row on first read (so the engine has something to evaluate).</li>
+          <li><strong>Open-alert bridge:</strong> the engine bootstrap at <code>engine.go:260</code> reads the existing 7-day open set; on first-tick after migration, any open row with <code>instance_id = ''</code> is reattributed to the seed instance for its <code>rule_id</code> before being placed in the in-memory open map. No close/re-open events emitted.</li>
+          <li>Settings UI gets a "Rules" page listing instances grouped by template, with a "Create from template" wizard. The seed instances surface as "Default · all devices" rows with an info chip explaining where they came from.</li>
+          <li><code>alert_rule_settings</code> stays in place but becomes read-only; the API logs a warning if anything tries to write to it. Drop it in phase 5.</li>
+        </ul>
+      </div>
+
+      <div class="phase">
+        <header>
+          <span class="num">PHASE 2</span>
+          <h3>BGP ingest + BGPNeighborDown template</h3>
+          <span class="meta">migration 000018 · snmp service · new template</span>
+        </header>
+        <ul>
+          <li>Migration <code>000018_bgp_peers.sql</code>: <code>CREATE TABLE bgp_peers (exporter, peer_addr, peer_asn, local_asn, state, established_at, last_change_at, polled_at, …)</code>. Same <code>argMax(state, polled_at)</code> shape the device-health tables already use.</li>
+          <li>SNMP scheduler walks <code>bgpPeerTable</code> (<code>1.3.6.1.2.1.15.3.1</code>) and the Cisco/Juniper analogues (<code>cbgpPeer2Table</code>, <code>jnxBgpM2PeerTable</code>) on the same per-device cadence as existing walks. Source goes in a <code>source</code> column the same way <code>device_resource_samples</code> does.</li>
+          <li>New template <code>BGPNeighborDown</code> in <code>internal/alerteng/rules_bgp.go</code>: fires when <code>argMax(state, polled_at) != 'established'</code> for at least <code>established_min_s</code> seconds. Scope selector understands <code>bgp_peers</code> and <code>asn_remote</code>.</li>
+          <li>UI: new template appears in the "Create from template" wizard automatically. No schema changes to <code>alert_rule_instances</code> — the selector fields for BGP were already in the JSON shape from phase 1.</li>
+        </ul>
+      </div>
+
+      <div class="phase">
+        <header>
+          <span class="num">PHASE 3</span>
+          <h3>Label-based scoping (role=wan_edge etc.)</h3>
+          <span class="meta">device labels · interface labels · selector evaluator</span>
+        </header>
+        <ul>
+          <li>Add <code>labels Map(String,String)</code> columns to <code>device_inventory</code> and to whatever interface-metadata table the SNMP service already maintains.</li>
+          <li>Operator-editable label assignment in the Devices view (Settings → Devices → Edit labels).</li>
+          <li><code>scopeWhere</code> helper learns to translate <code>exporter_labels</code> / <code>interface_labels</code> into joins against those label columns.</li>
+          <li>This is the phase that unlocks "all WAN edges at 70%" without enumerating IPs. Without it, scope is exact-match-only — usable but not great.</li>
+        </ul>
+      </div>
+
+      <div class="phase">
+        <header>
+          <span class="num">PHASE 4</span>
+          <h3>Preview-as-you-type · scope hygiene</h3>
+          <span class="meta">UI polish · trust building</span>
+        </header>
+        <ul>
+          <li><code>POST /api/alerts/instances/{id}/preview</code> wired into the wizard: as the operator builds a selector, the right pane shows the matching set of devices/interfaces/peers in real time.</li>
+          <li>Conflict detector: warn when a new instance's scope overlaps an existing instance's scope on the same template (so two rules don't quietly fire on the same target).</li>
+          <li>"What would this rule have alerted on in the last 24h?" backfill query — runs the new instance's SQL across the warm tier and shows the would-be event count before the operator saves.</li>
+        </ul>
+      </div>
+
+      <div class="phase">
+        <header>
+          <span class="num">PHASE 5</span>
+          <h3>User-defined templates against existing data</h3>
+          <span class="meta">migration 000020 · alerteng evaluator · template builder UI</span>
+        </header>
+        <ul>
+          <li>Migration <code>000020_user_templates.sql</code>: <code>CREATE TABLE alert_user_templates</code>.</li>
+          <li>Add <code>UserDefinedThreshold</code> Go template + the <code>buildUserQuery</code> pure function. Source whitelist starts with the four tables we already populate: <code>device_resource_samples</code>, <code>iface_counter_samples</code>, <code>bgp_peers</code>, <code>device_inventory</code>. <code>flows</code> is deliberately excluded — too high-cardinality for safe ad-hoc thresholds.</li>
+          <li>Loader extends to read both <code>alert_user_templates</code> and the built-in registry, register each row as a <code>UserDefinedThreshold</code>, and present them in <code>GET /api/alerts/templates</code> alongside built-ins (with a <code>kind: "user"</code> field).</li>
+          <li>Settings UI gets a "Templates" tab with a "+ New custom template" form — source picker, metric picker, comparison + threshold + dwell, default severity. After save, the existing instance wizard can target the new template.</li>
+          <li>This phase delivers the headline ask <em>without</em> any new ingest work: operators can already alert on anything we're polling. OID-level customization comes in phase 6.</li>
+        </ul>
+      </div>
+
+      <div class="phase">
+        <header>
+          <span class="num">PHASE 6</span>
+          <h3>Custom OID polling · arbitrary-OID alerts</h3>
+          <span class="meta">migration 000021 · snmp scheduler · OID admin UI</span>
+        </header>
+        <ul>
+          <li>Migration <code>000021_custom_oids.sql</code>: <code>CREATE TABLE snmp_custom_oids</code> + <code>device_oid_samples</code>.</li>
+          <li>SNMP scheduler grows a "custom OID" lane that reads <code>snmp_custom_oids</code> on its refresh tick, schedules walks per (oid_id, exporter) at the configured cadence (with a hard floor — say 30s — to prevent self-DoS), and writes results to <code>device_oid_samples</code>. The credential resolution path is unchanged: the existing per-device v2c/v3 binding is reused.</li>
+          <li><code>device_oid_samples</code> is added to the user-defined template source whitelist. Filter shape for this source includes <code>oid_id</code> (or <code>oid</code>) and <code>instance_index</code> so a single template can target a row in a table OID.</li>
+          <li>Settings UI gets an "SNMP → Custom OIDs" page: paste an OID, name it, pick scope, pick cadence, hit "Test" to walk it once and see the value before committing. Once it's polling, "+ New template from this OID" deep-links into the template builder with the OID pre-filled.</li>
+          <li>(Nice-to-have, not a blocker for shipping the phase) MIB browser: bundle a curated set of vendor MIBs and let the operator pick by name instead of pasting an OID. Pure UX sugar — the schema and engine don't care.</li>
+        </ul>
+      </div>
+
+      <div class="phase">
+        <header>
+          <span class="num">PHASE 7</span>
+          <h3>Drop the legacy table</h3>
+          <span class="meta">migration 000022 · cleanup</span>
+        </header>
+        <ul>
+          <li>Migration <code>000022_drop_alert_rule_settings.sql</code>: <code>DROP TABLE IF EXISTS alert_rule_settings</code>. Safe because phase 1's seed already copied everything; the table has been read-only for several release cycles.</li>
+          <li>Remove the deprecated read path from <code>internal/alerteng/loader.go</code>.</li>
+          <li>Remove the <code>is_seed</code> distinction from the UI (or keep it as a low-priority badge — operators sometimes want to know "this is the default someone never customized").</li>
+        </ul>
+      </div>
+    </section>
+
+    <section>
+      <h2>Backwards compatibility &amp; risk</h2>
+      <div class="row3">
+        <div class="card">
+          <h3>Open alerts</h3>
+          <p>The bootstrap bridge in phase 1 reattributes pre-migration open rows to seed instances before the first evaluation tick. Net effect: no spurious close + re-open on deploy.</p>
+        </div>
+        <div class="card">
+          <h3>Webhook payloads</h3>
+          <p>Add <code>instance_id</code> + <code>instance_name</code> as new fields. Existing fields (<code>rule_id</code>, <code>severity</code>, <code>scope</code>, <code>group_key</code>) stay populated. No breaking change for downstream consumers.</p>
+        </div>
+        <div class="card">
+          <h3>OpenAPI / TS client</h3>
+          <p>Per <a href="../CLAUDE.md">CLAUDE.md</a>, edit <code>api/openapi.yaml</code> first, run <code>make gen-client</code>, then implement the Go handlers. The contract test in CI catches drift.</p>
+        </div>
+        <div class="card">
+          <h3>Engine throughput</h3>
+          <p>One SELECT per instance per tick instead of one per template. With ~50 instances on a typical deployment, that's still well under the 10s tick — but the loader needs a per-template result-set cache so two instances with different parameters but identical SQL don't run the query twice.</p>
+        </div>
+        <div class="card">
+          <h3>Selector validation</h3>
+          <p>Validate scope at write time, not evaluate time. Rejecting a malformed CIDR at <code>POST /api/alerts/instances</code> is recoverable; the alert engine quietly skipping evaluations because of a bad selector is not (silent failures are <a href="../CLAUDE.md">explicitly forbidden</a>).</p>
+        </div>
+        <div class="card">
+          <h3>Test coverage</h3>
+          <p>The integration tests at <code>internal/alerteng/evaluator_*_integration_test.go</code> already cover the device-health rules; adapt them to instantiate templates with explicit scope/params instead of constructing rule structs directly. Add new fixtures for scope filtering (one device matches, one doesn't, instance fires only on the matching one).</p>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>What this gets you, concretely</h2>
+      <table class="table">
+        <thead><tr><th>example ask</th><th>template</th><th>scope</th><th>params</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>Interface 90% throughput on WAN edges</td>
+            <td class="t">interface_utilization_high</td>
+            <td><code>{exporter_labels: {role: wan_edge}}</code></td>
+            <td><code>{threshold_pct: 90}</code></td>
+          </tr>
+          <tr>
+            <td>Interface down on access switches</td>
+            <td class="t">interface_oper_status_change</td>
+            <td><code>{exporter_labels: {role: access_sw}}</code></td>
+            <td><code>{debounce_seconds: 30}</code></td>
+          </tr>
+          <tr>
+            <td>BGP neighbor down on edge-1 (transit only)</td>
+            <td class="t">bgp_neighbor_down</td>
+            <td><code>{exporters: [edge-1], asn_remote: [65001]}</code></td>
+            <td><code>{established_min_s: 60}</code></td>
+          </tr>
+          <tr>
+            <td>CPU 75% on supervisor cards (all sites)</td>
+            <td class="t">device_cpu_high</td>
+            <td><code>{exporter_labels: {hw_role: supervisor}}</code></td>
+            <td><code>{threshold_pct: 75}</code></td>
+          </tr>
+          <tr>
+            <td>Default everything-else CPU at 80%</td>
+            <td class="t">device_cpu_high</td>
+            <td><code>{}</code> <span class="tag">seed</span></td>
+            <td><code>{threshold_pct: 80}</code> (current default)</td>
+          </tr>
+          <tr>
+            <td>Cisco PSU not OK on any core chassis <span class="tag info">user</span></td>
+            <td class="t">ut_psu_status_not_ok</td>
+            <td><code>{exporter_labels: {role: core}}</code></td>
+            <td>(template-defined: <code>oid==2 for 60s</code>)</td>
+          </tr>
+        </tbody>
+      </table>
+      <p>The "ultimate customization" comes from the selector plus the user-defined template builder — built-in templates cover the common asks safely, user-defined templates fill in the long tail, and the same instance + scope model applies on top of both. The "simplicity" comes from the fact that templates and parameters look exactly like they do today for anyone who doesn't open the new UI: they keep getting the same default-instance behavior they have now.</p>
+    </section>
+
+  </main>
+</body>
+</html>
