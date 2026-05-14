@@ -312,10 +312,19 @@ func (m *MockClient) WalkNeighbors(_ context.Context, target string, ifTable map
 	return out, nil
 }
 
-// WalkBGP returns synthetic BGP peers for the mock target. The shape
-// is a small ladder: one Established eBGP peer + one Idle iBGP peer
-// so the BGPNeighborDown alert template has both a healthy and a
-// firing case to evaluate against in the dev loop.
+// WalkBGP returns synthetic BGP peers for the mock target. Three
+// VRFs so the Devices BGP panel renders a non-trivial grouped view
+// in the dev loop:
+//
+//   - default       — global routing table, mixed health (the
+//                     established eBGP transit + an idle iBGP peer)
+//   - mgmt          — out-of-band management instance (one peer)
+//   - CUSTOMER-A    — example MPLS L3VPN PE-CE session (one peer)
+//
+// The Idle iBGP peer in 'default' continues to drive the
+// BGPNeighborDown alert in the dev loop; the additional VRFs
+// exercise the per-VRF UI grouping and the BGPNeighborDown VRF
+// scope filter.
 func (m *MockClient) WalkBGP(_ context.Context, target string) ([]BGPPeer, error) {
 	h := fnv.New64a()
 	_, _ = h.Write([]byte(target))
@@ -325,6 +334,7 @@ func (m *MockClient) WalkBGP(_ context.Context, target string) ([]BGPPeer, error
 		{
 			PolledAt:        now,
 			Exporter:        target,
+			VRF:             VRFDefault,
 			PeerAddr:        fmt.Sprintf("192.0.2.%d", 1+seed%200),
 			PeerASN:         65000 + uint32(seed%100),
 			LocalASN:        64512,
@@ -338,17 +348,50 @@ func (m *MockClient) WalkBGP(_ context.Context, target string) ([]BGPPeer, error
 			Source:          "bgp4",
 		},
 		{
-			PolledAt:    now,
-			Exporter:    target,
-			PeerAddr:    fmt.Sprintf("198.51.100.%d", 1+seed%200),
-			PeerASN:     64512,
-			LocalASN:    64512,
-			State:       "idle",
-			AdminStatus: "start",
-			AFI:         "ipv4",
-			SAFI:        "unicast",
+			PolledAt:        now,
+			Exporter:        target,
+			VRF:             VRFDefault,
+			PeerAddr:        fmt.Sprintf("198.51.100.%d", 1+seed%200),
+			PeerASN:         64512,
+			LocalASN:        64512,
+			State:           "idle",
+			AdminStatus:     "start",
+			AFI:             "ipv4",
+			SAFI:            "unicast",
 			PeerDescription: "Mock iBGP (idle)",
-			Source:      "bgp4",
+			Source:          "bgp4",
+		},
+		{
+			PolledAt:        now,
+			Exporter:        target,
+			VRF:             "mgmt",
+			PeerAddr:        fmt.Sprintf("172.16.0.%d", 1+seed%200),
+			PeerASN:         64512,
+			LocalASN:        64512,
+			State:           "established",
+			AdminStatus:     "start",
+			EstablishedAt:   now.Add(-6 * time.Hour),
+			LastChangeAt:    now.Add(-2 * time.Minute),
+			AFI:             "ipv4",
+			SAFI:            "unicast",
+			PeerDescription: "Mock OOB iBGP (mgmt VRF)",
+			Source:          "cbgp",
+		},
+		{
+			PolledAt:        now,
+			Exporter:        target,
+			VRF:             "CUSTOMER-A",
+			PeerAddr:        fmt.Sprintf("10.200.%d.1", 1+seed%200),
+			PeerASN:         65100 + uint32(seed%50),
+			LocalASN:        64512,
+			State:           "established",
+			AdminStatus:     "start",
+			EstablishedAt:   now.Add(-72 * time.Hour),
+			LastChangeAt:    now.Add(-15 * time.Minute),
+			AFI:             "ipv4",
+			SAFI:            "mpls-vpn",
+			PeerDescription: "Mock L3VPN PE-CE (CUSTOMER-A)",
+			Source:          "cbgp",
 		},
 	}, nil
 }

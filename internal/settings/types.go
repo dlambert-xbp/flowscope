@@ -149,6 +149,7 @@ type ScopeSelector struct {
 	IfNameGlob    string            `json:"ifname_glob,omitempty"`      // glob on if_descr — phase 3
 	BGPPeers      []string          `json:"bgp_peers,omitempty"`        // BGP-template only — phase 2
 	ASNRemote     []uint32          `json:"asn_remote,omitempty"`       // BGP-template only — phase 2
+	VRFs          []string          `json:"vrfs,omitempty"`             // BGP-template only — match peers in these VRFs
 }
 
 // IsEmpty reports whether the selector has no filters set. The engine
@@ -161,7 +162,8 @@ func (s ScopeSelector) IsEmpty() bool {
 		len(s.IfIndex) == 0 &&
 		s.IfNameGlob == "" &&
 		len(s.BGPPeers) == 0 &&
-		len(s.ASNRemote) == 0
+		len(s.ASNRemote) == 0 &&
+		len(s.VRFs) == 0
 }
 
 /* ----------------------------- Webhooks ----------------------------- */

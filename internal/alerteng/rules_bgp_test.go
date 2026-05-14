@@ -9,15 +9,15 @@ import (
 
 func TestBuildBGPDownViolation_eBGPLabel(t *testing.T) {
 	v := buildBGPDownViolation(
-		"10.1.1.1", "192.0.2.1",
+		"10.1.1.1", "default", "192.0.2.1",
 		65001, 64512,
 		"idle", "Transit to AS65001", "bgp4",
 	)
 	if !strings.Contains(v.Title, "eBGP session") {
 		t.Errorf("title should label eBGP for differing ASNs; got %q", v.Title)
 	}
-	if v.GroupKey != "bgp_10.1.1.1_192.0.2.1" {
-		t.Errorf("GroupKey = %q; want bgp_<exporter>_<peer>", v.GroupKey)
+	if v.GroupKey != "bgp_10.1.1.1_default_192.0.2.1" {
+		t.Errorf("GroupKey = %q; want bgp_<exporter>_<vrf>_<peer>", v.GroupKey)
 	}
 	if v.Labels["state"] != "idle" {
 		t.Errorf("Labels[state] = %q; want idle", v.Labels["state"])
@@ -25,16 +25,56 @@ func TestBuildBGPDownViolation_eBGPLabel(t *testing.T) {
 	if !strings.Contains(v.Title, "Transit to AS65001") {
 		t.Errorf("title should embed peer description; got %q", v.Title)
 	}
+	if strings.Contains(v.Title, "[vrf default]") {
+		t.Errorf("title should not mention VRF for the default routing instance; got %q", v.Title)
+	}
 }
 
 func TestBuildBGPDownViolation_iBGPLabel(t *testing.T) {
 	v := buildBGPDownViolation(
-		"10.1.1.1", "10.1.1.2",
+		"10.1.1.1", "default", "10.1.1.2",
 		64512, 64512,
 		"active", "", "bgp4",
 	)
 	if !strings.Contains(v.Title, "iBGP session") {
 		t.Errorf("title should label iBGP for matching ASNs; got %q", v.Title)
+	}
+}
+
+func TestBuildBGPDownViolation_NonDefaultVRFInTitle(t *testing.T) {
+	v := buildBGPDownViolation(
+		"10.1.1.1", "CUSTOMER-A", "10.200.0.1",
+		65100, 64512,
+		"idle", "L3VPN PE-CE", "cbgp",
+	)
+	if !strings.Contains(v.Title, "[vrf CUSTOMER-A]") {
+		t.Errorf("title should mention non-default VRF; got %q", v.Title)
+	}
+	if v.GroupKey != "bgp_10.1.1.1_CUSTOMER-A_10.200.0.1" {
+		t.Errorf("GroupKey = %q; want vrf-namespaced", v.GroupKey)
+	}
+	if v.Labels["vrf"] != "CUSTOMER-A" {
+		t.Errorf("Labels[vrf] = %q; want CUSTOMER-A", v.Labels["vrf"])
+	}
+}
+
+func TestBuildVRFWhere(t *testing.T) {
+	frag, args := buildVRFWhere("vrf", settings.ScopeSelector{VRFs: []string{"default", "CUSTOMER-A"}})
+	if !strings.Contains(frag, "vrf IN (?,?)") {
+		t.Errorf("frag = %q", frag)
+	}
+	if len(args) != 2 {
+		t.Errorf("args len = %d; want 2", len(args))
+	}
+}
+
+func TestBuildVRFWhere_Empty(t *testing.T) {
+	frag, args := buildVRFWhere("vrf", settings.ScopeSelector{})
+	if frag != "" {
+		t.Errorf("frag = %q; want empty", frag)
+	}
+	if len(args) != 0 {
+		t.Errorf("args = %v; want empty", args)
 	}
 }
 

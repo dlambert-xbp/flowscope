@@ -912,6 +912,37 @@ func (h *handlers) deviceInventory(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, inv)
 }
 
+// deviceBGP returns the BGP peers an exporter has, grouped by VRF.
+// Empty list means we have not observed any BGP peers from this
+// device in the last 24h — could be a non-BGP-speaking switch, a
+// device the snmp service hasn't walked yet, or a device we walked
+// but whose BGP4-MIB is empty (no peers configured).
+//
+//	GET /api/devices/{exporter}/bgp
+func (h *handlers) deviceBGP(w http.ResponseWriter, r *http.Request) {
+	exporterStr := chi.URLParam(r, "exporter")
+	exporter, err := netip.ParseAddr(exporterStr)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid exporter address")
+		return
+	}
+	groups, err := store.QueryDeviceBGP(r.Context(), h.conn, exporter)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	total := 0
+	for _, g := range groups {
+		total += g.PeerCount
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"exporter":   exporter.Unmap().String(),
+		"vrf_count":  len(groups),
+		"peer_count": total,
+		"vrfs":       groups,
+	})
+}
+
 // device returns the summary for a single exporter.
 //
 //	GET /api/devices/{exporter}?window=300s

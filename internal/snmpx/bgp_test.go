@@ -7,28 +7,28 @@ import (
 
 // TestMockWalkBGP locks in the synthetic BGP shape the mock client
 // returns so the alert engine has a stable signal in the dev loop.
-// Keep this in sync with MockClient.WalkBGP — both peers are part of
-// the contract: one Established eBGP and one Idle iBGP per device.
+// Keep this in sync with MockClient.WalkBGP — four peers across
+// three VRFs: default (one established eBGP + one idle iBGP), mgmt
+// (one established), CUSTOMER-A (one established L3VPN PE-CE).
 func TestMockWalkBGP(t *testing.T) {
 	m := NewMock()
 	got, err := m.WalkBGP(t.Context(), "10.0.0.42")
 	if err != nil {
 		t.Fatalf("WalkBGP: %v", err)
 	}
-	if len(got) != 2 {
-		t.Fatalf("expected 2 mock peers, got %d", len(got))
+	if len(got) != 4 {
+		t.Fatalf("expected 4 mock peers, got %d", len(got))
 	}
+	vrfs := map[string]int{}
 	var sawEstablished, sawIdle bool
 	for _, p := range got {
 		if p.Exporter != "10.0.0.42" {
 			t.Errorf("Exporter = %q; want 10.0.0.42", p.Exporter)
 		}
-		if p.Source != "bgp4" {
-			t.Errorf("Source = %q; want bgp4", p.Source)
+		if p.VRF == "" {
+			t.Errorf("VRF should not be empty")
 		}
-		if p.AFI != "ipv4" || p.SAFI != "unicast" {
-			t.Errorf("AFI/SAFI = %q/%q; want ipv4/unicast", p.AFI, p.SAFI)
-		}
+		vrfs[p.VRF]++
 		switch p.State {
 		case "established":
 			sawEstablished = true
@@ -41,6 +41,12 @@ func TestMockWalkBGP(t *testing.T) {
 	}
 	if !sawEstablished || !sawIdle {
 		t.Errorf("expected both established and idle peers; established=%v idle=%v", sawEstablished, sawIdle)
+	}
+	if len(vrfs) < 2 {
+		t.Errorf("expected peers across multiple VRFs; got %v", vrfs)
+	}
+	if vrfs[VRFDefault] == 0 {
+		t.Errorf("expected at least one peer in VRF %q; got %v", VRFDefault, vrfs)
 	}
 }
 

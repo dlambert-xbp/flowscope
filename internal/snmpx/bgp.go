@@ -11,16 +11,20 @@ import (
 )
 
 // BGPPeer is one entry on the bgp_peers table. The walker produces
-// these from RFC 4273 bgpPeerTable; cbgpPeer2Table / jnxBgpM2 walks
+// these from RFC 4273 bgpPeerTable; cbgpPeer3Table / jnxBgpM2 walks
 // produce the same shape with the Source field set accordingly so
 // the read path can prefer the richer vendor MIB when present.
 //
-// Pre-cbgp / pre-jnxbgp BGP4-MIB only exposes IPv4 peers; the walker
-// emits PeerAddr in v4 dotted form for those. Storage code converts
-// to v4-mapped IPv6 for the IPv6 column.
+// Pre-cbgp / pre-jnxbgp BGP4-MIB only exposes IPv4 peers and only
+// the global routing table (VRF = "default"); the walker emits
+// PeerAddr in v4 dotted form for those. Storage code converts to
+// v4-mapped IPv6 for the IPv6 column. cbgpPeer3 / jnxBgpM2 walkers
+// populate VRF from the index so multi-VRF devices show peers
+// grouped per routing instance.
 type BGPPeer struct {
 	PolledAt        time.Time
 	Exporter        string
+	VRF             string // 'default' for global table; vendor MIB walks fill in non-default VRF names
 	PeerAddr        string // dotted v4 or v6 string
 	PeerASN         uint32
 	LocalASN        uint32
@@ -33,6 +37,12 @@ type BGPPeer struct {
 	PeerDescription string
 	Source          string // 'bgp4' | 'cbgp' | 'jnxbgp'
 }
+
+// VRFDefault is the canonical name for the global / "no VRF" routing
+// table. Used both as the BGP4-MIB walker's hardcoded VRF (since
+// that MIB has no VRF concept) and as the default column value in
+// the bgp_peers schema.
+const VRFDefault = "default"
 
 // walkBGPPeers fetches the RFC 4273 bgpPeerTable rows. Returns an
 // empty slice (no error) on devices that don't implement BGP4-MIB —
@@ -129,6 +139,7 @@ func walkBGPPeers(g *gosnmp.GoSNMP, exporter string) ([]BGPPeer, error) {
 		out = append(out, BGPPeer{
 			PolledAt:      now,
 			Exporter:      exporter,
+			VRF:           VRFDefault, // BGP4-MIB has no VRF concept — global table only
 			PeerAddr:      peerIP.String(),
 			PeerASN:       uint32(e.remoteAS),
 			LocalASN:      localAS,
@@ -178,6 +189,19 @@ func uint32Value(pdu gosnmp.SnmpPDU) uint32 {
 // the device exposes, or an empty slice if it doesn't speak BGP at
 // all. Logging the failure mode is the caller's job (so operators
 // can correlate with scheduler metrics).
+//
+// Resolution order:
+//
+//  1. cbgpPeer3Table (Cisco VRF-aware). Returns peers across every
+//     routing instance configured on the device. When this returns
+//     non-empty rows we use them and skip the global-only walk.
+//  2. jnxBgpM2PeerTable (Junos VRF-aware). Same shape, different MIB.
+//  3. RFC 4273 BGP4-MIB. Global routing table only (vrf="default"),
+//     IPv4 peers only, 16-bit ASN. Always works on standards-compliant
+//     gear that runs BGP.
+//
+// Vendor walks emit peers tagged with their real VRF name; the
+// fallback walk tags everything as VRFDefault ("default").
 func (rc *RealClient) WalkBGP(ctx context.Context, target string) ([]BGPPeer, error) {
 	g, err := buildGoSNMP(target, rc.cfg, ctx)
 	if err != nil {
@@ -187,5 +211,40 @@ func (rc *RealClient) WalkBGP(ctx context.Context, target string) ([]BGPPeer, er
 		return nil, fmt.Errorf("snmpx: bgp connect %s: %w", target, err)
 	}
 	defer g.Conn.Close()
+	if peers := walkCiscoBGPPeer3(g, target); len(peers) > 0 {
+		return peers, nil
+	}
+	// jnxBgpM2 walker is a follow-up; the stub returns nil to signal
+	// "not implemented" so the BGP4-MIB fallback fires.
+	if peers := walkJuniperBGPM2(g, target); len(peers) > 0 {
+		return peers, nil
+	}
 	return walkBGPPeers(g, target)
+}
+
+// walkCiscoBGPPeer3 walks cbgpPeer3Table from CISCO-BGP4-MIB (the
+// VRF-aware extension). The OID index is
+// (vrfName.addrType.addrLen.addr...) so a non-trivial parser is
+// needed to extract the VRF name (variable-length SnmpAdminString)
+// and InetAddress encoding.
+//
+// TODO(phase 2.5b): implement the real walker. For now this returns
+// nil so WalkBGP falls through to BGP4-MIB. Tracked in the design
+// doc Phase 2 follow-up section. The mock client emits multi-VRF
+// peers so the UI / alert template / scope filter are exercisable
+// without this real walker landing first.
+func walkCiscoBGPPeer3(g *gosnmp.GoSNMP, target string) []BGPPeer {
+	_ = g
+	_ = target
+	return nil
+}
+
+// walkJuniperBGPM2 walks jnxBgpM2PeerTable. jnxBgpM2PeerRoutingInstance
+// carries the VRF name. Same status as walkCiscoBGPPeer3 — TODO for a
+// follow-up PR. Returning nil keeps WalkBGP's resolution chain honest:
+// fall through to BGP4-MIB on devices we haven't taught yet.
+func walkJuniperBGPM2(g *gosnmp.GoSNMP, target string) []BGPPeer {
+	_ = g
+	_ = target
+	return nil
 }
