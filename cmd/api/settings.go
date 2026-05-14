@@ -727,6 +727,16 @@ func availableRules() any {
 			},
 			"default_severity": "critical",
 		},
+		{
+			"rule_id":     "bgp_neighbor_down",
+			"label":       "BGP neighbor down",
+			"description": "Fires when an SNMP-polled BGP peer is in any state other than 'established' for at least the dwell window.",
+			"params": []map[string]any{
+				{"name": "established_min_seconds", "kind": "int", "default": 60, "min": 10, "max": 86400},
+				{"name": "lookback_seconds", "kind": "int", "default": 3600, "min": 60, "max": 86400},
+			},
+			"default_severity": "critical",
+		},
 	}
 }
 
@@ -736,7 +746,7 @@ func knownRule(id string) bool {
 		"interface_oper_status_change", "interface_utilization_high",
 		"interface_errors_rate", "top_talker_baseline_anomaly",
 		"device_cpu_high", "device_memory_high", "device_storage_high",
-		"device_unreachable":
+		"device_unreachable", "bgp_neighbor_down":
 		return true
 	}
 	return false

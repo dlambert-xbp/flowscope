@@ -312,6 +312,47 @@ func (m *MockClient) WalkNeighbors(_ context.Context, target string, ifTable map
 	return out, nil
 }
 
+// WalkBGP returns synthetic BGP peers for the mock target. The shape
+// is a small ladder: one Established eBGP peer + one Idle iBGP peer
+// so the BGPNeighborDown alert template has both a healthy and a
+// firing case to evaluate against in the dev loop.
+func (m *MockClient) WalkBGP(_ context.Context, target string) ([]BGPPeer, error) {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(target))
+	seed := h.Sum64()
+	now := time.Now().UTC()
+	return []BGPPeer{
+		{
+			PolledAt:        now,
+			Exporter:        target,
+			PeerAddr:        fmt.Sprintf("192.0.2.%d", 1+seed%200),
+			PeerASN:         65000 + uint32(seed%100),
+			LocalASN:        64512,
+			State:           "established",
+			AdminStatus:     "start",
+			EstablishedAt:   now.Add(-2 * time.Hour),
+			LastChangeAt:    now.Add(-30 * time.Second),
+			AFI:             "ipv4",
+			SAFI:            "unicast",
+			PeerDescription: "Mock transit eBGP",
+			Source:          "bgp4",
+		},
+		{
+			PolledAt:    now,
+			Exporter:    target,
+			PeerAddr:    fmt.Sprintf("198.51.100.%d", 1+seed%200),
+			PeerASN:     64512,
+			LocalASN:    64512,
+			State:       "idle",
+			AdminStatus: "start",
+			AFI:         "ipv4",
+			SAFI:        "unicast",
+			PeerDescription: "Mock iBGP (idle)",
+			Source:      "bgp4",
+		},
+	}, nil
+}
+
 func lowerName(s string) string {
 	out := make([]byte, len(s))
 	for i := 0; i < len(s); i++ {

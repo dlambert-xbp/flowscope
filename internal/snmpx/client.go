@@ -123,6 +123,7 @@ type Interface struct {
 type Client interface {
 	Walk(ctx context.Context, target string) (*Inventory, error)
 	WalkNeighbors(ctx context.Context, target string, ifTable map[uint32]string) ([]Neighbor, error)
+	WalkBGP(ctx context.Context, target string) ([]BGPPeer, error)
 }
 
 // Config configures a real (non-mock) SNMP client. It carries either

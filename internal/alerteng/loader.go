@@ -136,6 +136,13 @@ func applyOverride(base Rule, o settings.AlertRuleSetting, hasOverride bool) Rul
 			return severityWrap{Rule: r, severity: o.Severity}
 		}
 		return r
+	case BGPNeighborDown:
+		r.EstablishedMinSeconds = paramInt(params, "established_min_seconds", r.EstablishedMinSeconds)
+		r.LookbackSeconds = paramInt(params, "lookback_seconds", r.LookbackSeconds)
+		if o.Severity != "" {
+			return severityWrap{Rule: r, severity: o.Severity}
+		}
+		return r
 	default:
 		if o.Severity != "" {
 			return severityWrap{Rule: base, severity: o.Severity}
@@ -237,6 +244,11 @@ func describe(r Rule) map[string]any {
 		return map[string]any{
 			"stale_seconds":  x.StaleSeconds,
 			"lookback_hours": x.LookbackHours,
+		}
+	case BGPNeighborDown:
+		return map[string]any{
+			"established_min_seconds": x.EstablishedMinSeconds,
+			"lookback_seconds":        x.LookbackSeconds,
 		}
 	case severityWrap:
 		return describe(x.Rule)

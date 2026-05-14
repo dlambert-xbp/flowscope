@@ -197,11 +197,14 @@ function InstanceForm({
   const [draft, setDraft] = useState<AlertRuleInstance>(initial)
   const [exportersText, setExportersText] = useState((initial.scope.exporters ?? []).join(', '))
   const [ifindexText, setIfindexText] = useState((initial.scope.ifindex ?? []).join(', '))
+  const [bgpPeersText, setBgpPeersText] = useState((initial.scope.bgp_peers ?? []).join(', '))
+  const [asnRemoteText, setAsnRemoteText] = useState((initial.scope.asn_remote ?? []).join(', '))
   const [error, setError] = useState<string | null>(null)
   const qc = useQueryClient()
 
   const supportsExporter = template.scope_kinds.includes('exporter')
   const supportsInterface = template.scope_kinds.includes('interface')
+  const supportsBGPPeer = template.scope_kinds.includes('bgp_peer')
 
   const save = useMutation({
     mutationFn: async () => {
@@ -213,6 +216,12 @@ function InstanceForm({
       if (supportsInterface) {
         const idx = parseList(ifindexText).map(Number).filter((n) => Number.isFinite(n))
         if (idx.length > 0) scope.ifindex = idx
+      }
+      if (supportsBGPPeer) {
+        const peers = parseList(bgpPeersText)
+        if (peers.length > 0) scope.bgp_peers = peers
+        const asns = parseList(asnRemoteText).map(Number).filter((n) => Number.isFinite(n))
+        if (asns.length > 0) scope.asn_remote = asns
       }
       const body: Partial<AlertRuleInstance> & { instance_id?: string } = {
         ...draft,
@@ -278,7 +287,7 @@ function InstanceForm({
         </Field>
       </div>
 
-      {!seedLocked && (supportsExporter || supportsInterface) && (
+      {!seedLocked && (supportsExporter || supportsInterface || supportsBGPPeer) && (
         <div className="border border-line bg-ink px-3 py-3 mb-3">
           <div className="text-[10.5px] uppercase tracking-[0.1em] text-faint font-mono mb-2">
             scope
@@ -301,6 +310,26 @@ function InstanceForm({
                   value={ifindexText}
                   onChange={(e) => setIfindexText(e.target.value)}
                   placeholder="1, 2, 3"
+                  className="s-input"
+                />
+              </Field>
+            )}
+            {supportsBGPPeer && (
+              <Field label="bgp peers" hint="comma-separated peer IPs (empty = all peers)">
+                <input
+                  value={bgpPeersText}
+                  onChange={(e) => setBgpPeersText(e.target.value)}
+                  placeholder="192.0.2.1, 198.51.100.5"
+                  className="s-input"
+                />
+              </Field>
+            )}
+            {supportsBGPPeer && (
+              <Field label="remote ASN" hint="comma-separated peer ASNs (empty = all ASNs)">
+                <input
+                  value={asnRemoteText}
+                  onChange={(e) => setAsnRemoteText(e.target.value)}
+                  placeholder="65001, 65002"
                   className="s-input"
                 />
               </Field>
@@ -420,6 +449,7 @@ function scopeSummary(scope: AlertScopeSelector, kinds: AlertScopeKind[]): React
   if (scope.exporters?.length) parts.push(`${scope.exporters.length} exporter${scope.exporters.length === 1 ? '' : 's'}`)
   if (scope.ifindex?.length) parts.push(`${scope.ifindex.length} ifindex`)
   if (scope.bgp_peers?.length) parts.push(`${scope.bgp_peers.length} bgp peer${scope.bgp_peers.length === 1 ? '' : 's'}`)
+  if (scope.asn_remote?.length) parts.push(`${scope.asn_remote.length} asn`)
   if (scope.exporter_labels && Object.keys(scope.exporter_labels).length > 0) {
     parts.push('label-matched')
   }

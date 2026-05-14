@@ -60,6 +60,10 @@ func DefaultRules() []Rule {
 			StaleSeconds:  2700,
 			LookbackHours: 24,
 		},
+		BGPNeighborDown{
+			EstablishedMinSeconds: 60,
+			LookbackSeconds:       3600,
+		},
 	}
 }
 

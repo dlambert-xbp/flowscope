@@ -105,6 +105,8 @@ func ScopeKindsFor(templateID string) []ScopeKind {
 		"device_storage_high",
 		"device_unreachable":
 		return []ScopeKind{ScopeKindExporter}
+	case "bgp_neighbor_down":
+		return []ScopeKind{ScopeKindExporter, ScopeKindBGPPeer}
 	}
 	return nil
 }
@@ -270,6 +272,7 @@ func BuiltinTemplates() []Template {
 		DeviceMemoryHigh{ThresholdPct: 85, CriticalBumpPct: 10, LookbackSeconds: 1800},
 		DeviceStorageHigh{ThresholdPct: 85, CriticalBumpPct: 10, LookbackSeconds: 3600},
 		DeviceUnreachable{StaleSeconds: 2700, LookbackHours: 24},
+		BGPNeighborDown{EstablishedMinSeconds: 60, LookbackSeconds: 3600},
 	}
 }
 

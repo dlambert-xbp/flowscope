@@ -38,10 +38,19 @@ type Scheduler struct {
 	// first" and TASKS.md P3 #20.
 	neighborInterval time.Duration
 
+	// bgpInterval is the per-device cadence for bgpPeerTable walks.
+	// BGP state changes infrequently relative to interface counters
+	// (a flapping session is itself the alert signal), so 2 min is
+	// chosen as a middle ground: fast enough that BGPNeighborDown
+	// doesn't lag a real session drop by long, slow enough that fleet
+	// load on real gear stays modest.
+	bgpInterval time.Duration
+
 	mu                  sync.Mutex
 	inFlight            map[string]bool
 	lastWalked          map[string]time.Time
 	lastNeighborsWalked map[string]time.Time
+	lastBGPWalked       map[string]time.Time
 }
 
 // NewScheduler returns a Scheduler. creds may be nil; in that case
@@ -67,9 +76,11 @@ func NewScheduler(conn driver.Conn, creds CredentialStore, fallback Client, inte
 		interval:            interval,
 		concurrency:         concurrency,
 		neighborInterval:    5 * time.Minute,
+		bgpInterval:         2 * time.Minute,
 		inFlight:            make(map[string]bool),
 		lastWalked:          make(map[string]time.Time),
 		lastNeighborsWalked: make(map[string]time.Time),
+		lastBGPWalked:       make(map[string]time.Time),
 	}
 }
 
@@ -286,6 +297,37 @@ func (s *Scheduler) walkOne(ctx context.Context, target string) {
 		}
 	}
 
+	// BGP walk runs on its own cadence (2 min by default). We always
+	// attempt the walk on first poll so the BGPNeighborDown rule can
+	// see freshly-walked devices immediately. Devices that don't speak
+	// BGP4-MIB return an empty slice — the walker logs nothing in that
+	// path so an L2 switch in the fleet doesn't spam the logs every
+	// few minutes.
+	if s.shouldWalkBGP(target) {
+		peers, berr := client.WalkBGP(walkCtx, target)
+		if berr != nil {
+			slog.Warn("snmp: bgp walk failed", "exporter", target, "err", berr)
+		} else if len(peers) > 0 {
+			if perr := s.persistBGPPeers(ctx, peers); perr != nil {
+				slog.Warn("snmp: persist bgp peers failed", "exporter", target, "err", perr)
+			} else {
+				s.mu.Lock()
+				s.lastBGPWalked[target] = time.Now()
+				s.mu.Unlock()
+				slog.Info("snmp: bgp peers walked",
+					"exporter", target,
+					"peers", len(peers),
+				)
+			}
+		} else {
+			// Mark as walked so the empty-result path doesn't re-attempt
+			// every tick.
+			s.mu.Lock()
+			s.lastBGPWalked[target] = time.Now()
+			s.mu.Unlock()
+		}
+	}
+
 	slog.Info("snmp: walked",
 		"exporter", target,
 		"sys_name", inv.SysName,
@@ -293,6 +335,69 @@ func (s *Scheduler) walkOne(ctx context.Context, target string) {
 		"duration_ms", inv.PollDurationMs,
 		"status", inv.Status,
 	)
+}
+
+// shouldWalkBGP returns true if target hasn't had a BGP walk in the
+// past bgpInterval. First walk always runs.
+func (s *Scheduler) shouldWalkBGP(target string) bool {
+	s.mu.Lock()
+	last := s.lastBGPWalked[target]
+	s.mu.Unlock()
+	if last.IsZero() {
+		return true
+	}
+	return time.Since(last) >= s.bgpInterval
+}
+
+// persistBGPPeers writes one row per peer to bgp_peers. Each walk
+// produces a fresh sample (MergeTree append-only, partitioned by day,
+// 30-day TTL) so the alert engine reads argMax(state, polled_at) for
+// the latest known state per (exporter, peer_addr).
+func (s *Scheduler) persistBGPPeers(ctx context.Context, peers []BGPPeer) error {
+	if len(peers) == 0 {
+		return nil
+	}
+	batch, err := s.conn.PrepareBatch(ctx,
+		`INSERT INTO bgp_peers
+		   (polled_at, exporter, peer_addr, peer_asn, local_asn,
+		    state, admin_status, established_at, last_change_at,
+		    afi, safi, peer_description, source)`,
+	)
+	if err != nil {
+		return fmt.Errorf("prepare bgp batch: %w", err)
+	}
+	for _, p := range peers {
+		exp16, eerr := ipv6Bytes(p.Exporter)
+		if eerr != nil {
+			continue
+		}
+		peer16, perr := ipv6Bytes(p.PeerAddr)
+		if perr != nil {
+			continue
+		}
+		// Zero-time established/last-change land as the schema default
+		// (epoch). The read path treats epoch as "unknown" so the UI
+		// renders an em-dash rather than 1970.
+		est := p.EstablishedAt
+		if est.IsZero() {
+			est = time.Unix(0, 0).UTC()
+		}
+		chg := p.LastChangeAt
+		if chg.IsZero() {
+			chg = time.Unix(0, 0).UTC()
+		}
+		if err := batch.Append(
+			p.PolledAt, exp16, peer16, p.PeerASN, p.LocalASN,
+			p.State, p.AdminStatus, est, chg,
+			p.AFI, p.SAFI, p.PeerDescription, p.Source,
+		); err != nil {
+			return fmt.Errorf("append bgp peer: %w", err)
+		}
+	}
+	if err := batch.Send(); err != nil {
+		return fmt.Errorf("send bgp batch: %w", err)
+	}
+	return nil
 }
 
 // shouldWalkNeighbors returns true if target hasn't had a neighbor
