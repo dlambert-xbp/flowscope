@@ -85,9 +85,10 @@ func run() error {
 	}()
 
 	settingsStore := settings.New(conn, nil)
-	rules, version, err := alerteng.LoadRules(ctx, settingsStore.AlertRules)
+	registry := alerteng.BuildTemplateRegistry()
+	rules, version, err := alerteng.LoadInstanceRules(ctx, settingsStore.AlertInstances, registry)
 	if err != nil {
-		slog.Warn("alert: initial rule load failed, using defaults", "err", err)
+		slog.Warn("alert: initial instance load failed, using defaults", "err", err)
 		rules = alerteng.DefaultRules()
 		version = time.Time{}
 	}
@@ -100,7 +101,7 @@ func run() error {
 	)
 
 	engine := alerteng.New(conn, rules, tick).
-		WithSettingsSource(settingsStore.AlertRules, version).
+		WithInstanceSource(settingsStore.AlertInstances, registry, version).
 		WithStabilityWindow(stability)
 
 	// Webhook dispatcher runs alongside the engine. It is independent

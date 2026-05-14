@@ -581,12 +581,38 @@ func (h *handlers) putAlertRule(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// Dual-write: keep the legacy alert_rule_settings row and the
+	// per-template seed instance in sync so the existing AlertsTuning
+	// UI remains functional during the migration window. Without this
+	// the engine (which now reads alert_rule_instances) would ignore
+	// edits made via the legacy editor. Dropped together with the
+	// legacy table in phase 7.
+	if seed, err := h.settings.store.AlertInstances.EnsureSeed(r.Context(),
+		s.RuleID, "Default · "+s.RuleID, paramsAsMap(s.Params), s.Severity,
+	); err == nil {
+		seed.Enabled = s.Enabled
+		seed.Severity = s.Severity
+		seed.Params = paramsAsMap(s.Params)
+		seed.Runbook = s.Runbook
+		seed.Channels = s.Channels
+		_, _ = h.settings.store.AlertInstances.Update(r.Context(), *seed, h.actor(r))
+	}
 	action := audit.ActionCreate
 	if before != nil {
 		action = audit.ActionUpdate
 	}
 	h.recordAudit(r, action, audit.ResourceAlertRuleSetting, s.RuleID, before, s)
 	writeJSON(w, http.StatusOK, s)
+}
+
+// paramsAsMap normalizes the Params field of an AlertRuleSetting
+// (which can be any JSON shape) to the map[string]any the instance
+// store expects. Anything else becomes an empty map.
+func paramsAsMap(v any) map[string]any {
+	if m, ok := v.(map[string]any); ok {
+		return m
+	}
+	return map[string]any{}
 }
 
 // availableRules describes the Go-coded rules in internal/alerteng so
@@ -701,6 +727,16 @@ func availableRules() any {
 			},
 			"default_severity": "critical",
 		},
+		{
+			"rule_id":     "bgp_neighbor_down",
+			"label":       "BGP neighbor down",
+			"description": "Fires when an SNMP-polled BGP peer is in any state other than 'established' for at least the dwell window.",
+			"params": []map[string]any{
+				{"name": "established_min_seconds", "kind": "int", "default": 60, "min": 10, "max": 86400},
+				{"name": "lookback_seconds", "kind": "int", "default": 3600, "min": 60, "max": 86400},
+			},
+			"default_severity": "critical",
+		},
 	}
 }
 
@@ -710,7 +746,7 @@ func knownRule(id string) bool {
 		"interface_oper_status_change", "interface_utilization_high",
 		"interface_errors_rate", "top_talker_baseline_anomaly",
 		"device_cpu_high", "device_memory_high", "device_storage_high",
-		"device_unreachable":
+		"device_unreachable", "bgp_neighbor_down":
 		return true
 	}
 	return false

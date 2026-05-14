@@ -4,6 +4,7 @@ import { Services } from './sections/Services'
 import { Exporters } from './sections/Exporters'
 import { SNMP } from './sections/SNMP'
 import { AlertsTuning } from './sections/AlertsTuning'
+import { AlertRules } from './sections/AlertRules'
 import { Integrations } from './sections/Integrations'
 import { AuthTokens } from './sections/AuthTokens'
 import { Audit } from './sections/Audit'
@@ -17,6 +18,7 @@ export type SectionId =
   | 'services'
   | 'exporters'
   | 'snmp'
+  | 'rules'
   | 'alerts'
   | 'integrations'
   | 'auth'
@@ -35,7 +37,8 @@ const SECTIONS: SectionDef[] = [
   { id: 'services',     label: 'Services',      group: 'core',         Component: Services },
   { id: 'exporters',    label: 'Exporters',     group: 'connectivity', Component: Exporters },
   { id: 'snmp',         label: 'SNMP',          group: 'connectivity', Component: SNMP },
-  { id: 'alerts',       label: 'Alert rules',   group: 'alerting',     Component: AlertsTuning },
+  { id: 'rules',        label: 'Per-device rules', group: 'alerting',  Component: AlertRules },
+  { id: 'alerts',       label: 'Defaults',      group: 'alerting',     Component: AlertsTuning },
   { id: 'integrations', label: 'Integrations',  group: 'alerting',     Component: Integrations },
   { id: 'auth',         label: 'Auth & tokens', group: 'admin',        Component: AuthTokens },
   { id: 'audit',        label: 'Audit log',     group: 'admin',        Component: Audit },

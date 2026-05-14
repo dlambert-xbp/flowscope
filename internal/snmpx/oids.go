@@ -157,7 +157,85 @@ const (
 	// byte length.
 	OIDCdpCacheAddressType = "1.3.6.1.4.1.9.9.23.1.2.1.1.3"
 	OIDCdpCacheAddress     = "1.3.6.1.4.1.9.9.23.1.2.1.1.4"
+
+	// BGP4-MIB (RFC 4273) — IPv4-only, ASN limited to 16 bits. The
+	// table is indexed by bgpPeerRemoteAddr (the IPv4 peer address).
+	// bgpPeerState values: 1=idle, 2=connect, 3=active, 4=opensent,
+	// 5=openconfirm, 6=established. bgpPeerAdminStatus: 1=stop, 2=start.
+	// bgpPeerFsmEstablishedTime is in seconds since the peer last
+	// transitioned to Established (TimeStamp). Use this MIB only when
+	// the richer cbgpPeer2 / jnxBgpM2 paths return nothing.
+	OIDBgpPeerIdentifier            = "1.3.6.1.2.1.15.3.1.1"  // IpAddress: peer router id
+	OIDBgpPeerState                 = "1.3.6.1.2.1.15.3.1.2"  // INTEGER: 1..6
+	OIDBgpPeerAdminStatus           = "1.3.6.1.2.1.15.3.1.3"  // INTEGER: 1=stop, 2=start
+	OIDBgpPeerLocalAddr             = "1.3.6.1.2.1.15.3.1.5"  // IpAddress
+	OIDBgpPeerLocalAS               = "1.3.6.1.2.1.15.2"      // scalar bgpLocalAs
+	OIDBgpPeerRemoteAddr            = "1.3.6.1.2.1.15.3.1.7"  // IpAddress; also the index
+	OIDBgpPeerRemoteAS              = "1.3.6.1.2.1.15.3.1.9"  // INTEGER (16-bit only in this MIB)
+	OIDBgpPeerFsmEstablishedTime    = "1.3.6.1.2.1.15.3.1.16" // Counter32 (seconds since last Established)
+	OIDBgpPeerInUpdateElapsedTime   = "1.3.6.1.2.1.15.3.1.24" // Counter32 (seconds since last update)
+
+	// CISCO-BGP4-MIB cbgpPeer2Table — IPv4 + IPv6 + 32-bit ASN. Indexed
+	// by (cbgpPeer2Type, cbgpPeer2RemoteAddrLen, cbgpPeer2RemoteAddr...).
+	// cbgpPeer2Type: 1=ipv4, 2=ipv6 (matches the InetAddressType TC).
+	// cbgpPeer2State / AdminStatus mirror the BGP4-MIB INTEGER enum.
+	// cbgpPeer2RemoteAs is Unsigned32 (4-byte ASNs OK).
+	// cbgpPeer2Description is the operator-readable label, often the
+	// "neighbor description" line in the running-config.
+	OIDCbgpPeer2State              = "1.3.6.1.4.1.9.9.187.1.2.5.1.3"
+	OIDCbgpPeer2AdminStatus        = "1.3.6.1.4.1.9.9.187.1.2.5.1.4"
+	OIDCbgpPeer2LocalAs            = "1.3.6.1.4.1.9.9.187.1.2.5.1.8"
+	OIDCbgpPeer2RemoteAs           = "1.3.6.1.4.1.9.9.187.1.2.5.1.11"
+	OIDCbgpPeer2FsmEstablishedTime = "1.3.6.1.4.1.9.9.187.1.2.5.1.18"
+	OIDCbgpPeer2InUpdateElapsedTime = "1.3.6.1.4.1.9.9.187.1.2.5.1.26"
+	OIDCbgpPeer2Description        = "1.3.6.1.4.1.9.9.187.1.2.7.1.1" // separate cbgpPeer2DescrTable
+
+	// JUNIPER-BGP4-V2-MIB jnxBgpM2PeerTable — Junos's modern BGP MIB.
+	// Indexed by jnxBgpM2PeerInstance + jnxBgpM2PeerLocalAddrType +
+	// jnxBgpM2PeerLocalAddr + jnxBgpM2PeerRemoteAddrType +
+	// jnxBgpM2PeerRemoteAddr. jnxBgpM2PeerState matches the BGP4-MIB
+	// state enum.
+	OIDJnxBgpM2PeerState              = "1.3.6.1.4.1.2636.5.1.1.2.1.1.1.2"
+	OIDJnxBgpM2PeerStatus             = "1.3.6.1.4.1.2636.5.1.1.2.1.1.1.3" // bgpAdminStatus equivalent
+	OIDJnxBgpM2PeerLocalAs            = "1.3.6.1.4.1.2636.5.1.1.2.1.1.1.9"
+	OIDJnxBgpM2PeerRemoteAs           = "1.3.6.1.4.1.2636.5.1.1.2.1.1.1.13"
+	OIDJnxBgpM2PeerFsmEstablishedTime = "1.3.6.1.4.1.2636.5.1.1.2.1.1.1.16"
+	OIDJnxBgpM2PeerInUpdateElapsedTime = "1.3.6.1.4.1.2636.5.1.1.2.1.1.1.17"
+	OIDJnxBgpM2PeerDescription        = "1.3.6.1.4.1.2636.5.1.1.2.6.1.1.2"
 )
+
+// BgpPeerStateName maps the BGP4-MIB INTEGER enum to canonical string
+// names used by the bgp_peers table and the BGPNeighborDown rule.
+func BgpPeerStateName(v int) string {
+	switch v {
+	case 1:
+		return "idle"
+	case 2:
+		return "connect"
+	case 3:
+		return "active"
+	case 4:
+		return "opensent"
+	case 5:
+		return "openconfirm"
+	case 6:
+		return "established"
+	default:
+		return "unknown"
+	}
+}
+
+// BgpAdminStatusName renders the bgpPeerAdminStatus INTEGER enum.
+func BgpAdminStatusName(v int) string {
+	switch v {
+	case 1:
+		return "stop"
+	case 2:
+		return "start"
+	default:
+		return ""
+	}
+}
 
 // ifAdminStatusName / ifOperStatusName render IF-MIB integer codes
 // into the human-friendly strings the api stores.

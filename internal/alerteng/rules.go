@@ -60,6 +60,10 @@ func DefaultRules() []Rule {
 			StaleSeconds:  2700,
 			LookbackHours: 24,
 		},
+		BGPNeighborDown{
+			EstablishedMinSeconds: 60,
+			LookbackSeconds:       3600,
+		},
 	}
 }
 
@@ -73,25 +77,50 @@ type ExporterSilent struct {
 	ActiveSeconds int
 }
 
-func (ExporterSilent) ID() string       { return "exporter_silent" }
-func (ExporterSilent) Severity() string { return SeverityCritical }
-func (ExporterSilent) Runbook() string  { return "exporter-silent.md" }
+func (ExporterSilent) ID() string              { return "exporter_silent" }
+func (ExporterSilent) Severity() string        { return SeverityCritical }
+func (ExporterSilent) DefaultSeverity() string { return SeverityCritical }
+func (ExporterSilent) Runbook() string         { return "exporter-silent.md" }
+func (r ExporterSilent) DefaultParams() map[string]any {
+	return map[string]any{"silent_seconds": r.SilentSeconds, "active_seconds": r.ActiveSeconds}
+}
 
 func (r ExporterSilent) Evaluate(ctx context.Context, conn driver.Conn) ([]Violation, error) {
-	const q = `
+	return r.EvaluateScoped(ctx, conn, ScopeSelector{}, r.DefaultParams())
+}
+
+// EvaluateScoped honors scope.Exporters by intersecting the active
+// exporter set with it before checking silence — useful when an
+// instance only cares about a subset of devices (e.g. "alert if any
+// of these critical edge routers stop reporting").
+func (r ExporterSilent) EvaluateScoped(ctx context.Context, conn driver.Conn, scope ScopeSelector, params map[string]any) ([]Violation, error) {
+	silent := paramInt(params, "silent_seconds", r.SilentSeconds)
+	if silent <= 0 {
+		silent = 60
+	}
+	active := paramInt(params, "active_seconds", r.ActiveSeconds)
+	if active <= 0 {
+		active = 600
+	}
+	scopeFrag, scopeArgs := scopeWhere("exporter", "", scope)
+	q := `
 SELECT IPv6NumToString(exporter)
 FROM (
     SELECT exporter
     FROM flows
-    WHERE observed >= now() - INTERVAL ? SECOND
+    WHERE observed >= now() - INTERVAL ? SECOND` + scopeFrag + `
     GROUP BY exporter
 ) AS active
 WHERE exporter NOT IN (
     SELECT exporter FROM flows
-    WHERE observed >= now() - INTERVAL ? SECOND
+    WHERE observed >= now() - INTERVAL ? SECOND` + scopeFrag + `
     GROUP BY exporter
 )`
-	rows, err := conn.Query(ctx, q, uint64(r.ActiveSeconds), uint64(r.SilentSeconds))
+	args := []any{uint64(active)}
+	args = append(args, scopeArgs...)
+	args = append(args, uint64(silent))
+	args = append(args, scopeArgs...)
+	rows, err := conn.Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("exporter_silent: %w", err)
 	}
@@ -102,17 +131,15 @@ WHERE exporter NOT IN (
 		if err := rows.Scan(&raw); err != nil {
 			return nil, err
 		}
-		// IPv6NumToString returns "::ffff:10.2.0.11" for v4-mapped form;
-		// trim the prefix so the chip / scope reads as "10.2.0.11".
 		ip := unmap4in6(raw)
 		out = append(out, Violation{
 			Scope:    ip,
 			GroupKey: "silent_" + ip,
-			Title:    fmt.Sprintf("Exporter %s has been silent for >%ds", ip, r.SilentSeconds),
+			Title:    fmt.Sprintf("Exporter %s has been silent for >%ds", ip, silent),
 			Body: fmt.Sprintf(
 				"This exporter produced flows in the last %ds but no flows in the last %ds. "+
 					"Likely device/path failure or upstream networking issue.",
-				r.ActiveSeconds, r.SilentSeconds,
+				active, silent,
 			),
 			Severity: SeverityCritical,
 			Labels:   map[string]string{"exporter": ip},
@@ -132,11 +159,31 @@ type HeavyTalker struct {
 	BytesThreshold uint64
 }
 
-func (HeavyTalker) ID() string       { return "heavy_talker" }
-func (HeavyTalker) Severity() string { return SeverityWarning }
-func (HeavyTalker) Runbook() string  { return "heavy-talker.md" }
+func (HeavyTalker) ID() string              { return "heavy_talker" }
+func (HeavyTalker) Severity() string        { return SeverityWarning }
+func (HeavyTalker) DefaultSeverity() string { return SeverityWarning }
+func (HeavyTalker) Runbook() string         { return "heavy-talker.md" }
+func (r HeavyTalker) DefaultParams() map[string]any {
+	return map[string]any{"window_seconds": r.WindowSeconds, "bytes_threshold": r.BytesThreshold}
+}
 
 func (r HeavyTalker) Evaluate(ctx context.Context, conn driver.Conn) ([]Violation, error) {
+	return r.EvaluateScoped(ctx, conn, ScopeSelector{}, r.DefaultParams())
+}
+
+// EvaluateScoped ignores scope — heavy-talker is flow-pair level and
+// the scope dimensions (exporter, ifindex) don't apply. The api's
+// ScopeKindsFor returns nil for this template so a non-empty scope
+// fails ValidateScope before reaching here.
+func (r HeavyTalker) EvaluateScoped(ctx context.Context, conn driver.Conn, _ ScopeSelector, params map[string]any) ([]Violation, error) {
+	window := paramInt(params, "window_seconds", r.WindowSeconds)
+	if window <= 0 {
+		window = 300
+	}
+	threshold := paramUint64(params, "bytes_threshold", r.BytesThreshold)
+	if threshold == 0 {
+		threshold = 1 << 30
+	}
 	const q = `
 SELECT IPv6NumToString(src_addr) AS src,
        IPv6NumToString(dst_addr) AS dst,
@@ -147,7 +194,7 @@ GROUP BY src_addr, dst_addr
 HAVING total >= ?
 ORDER BY total DESC
 LIMIT 20`
-	rows, err := conn.Query(ctx, q, uint64(r.WindowSeconds), r.BytesThreshold)
+	rows, err := conn.Query(ctx, q, uint64(window), threshold)
 	if err != nil {
 		return nil, fmt.Errorf("heavy_talker: %w", err)
 	}
@@ -167,11 +214,11 @@ LIMIT 20`
 		out = append(out, Violation{
 			Scope:    scope,
 			GroupKey: "talker_" + src + "_" + dst,
-			Title:    fmt.Sprintf("Heavy talker · %s moved %s in last %ds", scope, fmtBytes(total), r.WindowSeconds),
+			Title:    fmt.Sprintf("Heavy talker · %s moved %s in last %ds", scope, fmtBytes(total), window),
 			Body: fmt.Sprintf(
 				"This src→dst pair has moved %s in the trailing %d-second window. "+
 					"Investigate before treating as malicious — could be a backup, replication, or video stream.",
-				fmtBytes(total), r.WindowSeconds,
+				fmtBytes(total), window,
 			),
 			Severity: SeverityWarning,
 			Labels: map[string]string{

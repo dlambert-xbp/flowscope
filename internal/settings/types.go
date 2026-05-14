@@ -86,6 +86,10 @@ type AppSettingValue struct {
 // rule in internal/alerteng. Params is rule-specific JSON validated
 // by the rule's loader; severity overrides the rule's default if
 // non-empty.
+//
+// Deprecated: superseded by AlertRuleInstance. Reads still work for
+// one release cycle; writes go through the instance store. The
+// migration in 000017 seeds an instance per alert_rule_settings row.
 type AlertRuleSetting struct {
 	RuleID     string    `json:"rule_id"`
 	Enabled    bool      `json:"enabled"`
@@ -95,6 +99,69 @@ type AlertRuleSetting struct {
 	Channels   []string  `json:"channels,omitempty"` // webhook IDs
 	UpdatedAt  time.Time `json:"updated_at,omitempty"`
 	UpdatedBy  string    `json:"updated_by,omitempty"`
+}
+
+/* ----------------------------- Alert rule instances ----------------------------- */
+
+// AlertRuleInstance is one operator-created binding of a built-in
+// template to a scope and a parameter set. The alert engine iterates
+// instances on every tick; each violation it emits carries the
+// InstanceID that produced it, so ack/silence/dedup are per-instance.
+//
+// Two instances of the same template with overlapping scopes are
+// legitimate ("warn at 80%" + "page at 95%") — they fire as
+// independent alerts the operator can act on separately.
+//
+// IsSeed marks the per-template "default · all devices" instance the
+// migration auto-seeded (or the api lazy-seeded on first read for
+// templates with no prior alert_rule_settings override). Operators
+// can edit a seed row's params to change the global default; they
+// cannot delete it.
+type AlertRuleInstance struct {
+	InstanceID string         `json:"instance_id"`
+	TemplateID string         `json:"template_id"`
+	Name       string         `json:"name"`
+	Enabled    bool           `json:"enabled"`
+	Severity   string         `json:"severity,omitempty"`
+	Scope      ScopeSelector  `json:"scope"`
+	Params     map[string]any `json:"params,omitempty"`
+	Runbook    string         `json:"runbook,omitempty"`
+	Channels   []string       `json:"channels,omitempty"`
+	IsSeed     bool           `json:"is_seed"`
+	CreatedAt  time.Time      `json:"created_at,omitempty"`
+	UpdatedAt  time.Time      `json:"updated_at,omitempty"`
+	UpdatedBy  string         `json:"updated_by,omitempty"`
+}
+
+// ScopeSelector is the structured matcher that binds an instance to
+// a subset of devices, interfaces, peers, etc. Empty fields mean
+// "no filter on this dimension"; an empty selector matches
+// everything (that's how seed instances behave).
+//
+// Phase 1 supports exact-IP and ifindex matching. CIDR matching and
+// label-based scoping (role=wan_edge) land in phase 3 with the
+// device label substrate.
+type ScopeSelector struct {
+	Exporters     []string          `json:"exporters,omitempty"`        // exact IPs (canonical exporter form)
+	ExporterCIDRs []string          `json:"exporter_cidrs,omitempty"`   // CIDR matchers — phase 3
+	ExporterLabels map[string]string `json:"exporter_labels,omitempty"` // label matchers — phase 3
+	IfIndex       []uint32          `json:"ifindex,omitempty"`          // interface-scoped templates only
+	IfNameGlob    string            `json:"ifname_glob,omitempty"`      // glob on if_descr — phase 3
+	BGPPeers      []string          `json:"bgp_peers,omitempty"`        // BGP-template only — phase 2
+	ASNRemote     []uint32          `json:"asn_remote,omitempty"`       // BGP-template only — phase 2
+}
+
+// IsEmpty reports whether the selector has no filters set. The engine
+// uses this to short-circuit the WHERE-clause builder for seed
+// instances — an empty selector compiles to no extra predicates.
+func (s ScopeSelector) IsEmpty() bool {
+	return len(s.Exporters) == 0 &&
+		len(s.ExporterCIDRs) == 0 &&
+		len(s.ExporterLabels) == 0 &&
+		len(s.IfIndex) == 0 &&
+		s.IfNameGlob == "" &&
+		len(s.BGPPeers) == 0 &&
+		len(s.ASNRemote) == 0
 }
 
 /* ----------------------------- Webhooks ----------------------------- */

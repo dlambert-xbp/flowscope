@@ -238,6 +238,9 @@ func run() error {
 		r.Get("/api/top/interfaces", h.topInterfaces)
 		r.Get("/api/alerts", h.alerts)
 		r.Get("/api/alerts/summary", h.alertSummary)
+		r.Get("/api/alerts/templates", h.listAlertTemplates)
+		r.Get("/api/alerts/instances", h.listAlertInstances)
+		r.Get("/api/alerts/instances/{id}", h.getAlertInstance)
 		r.Get("/api/alerts/{id}", h.alertDetail)
 		// Alert ack/close are POSTs but treated as read-tier
 		// mutations — they flip alert state for the operator
@@ -285,6 +288,11 @@ func run() error {
 		r.Put("/api/settings/exporters/allowlist/{exporter}", h.putAllowlist)
 		r.Delete("/api/settings/exporters/allowlist/{exporter}", h.deleteAllowlist)
 		r.Put("/api/settings/alert-rules/{id}", h.putAlertRule)
+		r.Post("/api/alerts/instances", h.createAlertInstance)
+		r.Put("/api/alerts/instances/{id}", h.updateAlertInstance)
+		r.Delete("/api/alerts/instances/{id}", h.deleteAlertInstance)
+		r.Post("/api/alerts/instances/{id}/preview", h.previewAlertInstance)
+		r.Post("/api/alerts/instances/preview", h.previewAlertInstanceDryRun)
 		r.Put("/api/settings/integrations/webhooks", h.putWebhook)
 		r.Put("/api/settings/integrations/webhooks/{id}", h.putWebhook)
 		r.Delete("/api/settings/integrations/webhooks/{id}", h.deleteWebhook)
