@@ -71,6 +71,9 @@ func TestReadEndpointsRequireToken(t *testing.T) {
 		r.Post("/api/alerts/{id}/close", mark("alert-close"))
 		r.Get("/api/snmp/credentials", mark("snmp-credentials-list"))
 		r.Get("/api/snmp/credentials/{exporter}", mark("snmp-credential-get"))
+		r.Get("/api/snmp/profiles", mark("snmp-profiles-list"))
+		r.Get("/api/snmp/profiles/{id}", mark("snmp-profile-get"))
+		r.Get("/api/snmp/scan/{id}", mark("snmp-scan-get"))
 		r.Get("/api/services/lookup", mark("services-lookup"))
 		r.Get("/api/services/library", mark("services-library"))
 		r.Get("/api/services/custom", mark("services-custom"))
@@ -112,6 +115,9 @@ func TestReadEndpointsRequireToken(t *testing.T) {
 		{"POST", "/api/alerts/abc-123/close"},
 		{"GET", "/api/snmp/credentials"},
 		{"GET", "/api/snmp/credentials/192.0.2.1"},
+		{"GET", "/api/snmp/profiles"},
+		{"GET", "/api/snmp/profiles/00000000-0000-0000-0000-0000000002c0"},
+		{"GET", "/api/snmp/scan/00000000-0000-0000-0000-0000000000aa"},
 		{"GET", "/api/services/lookup"},
 		{"GET", "/api/services/library"},
 		{"GET", "/api/services/custom"},

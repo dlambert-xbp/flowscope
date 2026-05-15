@@ -188,28 +188,6 @@ func FromCredential(c *Credential) Config {
 	}
 }
 
-// FromGlobalDefault projects a fleet-wide GlobalDefault into a Config.
-// The role drives Version; secrets and identity come straight off the
-// global row. Used by the scheduler when a per-exporter binding sets
-// binding_kind=global_v2c or global_v3, or when no per-exporter
-// binding exists and a v2c global is configured.
-func FromGlobalDefault(g *GlobalDefault) Config {
-	if g == nil {
-		return Config{}
-	}
-	return Config{
-		Version:     g.Role,
-		Port:        g.Port,
-		Community:   g.Community,
-		V3Username:  g.V3Username,
-		V3AuthProto: g.V3AuthProto,
-		V3AuthPass:  g.V3AuthPass,
-		V3PrivProto: g.V3PrivProto,
-		V3PrivPass:  g.V3PrivPass,
-		V3Context:   g.V3Context,
-	}
-}
-
 // RealClient wraps gosnmp.GoSNMP for a single (target, credential)
 // pair. Each Walk call opens a fresh session — gosnmp is not
 // goroutine-safe, and per-target sessions keep failures isolated.

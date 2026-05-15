@@ -51,7 +51,28 @@ type Scheduler struct {
 	lastWalked          map[string]time.Time
 	lastNeighborsWalked map[string]time.Time
 	lastBGPWalked       map[string]time.Time
+
+	// autoBindNextAttempt holds the next time we'll try auto-bind for
+	// an exporter that has no per-exporter binding and was rejected by
+	// every discovery-flagged profile. Without this backoff a
+	// flow-discovered-but-uncredentialed exporter burns N SNMP probes
+	// (N = discovery profiles) every dispatch tick forever.
+	autoBindNextAttempt map[string]time.Time
 }
+
+// autoBindRetryAfter is how long to wait before re-attempting auto-bind
+// for an exporter whose every discovery-flagged profile failed. 10 min
+// is fast enough that adding a new profile to the library and seeing
+// the device come online doesn't feel slow; slow enough that a truly
+// uncredentialed device doesn't cost a probe storm.
+const autoBindRetryAfter = 10 * time.Minute
+
+// autoBindTightTimeout is the timeout used on the FIRST probe of an
+// auto-bind sequence — a deliberate "is this IP even alive?" check.
+// On timeout we abort the whole sequence for this exporter; on any
+// non-timeout SNMP response (including auth failures) we continue to
+// the next profile.
+const autoBindTightTimeout = 1 * time.Second
 
 // NewScheduler returns a Scheduler. creds may be nil; in that case
 // every walk uses fallback. fallback may also be nil; without it the
@@ -81,6 +102,7 @@ func NewScheduler(conn driver.Conn, creds CredentialStore, fallback Client, inte
 		lastWalked:          make(map[string]time.Time),
 		lastNeighborsWalked: make(map[string]time.Time),
 		lastBGPWalked:       make(map[string]time.Time),
+		autoBindNextAttempt: make(map[string]time.Time),
 	}
 }
 
@@ -422,50 +444,44 @@ func (s *Scheduler) shouldWalkNeighbors(target string) bool {
 // clientFor returns the SNMP Client to use for target. Resolution
 // order:
 //
-//	1. Per-exporter binding (snmp_credentials)
-//	   - binding_kind=custom: use the inline community / v3 fields.
-//	   - binding_kind=global_v2c: resolve via snmp_global_defaults v2c.
-//	   - binding_kind=global_v3:  resolve via snmp_global_defaults v3.
-//	2. Whichever global has default_for_dynamic=1 (operator-controlled;
-//	   defaults to v2c when both are flagged, mirroring legacy behavior).
-//	3. The env-var fallback client (legacy FLOWSCOPE_SNMP_COMMUNITY).
+//  1. Per-exporter binding (snmp_credentials)
+//     - ProfileID == "":  use the inline community / v3 fields on the row.
+//     - ProfileID != "":  resolve to that Profile and build from there.
+//                         The binding's Port still wins when non-zero,
+//                         so per-device port overrides keep working.
+//  2. Auto-bind: try each discovery-flagged Profile in priority order.
+//     The first attempt uses a 1s tight timeout — a timeout means the
+//     IP is unresponsive and we abort the whole sequence. Subsequent
+//     profiles use the profile's normal timeout/retries. On success we
+//     persist a new binding row so this work happens once per exporter,
+//     not every walk, and the operator sees the auto-bound profile in
+//     the UI.
+//  3. The env-var fallback client (legacy FLOWSCOPE_SNMP_COMMUNITY).
 //
-// A misconfigured global indirection (binding points at a global that
-// hasn't been configured yet) returns ErrCredNotFound semantics so the
-// walk falls through to the fallback rather than failing the device.
+// A binding that points at a missing/deleted profile is treated as
+// "no binding" and the auto-bind path runs — better than failing the
+// walk silently when the operator deletes a profile someone was using.
 func (s *Scheduler) clientFor(ctx context.Context, target string) (Client, error) {
 	if s.creds != nil {
 		c, err := s.creds.Get(ctx, target)
 		if err == nil {
-			switch c.BindingKind {
-			case BindingKindGlobalV2c:
-				if cl := s.clientFromGlobal(ctx, "v2c", c.Port); cl != nil {
-					return cl, nil
-				}
-			case BindingKindGlobalV3:
-				if cl := s.clientFromGlobal(ctx, "v3", c.Port); cl != nil {
-					return cl, nil
-				}
-			default: // "" or "custom"
+			if !c.UsesProfile() {
 				return NewClient(FromCredential(c)), nil
 			}
-			// Global indirection requested but unconfigured — fall
-			// through to the fallback client below so the device still
-			// gets walked.
-			slog.Warn("snmp: global default not configured, using fallback",
-				"exporter", target, "binding_kind", c.BindingKind)
-		} else if err != ErrCredNotFound {
-			// ErrCredNotFound is the common case; anything else is logged.
-			slog.Warn("snmp: credential lookup failed", "exporter", target, "err", err)
-		} else {
-			// No per-exporter binding — try whichever global is flagged
-			// as the fleet-wide default for dynamic discovery. v2c wins
-			// when both are flagged (legacy compat); v3 wins when only
-			// v3 is flagged (v3-only deployments). If neither is
-			// flagged we fall through to the env-var fallback.
-			if cl := s.defaultDynamicClient(ctx); cl != nil {
-				return cl, nil
+			p, perr := s.creds.GetProfile(ctx, c.ProfileID)
+			if perr == nil {
+				return NewClient(FromProfile(p, c.Port, c.Interval)), nil
 			}
+			slog.Warn("snmp: binding references missing profile, falling back to auto-bind",
+				"exporter", target, "profile_id", c.ProfileID, "err", perr)
+			// Fall through to auto-bind.
+		} else if err != ErrCredNotFound {
+			slog.Warn("snmp: credential lookup failed", "exporter", target, "err", err)
+		}
+
+		// No usable binding — try auto-bind against discovery profiles.
+		if cl := s.autoBind(ctx, target); cl != nil {
+			return cl, nil
 		}
 	}
 	if s.fallback != nil {
@@ -474,40 +490,126 @@ func (s *Scheduler) clientFor(ctx context.Context, target string) (Client, error
 	return nil, fmt.Errorf("no credential and no fallback")
 }
 
-// defaultDynamicClient picks the global to use for an exporter that
-// has no per-exporter binding. Looks at the default_for_dynamic flag
-// on each global and prefers v2c when both are flagged.
-func (s *Scheduler) defaultDynamicClient(ctx context.Context) Client {
-	v2c, _ := s.creds.GetGlobal(ctx, "v2c")
-	if v2c != nil && v2c.Configured && v2c.DefaultForDynamic {
-		return NewClient(FromGlobalDefault(v2c))
+// autoBind probes target with each discovery-flagged Profile in
+// priority order. On the first successful probe (sysDescr Get) it
+// persists a Credential binding pointing at the winning profile and
+// returns a fresh Client. Returns nil if no profile matched, no
+// profiles are flagged for discovery, or the first-attempt tight probe
+// times out (i.e. the IP is unresponsive).
+//
+// Backoff: after a full failed pass, target gets pinned in
+// autoBindNextAttempt so we don't re-probe every dispatch tick.
+func (s *Scheduler) autoBind(ctx context.Context, target string) Client {
+	if s.creds == nil {
+		return nil
 	}
-	v3, _ := s.creds.GetGlobal(ctx, "v3")
-	if v3 != nil && v3.Configured && v3.DefaultForDynamic {
-		return NewClient(FromGlobalDefault(v3))
+	s.mu.Lock()
+	if next, ok := s.autoBindNextAttempt[target]; ok && time.Now().Before(next) {
+		s.mu.Unlock()
+		return nil
 	}
+	s.mu.Unlock()
+
+	profiles, err := s.creds.DiscoveryProfiles(ctx)
+	if err != nil {
+		slog.Warn("snmp: discovery profile list failed", "err", err)
+		return nil
+	}
+	if len(profiles) == 0 {
+		return nil
+	}
+
+	for i := range profiles {
+		p := &profiles[i]
+		cfg := FromProfile(p, 0, 0)
+		if i == 0 {
+			cfg.Timeout = autoBindTightTimeout
+			cfg.Retries = 0
+		}
+		client := NewClient(cfg)
+		// Use a per-probe context so a slow profile doesn't eat the
+		// whole walk budget. The first attempt's tight context is what
+		// distinguishes "IP is dead" from "wrong credentials."
+		probeCtx, cancel := context.WithTimeout(ctx, cfg.Timeout+500*time.Millisecond)
+		ok, timedOut := probe(probeCtx, client, target)
+		cancel()
+		if ok {
+			// Persist the binding and log so the operator sees it.
+			binding := Credential{
+				Exporter:    target,
+				ProfileID:   p.ID,
+				Port:        p.Port,
+				IntervalSec: p.IntervalSec,
+			}
+			if perr := s.creds.Set(ctx, binding, "auto-discovery"); perr != nil {
+				slog.Warn("snmp: auto-bind set failed", "exporter", target, "profile_id", p.ID, "err", perr)
+			} else {
+				slog.Info("snmp: auto-bound exporter", "exporter", target, "profile_id", p.ID, "profile_name", p.Name)
+			}
+			s.mu.Lock()
+			delete(s.autoBindNextAttempt, target)
+			s.mu.Unlock()
+			return client
+		}
+		if i == 0 && timedOut {
+			// Tight first attempt timed out → IP is dead. Skip the rest
+			// of the sequence and back off.
+			slog.Debug("snmp: auto-bind tight probe timed out, IP appears dead", "exporter", target)
+			break
+		}
+	}
+
+	s.mu.Lock()
+	s.autoBindNextAttempt[target] = time.Now().Add(autoBindRetryAfter)
+	s.mu.Unlock()
 	return nil
 }
 
-// clientFromGlobal builds a Client from the v2c or v3 global default.
-// Returns nil when the global has not been configured (Configured=false),
-// or when a permission / decryption error occurs — callers fall through
-// to the next resolution step. portOverride is non-zero when the
-// per-exporter binding specified a custom port for this device.
-func (s *Scheduler) clientFromGlobal(ctx context.Context, role string, portOverride uint16) Client {
-	g, err := s.creds.GetGlobal(ctx, role)
-	if err != nil {
-		slog.Warn("snmp: global lookup failed", "role", role, "err", err)
-		return nil
+// probe attempts a single sysDescr Get against target. Returns
+// (ok=true) on any successful response; (ok=false, timedOut=true) when
+// the SNMP exchange timed out (IP unresponsive); (ok=false,
+// timedOut=false) when the probe failed for other reasons (auth, decrypt).
+//
+// We use Walk rather than a bespoke single-OID Get so behavior matches
+// the scheduler's real walk path: if a credential can produce a
+// sysDescr, it will produce a full walk too.
+func probe(ctx context.Context, client Client, target string) (ok bool, timedOut bool) {
+	_, err := client.Walk(ctx, target)
+	if err == nil {
+		return true, false
 	}
-	if g == nil || !g.Configured {
-		return nil
+	// Best-effort timeout detection by message. gosnmp wraps i/o
+	// timeouts as "request timeout" — anything else (auth, decrypt,
+	// protocol parse) is a non-timeout failure that should keep the
+	// auto-bind sequence going.
+	msg := err.Error()
+	if containsAny(msg, "timeout", "i/o timeout", "request timeout") {
+		return false, true
 	}
-	cfg := FromGlobalDefault(g)
-	if portOverride > 0 {
-		cfg.Port = portOverride
+	return false, false
+}
+
+func containsAny(s string, needles ...string) bool {
+	for _, n := range needles {
+		if n != "" && stringsContains(s, n) {
+			return true
+		}
 	}
-	return NewClient(cfg)
+	return false
+}
+
+// stringsContains is a tiny local copy to avoid importing strings just
+// for one Contains call. Saves one import block churn.
+func stringsContains(s, substr string) bool {
+	if len(substr) == 0 {
+		return true
+	}
+	for i := 0; i+len(substr) <= len(s); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
 }
 
 // discoverExporters returns the union of:
