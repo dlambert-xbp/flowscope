@@ -57,17 +57,23 @@ export function LiveTail({
   // Live tail must keep streaming regardless of the global time-range
   // mode. The QueryClient's default refetchInterval gates polling on
   // isLive() — perfect for window-scoped queries, exactly wrong for
-  // this component. Per-query option merging proved unreliable when
-  // the operator was on an absolute range, so we drive the refetch
-  // explicitly via a setInterval + invalidateQueries. Belt-and-
-  // suspenders, but it gives the operator the guarantee that "Live
-  // tail" actually means live no matter what.
+  // this component. We override both refetchInterval and the
+  // window-focus refetch so that:
+  //   - 2s cadence regardless of isLive() (operator picked an
+  //     absolute range? doesn't matter; live tail stays live)
+  //   - Pause is honored on BOTH the timer AND on window focus — if
+  //     the operator paused to read a row, alt-tabbing away and back
+  //     won't snap fresh data in under them.
+  // Also kept as a belt-and-suspenders: a setInterval that fires an
+  // explicit invalidate. Either path alone would suffice; together
+  // they survive timing edge cases at isLive() transitions.
   const qc = useQueryClient()
   const recent = useQuery({
     queryKey: ['recent', 20],
     queryFn: () => api.recentFlows(20),
     refetchOnMount: 'always',
-    refetchOnWindowFocus: true,
+    refetchOnWindowFocus: !paused,
+    refetchInterval: collapsed || paused ? false : 2000,
     staleTime: 0,
   })
   useEffect(() => {
