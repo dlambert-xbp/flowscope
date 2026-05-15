@@ -1,4 +1,4 @@
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery } from '@tanstack/react-query'
 import { useEffect, useRef, useState } from 'react'
 import { api, fmt } from '../api'
 import type { RecentFlow } from '../api'
@@ -57,32 +57,24 @@ export function LiveTail({
   // Live tail must keep streaming regardless of the global time-range
   // mode. The QueryClient's default refetchInterval gates polling on
   // isLive() — perfect for window-scoped queries, exactly wrong for
-  // this component. We override both refetchInterval and the
-  // window-focus refetch so that:
-  //   - 2s cadence regardless of isLive() (operator picked an
-  //     absolute range? doesn't matter; live tail stays live)
-  //   - Pause is honored on BOTH the timer AND on window focus — if
-  //     the operator paused to read a row, alt-tabbing away and back
-  //     won't snap fresh data in under them.
-  // Also kept as a belt-and-suspenders: a setInterval that fires an
-  // explicit invalidate. Either path alone would suffice; together
-  // they survive timing edge cases at isLive() transitions.
-  const qc = useQueryClient()
+  // this component. We pin the per-query refetchInterval to a static
+  // 2s value (a non-function — function-based merging with the default
+  // proved unreliable at isLive() transitions) so live tail stays live
+  // on absolute ranges too.
+  //
+  // Pause is the master switch: `enabled: !paused` puts the query in
+  // disabled mode, which suppresses every refetch path — interval,
+  // window-focus, reconnect, invalidations — without losing the
+  // existing data. Resuming flips enabled back on and TanStack
+  // immediately refetches because staleTime is zero.
   const recent = useQuery({
     queryKey: ['recent', 20],
     queryFn: () => api.recentFlows(20),
+    enabled: !paused,
     refetchOnMount: 'always',
-    refetchOnWindowFocus: !paused,
-    refetchInterval: collapsed || paused ? false : 2000,
+    refetchInterval: collapsed ? false : 2000,
     staleTime: 0,
   })
-  useEffect(() => {
-    if (collapsed || paused) return
-    const id = window.setInterval(() => {
-      qc.invalidateQueries({ queryKey: ['recent', 20] })
-    }, 2000)
-    return () => window.clearInterval(id)
-  }, [collapsed, paused, qc])
   const flows = recent.data?.flows ?? []
   const { sortedRows, sortKey, sortDir, toggle } = useTableSort(flows, FLOW_COLS, {
     key: 'observed',
