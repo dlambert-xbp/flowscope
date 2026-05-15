@@ -182,6 +182,12 @@ func run() error {
 			crypter: crypter,
 		},
 	}
+	// Scan registry is in-memory and only useful when the credential
+	// store is wired (FLOWSCOPE_SNMP_KEY set). Without it, the scan
+	// handlers return 503.
+	if creds != nil {
+		h.scans = newScanRegistry()
+	}
 	// /healthz is the k8s liveness probe — never gated. Same for the
 	// static dashboard mount and the /metrics scrape endpoint below.
 	r.Get("/healthz", h.health)
@@ -252,7 +258,9 @@ func run() error {
 		r.Post("/api/alerts/{id}/close", h.closeAlert)
 		r.Get("/api/snmp/credentials", h.listCredentials)
 		r.Get("/api/snmp/credentials/{exporter}", h.getCredential)
-		r.Get("/api/snmp/globals/{role}", h.getGlobalCredential)
+		r.Get("/api/snmp/profiles", h.listProfiles)
+		r.Get("/api/snmp/profiles/{id}", h.getProfile)
+		r.Get("/api/snmp/scan/{id}", h.getScan)
 		r.Get("/api/services/lookup", h.servicesLookup)
 		r.Get("/api/services/library", h.servicesLibrary)
 		r.Get("/api/services/custom", h.listCustomServices)
@@ -263,7 +271,12 @@ func run() error {
 		r.Put("/api/snmp/credentials/{exporter}", h.putCredential)
 		r.Delete("/api/snmp/credentials/{exporter}", h.deleteCredential)
 		r.Post("/api/snmp/credentials/{exporter}/test", h.testCredential)
-		r.Put("/api/snmp/globals/{role}", h.putGlobalCredential)
+		r.Post("/api/snmp/profiles", h.putProfile)
+		r.Put("/api/snmp/profiles/{id}", h.putProfile)
+		r.Delete("/api/snmp/profiles/{id}", h.deleteProfile)
+		r.Post("/api/snmp/scan", h.createScan)
+		r.Post("/api/snmp/scan/{id}/commit", h.commitScan)
+		r.Delete("/api/snmp/scan/{id}", h.cancelScan)
 		r.Post("/api/devices/{exporter}/snmp/walk", h.requestSnmpWalk)
 	})
 

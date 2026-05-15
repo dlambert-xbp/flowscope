@@ -382,21 +382,16 @@ export type FlowsListResponse = {
   window: string
 }
 
-// SNMPBindingKind controls how a per-exporter credential resolves at
-// walk time.
-//   'custom'     — inline community / v3 fields on the binding itself.
-//   'global_v2c' — defer to the fleet-wide v2c default.
-//   'global_v3'  — defer to the fleet-wide v3 default.
-// Empty string back-compat: rows written before the column existed
-// read as 'custom'.
-export type SNMPBindingKind = 'custom' | 'global_v2c' | 'global_v3'
-
+// SNMPCredential is one per-exporter binding. profile_id "" (or unset)
+// means a custom inline credential — the row owns the secrets.
+// profile_id set means the binding references a Profile from the
+// library; the row's port/interval may still override the profile's.
 export type SNMPCredential = {
   exporter: string
+  profile_id?: string
   version: 'v2c' | 'v3'
   port: number
   interval_sec: number
-  binding_kind: SNMPBindingKind
   community?: string
   v3_username?: string
   v3_auth_proto?: string
@@ -411,12 +406,13 @@ export type SNMPCredential = {
   updated_by?: string
 }
 
-// SNMPGlobalDefault is the fleet-wide v2c or v3 fallback. One row per
-// role. configured=true when the row exists and a usable secret /
-// identity is set; the api returns configured=false placeholders
-// rather than 404 so the UI can render an empty form.
-export type SNMPGlobalDefault = {
-  role: 'v2c' | 'v3'
+// SNMPProfile is one entry in the named credential library. Profiles
+// flagged use_for_discovery participate in auto-binding for
+// flow-discovered exporters, in discovery_priority order.
+export type SNMPProfile = {
+  id: string
+  name: string
+  version: 'v2c' | 'v3'
   port: number
   interval_sec: number
   community?: string
@@ -426,16 +422,41 @@ export type SNMPGlobalDefault = {
   v3_priv_proto?: string
   v3_priv_pass?: string
   v3_context?: string
+  use_for_discovery: boolean
+  discovery_priority: number
   has_community: boolean
   has_auth_pass: boolean
   has_priv_pass: boolean
-  configured: boolean
-  // default_for_dynamic marks this role as the credential to use when
-  // an exporter shows up in flows with no per-exporter binding. At most
-  // one global should carry the flag.
-  default_for_dynamic: boolean
   updated_at?: string
   updated_by?: string
+}
+
+// SNMPScanResult is one row of a bulk-discovery scan. Matched=true
+// means the probe got back a sysDescr (profile authenticated). Silent
+// means the IP didn't respond at all. Error set without Matched is
+// "alive but the profile didn't auth."
+export type SNMPScanResult = {
+  ip: string
+  matched: boolean
+  silent?: boolean
+  sys_name?: string
+  sys_descr?: string
+  error?: string
+}
+
+export type SNMPScan = {
+  id: string
+  profile_id: string
+  range: string
+  state: 'running' | 'done' | 'cancelled'
+  total: number
+  probed: number
+  matched: number
+  rejected: number
+  silent: number
+  started_at: string
+  finished_at?: string
+  results: SNMPScanResult[]
 }
 
 export type SNMPTestResult = {
@@ -1078,18 +1099,62 @@ export const api = {
     }
     return r.json()
   },
-  getGlobalCredential: (role: 'v2c' | 'v3') =>
-    getJSON<SNMPGlobalDefault>(`/api/snmp/globals/${role}`),
-  putGlobalCredential: async (g: SNMPGlobalDefault) => {
-    const r = await fetch(`/api/snmp/globals/${g.role}`, {
+  listProfiles: () =>
+    getJSON<{ count: number; profiles: SNMPProfile[] }>(`/api/snmp/profiles`),
+  getProfile: (id: string) =>
+    getJSON<SNMPProfile>(`/api/snmp/profiles/${encodeURIComponent(id)}`),
+  createProfile: async (p: Omit<SNMPProfile, 'id'> & { id?: string }) => {
+    const r = await fetch(`/api/snmp/profiles`, {
+      method: 'POST',
+      headers: authHeaders(true),
+      body: JSON.stringify(p),
+    })
+    if (!r.ok) throw new Error(`POST profile → ${r.status}: ${await r.text()}`)
+    return r.json() as Promise<{ ok: true; id: string }>
+  },
+  updateProfile: async (p: SNMPProfile) => {
+    const r = await fetch(`/api/snmp/profiles/${encodeURIComponent(p.id)}`, {
       method: 'PUT',
       headers: authHeaders(true),
-      body: JSON.stringify(g),
+      body: JSON.stringify(p),
     })
-    if (!r.ok) {
-      const txt = await r.text()
-      throw new Error(`PUT global ${g.role} → ${r.status}: ${txt}`)
-    }
+    if (!r.ok) throw new Error(`PUT profile ${p.id} → ${r.status}: ${await r.text()}`)
+    return r.json() as Promise<{ ok: true; id: string }>
+  },
+  deleteProfile: async (id: string) => {
+    const r = await fetch(`/api/snmp/profiles/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      headers: authHeaders(false),
+    })
+    if (!r.ok) throw new Error(`DELETE profile ${id} → ${r.status}: ${await r.text()}`)
+    return r.json()
+  },
+  createScan: async (profile_id: string, range: string) => {
+    const r = await fetch(`/api/snmp/scan`, {
+      method: 'POST',
+      headers: authHeaders(true),
+      body: JSON.stringify({ profile_id, range }),
+    })
+    if (!r.ok) throw new Error(`POST scan → ${r.status}: ${await r.text()}`)
+    return r.json() as Promise<SNMPScan>
+  },
+  getScan: (id: string) =>
+    getJSON<SNMPScan>(`/api/snmp/scan/${encodeURIComponent(id)}`),
+  commitScan: async (id: string, ips: string[]) => {
+    const r = await fetch(`/api/snmp/scan/${encodeURIComponent(id)}/commit`, {
+      method: 'POST',
+      headers: authHeaders(true),
+      body: JSON.stringify({ ips }),
+    })
+    if (!r.ok) throw new Error(`commit scan ${id} → ${r.status}: ${await r.text()}`)
+    return r.json() as Promise<{ ok: true; bound: string[]; skipped: string[] }>
+  },
+  cancelScan: async (id: string) => {
+    const r = await fetch(`/api/snmp/scan/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      headers: authHeaders(false),
+    })
+    if (!r.ok) throw new Error(`cancel scan ${id} → ${r.status}: ${await r.text()}`)
     return r.json()
   },
   requestSnmpWalk: async (exporter: string) => {

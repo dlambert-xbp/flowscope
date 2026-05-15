@@ -45,6 +45,12 @@ type handlers struct {
 	// the Neighbors tab open doesn't re-aggregate the full graph
 	// every poll cycle. The walker cadence is 5 minutes anyway.
 	topoCache topologyCache
+	// scans holds in-flight and completed bulk-discovery scan jobs.
+	// In-memory only: scans are short-lived and survive process
+	// restarts only if the operator was actively reviewing one (they
+	// kick off a new scan). nil when h.creds is nil — discovery is
+	// useless without a profile library.
+	scans *scanRegistry
 }
 
 // health is a minimal liveness probe used by Kubernetes / Container
@@ -600,7 +606,9 @@ func (h *handlers) deleteCredential(w http.ResponseWriter, r *http.Request) {
 // testCredential performs an ad-hoc walk of just sysDescr against
 // the configured binding and returns the result. Cheap, fast, and
 // confirms credentials work without the operator waiting for the
-// next scheduler tick.
+// next scheduler tick. Profile-referenced bindings resolve the profile
+// before walking so the test exercises the same code path the
+// scheduler does.
 //
 //	POST /api/snmp/credentials/{exporter}/test
 func (h *handlers) testCredential(w http.ResponseWriter, r *http.Request) {
@@ -618,7 +626,18 @@ func (h *handlers) testCredential(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	client := snmpx.NewClient(snmpx.FromCredential(cred))
+	var cfg snmpx.Config
+	if cred.UsesProfile() {
+		p, perr := h.creds.GetProfile(r.Context(), cred.ProfileID)
+		if perr != nil {
+			writeError(w, http.StatusFailedDependency, "profile lookup failed: "+perr.Error())
+			return
+		}
+		cfg = snmpx.FromProfile(p, cred.Port, cred.Interval)
+	} else {
+		cfg = snmpx.FromCredential(cred)
+	}
+	client := snmpx.NewClient(cfg)
 	walkCtx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 	inv, err := client.Walk(walkCtx, exporter)
@@ -630,83 +649,12 @@ func (h *handlers) testCredential(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":              true,
-		"sys_descr":       inv.SysDescr,
-		"sys_name":        inv.SysName,
-		"interfaces":      len(inv.Interfaces),
+		"ok":               true,
+		"sys_descr":        inv.SysDescr,
+		"sys_name":         inv.SysName,
+		"interfaces":       len(inv.Interfaces),
 		"poll_duration_ms": inv.PollDurationMs,
 	})
-}
-
-// getGlobalCredential returns the fleet-wide v2c or v3 default with
-// secrets REDACTED. Missing rows resolve to a Configured=false
-// placeholder so the UI can render an empty form without 404 handling.
-//
-//	GET /api/snmp/globals/{role}    role in {v2c, v3}
-func (h *handlers) getGlobalCredential(w http.ResponseWriter, r *http.Request) {
-	if h.creds == nil {
-		writeError(w, http.StatusServiceUnavailable, "credential management disabled")
-		return
-	}
-	role := chi.URLParam(r, "role")
-	if role != "v2c" && role != "v3" {
-		writeError(w, http.StatusBadRequest, "role must be v2c or v3")
-		return
-	}
-	g, err := h.creds.GetGlobal(r.Context(), role)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	g.Community = ""
-	g.V3AuthPass = ""
-	g.V3PrivPass = ""
-	writeJSON(w, http.StatusOK, g)
-}
-
-// putGlobalCredential upserts the fleet-wide v2c or v3 default. Empty
-// passphrase fields preserve the existing secret (same convention as
-// putCredential) so the UI can render "secret already set" without
-// forcing a retype.
-//
-//	PUT /api/snmp/globals/{role}    role in {v2c, v3}
-func (h *handlers) putGlobalCredential(w http.ResponseWriter, r *http.Request) {
-	if h.creds == nil {
-		writeError(w, http.StatusServiceUnavailable, "credential management disabled")
-		return
-	}
-	role := chi.URLParam(r, "role")
-	if role != "v2c" && role != "v3" {
-		writeError(w, http.StatusBadRequest, "role must be v2c or v3")
-		return
-	}
-	var body snmpx.GlobalDefault
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
-		return
-	}
-	body.Role = role
-
-	// Preserve existing secrets when the operator left them blank.
-	if body.Community == "" || body.V3AuthPass == "" || body.V3PrivPass == "" {
-		if existing, err := h.creds.GetGlobal(r.Context(), role); err == nil {
-			if body.Community == "" {
-				body.Community = existing.Community
-			}
-			if body.V3AuthPass == "" {
-				body.V3AuthPass = existing.V3AuthPass
-			}
-			if body.V3PrivPass == "" {
-				body.V3PrivPass = existing.V3PrivPass
-			}
-		}
-	}
-
-	if err := h.creds.SetGlobal(r.Context(), body, actorFromRequest(r)); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "role": role})
 }
 
 // requestSnmpWalk enqueues an immediate SNMP walk for exporter. The
