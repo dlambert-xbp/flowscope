@@ -5,28 +5,35 @@ import { useAppConfirm } from '../../ui/appConfirm'
 import { SectionHeader } from '../Shell'
 import { Banner, Btn, Empty, Field, Section, StyleScope, Tag } from '../shared'
 
-// AuthTokens: per-token API tokens + OIDC config. The OIDC login
-// flow ships disabled in v1 (Phase 2) — the form is here so the
-// integration can be wired ahead of the rollout.
+// AuthTokens: OIDC SSO config (primary human path), per-token API
+// tokens (for CLI / automation), and a collapsed advanced disclosure
+// for the legacy browser-session shared-token paste. Order matters —
+// SSO is the headline for enterprise tenants; the shared-token form
+// is deliberately demoted now that LoginPage handles first-run paste.
 
 export function AuthTokens() {
   return (
     <div data-testid="auth-tokens-section">
       <SectionHeader
         eyebrow="Auth & tokens"
-        title="API access & SSO"
-        subtitle="Mint tokens for automation; configure OIDC for the eventual login flow."
+        title="SSO & API access"
+        subtitle="OIDC for humans, API tokens for scripts and automation."
       />
       <StyleScope />
-      <SessionToken />
-      <Tokens />
       <OIDC />
+      <Tokens />
+      <SessionToken />
     </div>
   )
 }
 
-/* ----------------------------- Session token (local) ----------------------------- */
+/* ----------------------------- Session token (local, advanced) ----------------------------- */
 
+// The browser-side X-Auth-Token paste survives as an escape hatch for
+// operators who can't sign in via SSO yet (e.g. mid-rollout, IdP
+// outage, scripted browser automation). LoginPage owns the first-run
+// paste experience now, so this form is collapsed by default — it's
+// the "I know what I'm doing" advanced control, not the front door.
 function SessionToken() {
   const initial = (() => {
     try {
@@ -35,55 +42,72 @@ function SessionToken() {
       return ''
     }
   })()
+  // open defaults to true ONLY when a token is already saved — so an
+  // operator who set one previously can find it again without
+  // hunting; first-time visitors see the disclosure collapsed.
+  const [open, setOpen] = useState(!!initial)
   const [tok, setTok] = useState(initial)
   const [saved, setSaved] = useState(false)
   return (
     <Section
-      eyebrow="Session token"
-      hint="sent on writes via X-Auth-Token · stored in localStorage only"
+      eyebrow="Browser session token · advanced"
+      hint="legacy fallback · prefer SSO above or mint an API token"
     >
-      <Banner tone="accent">
-        Settings writes go through the <code className="font-mono text-text">X-Auth-Token</code>{' '}
-        header. Paste a token here and it'll be attached to every PUT/POST/DELETE
-        from this browser. Reads stay open behind the proxy.
-      </Banner>
-      <div className="flex items-end gap-3 max-w-[800px]" data-testid="auth-session-token-form">
-        <div className="flex-1">
-          <Field label="token">
-            <input
-              type="password"
-              value={tok}
-              onChange={(e) => {
-                setTok(e.target.value)
+      {!open ? (
+        <Btn
+          size="md"
+          data-testid="auth-session-token-show"
+          onClick={() => setOpen(true)}
+        >
+          show advanced
+        </Btn>
+      ) : (
+        <>
+          <Banner tone="warn">
+            <strong className="text-warn">Advanced.</strong> Pastes a token into
+            this browser's localStorage and attaches it as{' '}
+            <code className="font-mono text-text">X-Auth-Token</code> on every
+            write. Use SSO above for humans; mint a scoped API token for scripts.
+          </Banner>
+          <div className="flex items-end gap-3 max-w-[800px]" data-testid="auth-session-token-form">
+            <div className="flex-1">
+              <Field label="token">
+                <input
+                  type="password"
+                  value={tok}
+                  onChange={(e) => {
+                    setTok(e.target.value)
+                    setSaved(false)
+                  }}
+                  placeholder="fls_…  (or the shared FLOWSCOPE_AUTH_TOKEN)"
+                  data-testid="auth-session-token-input"
+                  className="s-input"
+                />
+              </Field>
+            </div>
+            <Btn
+              tone="accent"
+              size="md"
+              data-testid="auth-session-token-save"
+              onClick={() => {
+                setSettingsAuthToken(tok)
+                setSaved(true)
+              }}
+            >
+              {saved ? 'saved' : 'save'}
+            </Btn>
+            <Btn
+              onClick={() => {
+                setTok('')
+                setSettingsAuthToken('')
                 setSaved(false)
               }}
-              placeholder="fls_…  (or the shared FLOWSCOPE_AUTH_TOKEN)"
-              data-testid="auth-session-token-input"
-              className="s-input"
-            />
-          </Field>
-        </div>
-        <Btn
-          tone="accent"
-          size="md"
-          data-testid="auth-session-token-save"
-          onClick={() => {
-            setSettingsAuthToken(tok)
-            setSaved(true)
-          }}
-        >
-          {saved ? 'saved' : 'save'}
-        </Btn>
-        <Btn
-          onClick={() => {
-            setTok('')
-            setSettingsAuthToken('')
-            setSaved(false)
-          }}
-        >
-          clear
-        </Btn>
-      </div>
+            >
+              clear
+            </Btn>
+          </div>
+        </>
+      )}
     </Section>
   )
 }

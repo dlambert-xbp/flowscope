@@ -22,6 +22,13 @@ test('settings → auth & tokens form is interactive', async ({ page }) => {
   await page.getByTestId('settings-section-auth').click()
   await expect(page.getByTestId('auth-tokens-section')).toBeVisible()
 
+  // The browser-session-token form is now demoted behind an
+  // "advanced" disclosure (LoginPage owns the primary paste flow).
+  // On a fresh browser with no token saved the disclosure is
+  // collapsed — click to reveal the form before asserting the input
+  // is interactive.
+  await page.getByTestId('auth-session-token-show').click()
+
   // Token input and save button: the regression target. If either
   // disappears or stops accepting input, this test fails.
   const input = page.getByTestId('auth-session-token-input')
