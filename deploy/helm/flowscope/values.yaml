@@ -164,3 +164,45 @@ alert:
   leaderLease:
     ttlSeconds: 30
     renewIntervalSeconds: 10
+
+# Edge TLS termination. The chart never terminates TLS itself
+# (CLAUDE.md "TLS at the edge, not in the binaries") — flip this on
+# to expose a standard k8s Ingress resource that whatever ingress
+# controller you run (nginx-ingress, AGIC, Traefik, …) will pick up.
+# The api Service stays ClusterIP and the Go binary keeps listening
+# on plain HTTP :8080.
+#
+# The /api/stream WebSocket (Overview metrics + live flow tail) is a
+# long-lived connection, so the controller MUST be configured to
+# allow extended read timeouts. Example annotations below show the
+# nginx-ingress and AGIC knobs that matter.
+ingress:
+  enabled: false
+  className: ""                # e.g. "nginx", "azure-application-gateway", "traefik"
+  host: "flowscope.example.com"
+  # Per-controller annotations. Examples:
+  #   nginx-ingress:
+  #     nginx.ingress.kubernetes.io/proxy-body-size: "16m"
+  #     nginx.ingress.kubernetes.io/proxy-read-timeout: "300"   # WebSocket /api/stream
+  #   AGIC (Azure Application Gateway):
+  #     appgw.ingress.kubernetes.io/cookie-based-affinity: "false"
+  #     appgw.ingress.kubernetes.io/ssl-redirect: "true"
+  #     appgw.ingress.kubernetes.io/appgw-ssl-certificate: "<kv-cert-name>"
+  annotations: {}
+  # paths: leave empty to expose the whole host on "/" → api:8080.
+  # Override when you want to carve up routes (e.g. send /api/* and
+  # /metrics to api but keep the apex for a separate web Service):
+  #   paths:
+  #     - path: /api
+  #       pathType: Prefix
+  #     - path: /
+  #       pathType: Prefix
+  paths: []
+  # TLS: either bring your own kubernetes.io/tls secret, or let
+  # cert-manager mint one via the annotations above. When secretName
+  # is "" no spec.tls block is rendered — useful behind AGIC pulling
+  # certs from Key Vault directly via annotation, where no k8s
+  # secret exists. Setting tls.enabled=false has the same effect.
+  tls:
+    enabled: true
+    secretName: "flowscope-tls"

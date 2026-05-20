@@ -1,0 +1,64 @@
+# Sample Caddyfile for the docker-compose / single-box lane.
+#
+# This is the dev / single-box lane — for k8s use the Helm Ingress
+# (deploy/helm/flowscope/templates/ingress.yaml, gated on
+# .Values.ingress.enabled) instead.
+#
+# Per CLAUDE.md ("TLS at the edge, not in the binaries"), the Go api
+# container keeps listening on plain HTTP :8080. Caddy sits in front,
+# terminates TLS via Let's Encrypt's HTTP-01 challenge, and reverse-
+# proxies everything (including the /api/stream WebSocket upgrade) to
+# the api service over the compose network.
+#
+# Wiring it up:
+#   1. Add a caddy service to docker-compose.yml that:
+#        image: caddy:2-alpine
+#        depends_on: [api]
+#        ports: ["80:80", "443:443"]
+#        environment:
+#          FLOWSCOPE_DOMAIN: flowscope.your-org.example
+#        volumes:
+#          - ./deploy/compose/Caddyfile:/etc/caddy/Caddyfile:ro
+#          - caddy-data:/data
+#          - caddy-config:/config
+#      and declare the caddy-data + caddy-config named volumes alongside
+#      the existing clickhouse-* ones so Let's Encrypt account state +
+#      issued certs persist across `docker compose up`.
+#   2. Repoint the existing `web` service away from publishing :80
+#      directly (it conflicts with caddy). Either drop its host port
+#      mapping or rename it to a high port — Caddy can also fan /api/*
+#      to api and / to web if you want a single front door.
+#   3. Make sure DNS for $FLOWSCOPE_DOMAIN resolves to the host before
+#      starting caddy, or the HTTP-01 challenge will fail and caddy
+#      will back off (Let's Encrypt rate limits apply).
+
+{$FLOWSCOPE_DOMAIN} {
+	# Caddy v2's reverse_proxy is WebSocket-aware by default — the
+	# Upgrade / Connection headers are passed through automatically.
+	# The explicit header_up lines below document the contract so it
+	# survives someone swapping in a different upstream proxy later.
+	reverse_proxy api:8080 {
+		header_up Host {host}
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+		# /api/stream is a long-lived WebSocket (Overview metrics +
+		# live flow tail). Disable upstream read/write timeouts on
+		# this hop; the api side enforces its own keepalive.
+		transport http {
+			read_timeout 0
+			write_timeout 0
+		}
+	}
+
+	# Caddy auto-issues + renews via Let's Encrypt for any real domain
+	# pointed at this host. For a local dev box, set FLOWSCOPE_DOMAIN
+	# to `localhost` (Caddy will fall back to its internal CA) or
+	# `flowscope.localtest.me` and add an `tls internal` line below.
+
+	encode zstd gzip
+	log {
+		output stdout
+		format console
+	}
+}

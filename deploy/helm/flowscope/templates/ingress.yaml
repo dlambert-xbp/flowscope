@@ -1,0 +1,72 @@
+{{- /*
+Standard networking.k8s.io/v1 Ingress for the api Service.
+
+The chart deliberately does NOT bless a specific edge — operators wire
+this resource to whatever ingress controller they already run
+(nginx-ingress, AGIC, Traefik, …) via .Values.ingress.className and
+controller-specific annotations. TLS is terminated at the edge, never
+in the Go binaries (see CLAUDE.md "TLS at the edge, not in the
+binaries"); the api container keeps speaking plain HTTP on :8080.
+
+The Overview tab and live flow tail use the /api/stream WebSocket,
+which is a long-lived connection. nginx-ingress in particular needs
+the proxy-read-timeout annotation bumped above its 60s default or the
+socket will be torn down mid-session — see the example annotations in
+values.yaml.
+
+Gated on .Values.ingress.enabled so existing deployments keep their
+current Service-only exposure untouched.
+*/ -}}
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "flowscope.fullname" . }}
+  labels:
+    {{- include "flowscope.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ingress
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.ingress.className }}
+  ingressClassName: {{ .Values.ingress.className | quote }}
+  {{- end }}
+  {{- /*
+  TLS block is only emitted when tls.enabled AND a secretName is set.
+  Some controllers (notably AGIC pulling certs from Key Vault via the
+  appgw-ssl-certificate annotation) terminate TLS without any
+  in-cluster Secret — leaving secretName empty in that case skips
+  spec.tls entirely so the rendered manifest stays valid.
+  */ -}}
+  {{- if and .Values.ingress.tls.enabled .Values.ingress.tls.secretName }}
+  tls:
+    - hosts:
+        - {{ .Values.ingress.host | quote }}
+      secretName: {{ .Values.ingress.tls.secretName | quote }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          {{- if .Values.ingress.paths }}
+          {{- range .Values.ingress.paths }}
+          - path: {{ .path | quote }}
+            pathType: {{ default "Prefix" .pathType | quote }}
+            backend:
+              service:
+                name: {{ include "flowscope.fullname" $ }}-api
+                port:
+                  number: {{ $.Values.api.service.port }}
+          {{- end }}
+          {{- else }}
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "flowscope.fullname" . }}-api
+                port:
+                  number: {{ .Values.api.service.port }}
+          {{- end }}
+{{- end }}
