@@ -3,7 +3,7 @@
 Living TODO list, ranked by priority. Done items are deleted on commit
 per the note at the bottom of CLAUDE.md.
 
-Last updated: 2026-05-09.
+Last updated: 2026-05-15.
 
 > **Session label:** items prefixed with `[Session X]` are scoped to fit
 > one focused work session. Pick one when you sit down — clear start,
@@ -13,111 +13,93 @@ Last updated: 2026-05-09.
 
 ## P0 — production blockers, ship-gating
 
-1. [ ] **CI workflow files.** GitHub Actions for `go test -race`,
-       `golangci-lint`, `vitest`, `playwright`, `helm lint`, container
-       build + sign. Without this every "tests gate merges" claim is
-       hollow. Local Windows can't run `-race` (cgo + gcc missing) so
-       the Linux runner is the only place that proves it.
-2. [~] **Auth on `/api/*` read endpoints.** PR #15 gated `/api/settings/*`
+1. [~] **Auth on `/api/*` read endpoints.** PR #15 gated `/api/settings/*`
        and SNMP write endpoints behind `X-Auth-Token`. Reads
        (`/api/summary`, `/api/flows/*`, `/api/devices/*`, `/api/alerts*`,
        `/api/top/*`, `/api/services/*`) remain open behind the proxy.
        Closing those finishes Phase 1 auth.
-3. [ ] **Master key from Key Vault, not env var.** `FLOWSCOPE_SNMP_KEY`
-       is a literal in `docker-compose.yml`. Build `internal/secrets`
-       with env / file / Key Vault implementations and Workload Identity.
-4. [ ] **[Session B] Webhook dispatcher.** UI collects webhooks (PR #15);
-       engine never POSTs to them. Alerts aren't actionable today.
-5. [ ] **Alert engine leader election.** Single-replica is a SPOF. Two
-       `cmd/alert` instances dupe-fire. ClickHouse Keeper lock + leader-
-       only writes.
+2. [ ] **Master key resolution via Azure Key Vault.** File-backed refs
+       (`FLOWSCOPE_SNMP_KEY_REF=file:/run/secrets/snmp_master`) ship in
+       compose today; the `kv:` resolver in `internal/secrets` still
+       needs Workload Identity wiring and a values.yaml story. Until
+       this lands, prod has no way to consume the SNMP master without
+       baking it into a K8s Secret by hand.
+3. [ ] **Helm chart shipping gaps.** `deploy/helm/flowscope/templates/`
+       has Deployments for `alert/api/ingest` + the `init` Job, but:
+   - **No `snmp-deployment.yaml`.** `cmd/snmp` exists (BGP, LLDP,
+     scheduler, per-device alerting) and would be silently absent
+     from any k8s install today.
+   - **No `Service` manifests.** Nothing inside the cluster can reach
+     api/ingest/alert by DNS, and ingest UDP needs `type=LoadBalancer`
+     to receive flows from exporters.
+   - **No HPA / PDB.** CLAUDE.md's working-agreement requires both
+     where applicable.
+
+   `helm lint` passes only because the chart never claims these. Until
+   they exist, "deploy via Helm" is a misleading bullet on the README.
 
 ## P1 — high value, concrete scope
 
-6. [ ] **[Session C] Wire exporter allowlist into ingest.** UI persists
+4. [ ] **[Session C] Wire exporter allowlist into ingest.** UI persists
        `exporter_allowlist`; ingest doesn't read it. Easy security win.
-7. [ ] **Alert detail modal** — timeline of underlying samples that
+5. [ ] **Alert detail modal** — timeline of underlying samples that
        triggered + linked flows. Highest-leverage operator UX next.
-8. [ ] **More built-in rules.** Today: `exporter_silent` + `heavy_talker`.
-       Roadmap from VISION.md §6:
+6. [ ] **More built-in rules.** Today: `exporter_silent` + `heavy_talker`
+       + BGP neighbor state. Roadmap from VISION.md §6:
    - Interface up/down (oper_status transitions, debounce) — first
    - Interface utilization > X% of ifSpeed (SNMP gives ifSpeed, sFlow
      gives bps — feasible now)
    - Errors / discards rate-of-change
-   - BGP neighbor state change (Established → anything)
    - Device unreachable (gNMI dropped AND SNMP fails)
    - Flow anomaly (top-talker delta vs trailing 7-day baseline)
-9. [ ] **[Session D2] Retention TTL.** Init container reads
+7. [ ] **[Session D2] Retention TTL.** Init container reads
        `flow_retention_days` / `counter_retention_days` and emits
        `ALTER TABLE … MODIFY TTL` before api accepts traffic. Schema-
        migration risk against non-empty tables — needs care.
-10. [ ] **Integration tests via testcontainers-go.** `internal/alerteng`
-        has zero tests because they want a live ClickHouse. Today's 49
-        unit tests don't touch a DB.
+8. [ ] **Integration tests via testcontainers-go.** `internal/alerteng`
+       has zero tests because they want a live ClickHouse. Today's unit
+       tests don't touch a DB.
 
 ## P2 — quality of life
 
-11. [ ] Helm chart for AKS. Compose works for dev; prod needs Helm per
-        VISION.md §8.2.
-12. [ ] ⌘K command palette. Brand bar shows the kbd hint; not wired.
-13. [ ] Per-rule alert history view ("how often does `exporter_silent`
+9. [ ] ⌘K command palette. Brand bar shows the kbd hint; not wired.
+10. [ ] Per-rule alert history view ("how often does `exporter_silent`
         fire for this device this week?").
-14. [ ] Grouping key for incident correlation. Engine writes `group_key`
+11. [ ] Grouping key for incident correlation. Engine writes `group_key`
         on each event; api treats every alert as independent.
-15. [ ] NetFlow v9 / IPFIX enterprise fields and options templates —
+12. [ ] NetFlow v9 / IPFIX enterprise fields and options templates —
         decoded but skipped today.
-16. [ ] Bulk import of credentials. CSV upload or `flowscope snmp import`
+13. [ ] Bulk import of credentials. CSV upload or `flowscope snmp import`
         CLI for fleets.
-17. [ ] SNMP master key rotation. Today, rotating invalidates every
+14. [ ] SNMP master key rotation. Today, rotating invalidates every
         blob. Need a `re-encrypt under new master` admin action.
-18. [ ] Web e2e via Playwright wired to ephemeral compose. Mentioned in
+15. [ ] Web e2e via Playwright wired to ephemeral compose. Mentioned in
         CLAUDE.md as a CI gate but not wired.
 
 ## P3 — Phase 2/3 bets, multi-week
 
-19. [ ] gNMI ingest (Phase 3 in VISION.md). Dial-in subscriptions,
+16. [ ] gNMI ingest (Phase 3 in VISION.md). Dial-in subscriptions,
         OpenConfig models, auto-promotion logic that retires SNMP
-        polls when gNMI covers the same OIDs.
-20. [ ] LLDP/CDP topology + Devices → Neighbors sub-tab. SNMP
-        `lldpRemTable` walk + `react-flow` graph.
-21. [ ] BGP via SNMP `bgpPeerTable` + Devices → BGP sub-tab.
-22. [ ] ClickHouse TTL → cold blob storage. Schema has 7-day delete TTL;
+        polls when gNMI covers the same OIDs. CLAUDE.md still
+        describes `cmd/gnmi/` and `internal/gnmix/` as if they exist
+        — sync the doc when this lands (or before).
+17. [ ] ClickHouse TTL → cold blob storage. Schema has 7-day delete TTL;
         need `TO VOLUME 'cold'` policy + ADLS / S3 storage policy.
-23. [ ] 3-replica ClickHouse + Keeper coordination. Single-node today.
-24. [ ] UDP load balancer fronting multiple ingest replicas. Architecture
+18. [ ] 3-replica ClickHouse + Keeper coordination. Single-node today.
+19. [ ] UDP load balancer fronting multiple ingest replicas. Architecture
         document describes the shape; compose only runs one.
-25. [ ] SNMP v3 walk validation against a real lab. Crypto / store / API
+20. [ ] SNMP v3 walk validation against a real lab. Crypto / store / API
         / UI all done; needs a real v3-only switch to confirm gosnmp's
         USM stack handshakes correctly.
-26. [ ] **[Session E] OIDC login flow** (Phase 2 auth). Entra app
+21. [ ] **[Session E] OIDC login flow** (Phase 2 auth). Entra app
         registration, `/auth/login` + `/auth/callback`, JWT against
         JWKS, signed session cookie. Detail block below.
-27. [ ] Golden tests for alert rules. Depends on #10
+22. [ ] Golden tests for alert rules. Depends on #8
         (testcontainers-go).
 
 ---
 
 ## Session detail blocks
-
-### [Session B] Webhook dispatcher
-
-**Goal:** alerts opened by the engine fan out to enabled webhook
-endpoints with severity filtering applied.
-
-- [ ] New goroutine in `cmd/alert` (or new `cmd/notifier` if leader
-      election complicates things) that polls `alert_events` for new
-      `opened` and `closed` transitions since the last cursor, joins
-      against `webhook_endpoints WHERE enabled = 1`, applies
-      `severity_filter`, and POSTs.
-- [ ] Per-kind formatters: `slack` (Block Kit), `teams` (MessageCard),
-      `pagerduty` (Events API v2 dedup_key from `group_key`),
-      `http` (raw JSON with `header_template_json` for auth).
-- [ ] Decrypt `secret_ct` via the shared `snmpx.Crypter`.
-- [ ] Retry with exponential backoff; cap at 3 attempts; log failures
-      to `audit_events` so operators can see why a channel is silent.
-- [ ] `POST /api/settings/integrations/webhooks/{id}/test` that fires
-      a synthetic test alert through the dispatcher path so operators
-      can verify a new webhook before relying on it.
 
 ### [Session C] Wire exporter allowlist into ingest
 

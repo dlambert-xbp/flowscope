@@ -1,0 +1,536 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>FlowScope · Kubernetes architecture</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root {
+      --ink:     #0c0f14;
+      --surface: #131820;
+      --raise:   #1a212c;
+      --line:    #232b39;
+      --text:    #e6e9ef;
+      --dim:     #a6adba;
+      --faint:   #5d6776;
+      --accent:  #ff7a47;
+      --ok:      #4ec98c;
+      --warn:    #e8c45a;
+      --crit:    #e26b6b;
+      --info:    #6da9e8;
+      --mono:    ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    }
+    * { box-sizing: border-box; }
+    html, body { background: var(--ink); color: var(--text); margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, system-ui, sans-serif; line-height: 1.55; }
+    main { max-width: 1280px; margin: 0 auto; padding: 32px 24px 64px; }
+    h1 { font-size: 22px; letter-spacing: -0.01em; margin: 0 0 4px; font-weight: 600; }
+    .eyebrow { font-family: var(--mono); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.16em; color: var(--faint); font-weight: 600; }
+    p { color: var(--dim); font-size: 14px; max-width: 86ch; margin: 8px 0 0; }
+    p + p { margin-top: 12px; }
+    section { margin-top: 40px; padding-top: 24px; border-top: 1px solid var(--line); }
+    h2 { font-size: 13px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--dim); font-weight: 600; margin: 0 0 16px; font-family: var(--mono); }
+    h3 { font-size: 13.5px; margin: 20px 0 6px; color: var(--text); font-weight: 600; }
+    code { font-family: var(--mono); font-size: 12.5px; background: var(--raise); padding: 1px 6px; border: 1px solid var(--line); color: var(--text); }
+    .diagram { background: var(--surface); border: 1px solid var(--line); padding: 16px; overflow-x: auto; }
+    svg { display: block; margin: 0 auto; max-width: 100%; height: auto; }
+    .legend { display: flex; gap: 22px; flex-wrap: wrap; margin-top: 18px; font-family: var(--mono); font-size: 11.5px; color: var(--dim); }
+    .legend .pill { display: inline-flex; align-items: center; gap: 8px; }
+    .legend .pill::before { content: ""; width: 10px; height: 10px; border-radius: 2px; }
+    .legend .azure::before    { background: var(--info); }
+    .legend .ns::before       { background: var(--accent); }
+    .legend .store::before    { background: var(--ok); }
+    .legend .secret::before   { background: var(--warn); }
+    .legend .util::before     { background: var(--raise); border: 1px solid var(--line); }
+    .legend .arrow::before    { background: var(--faint); width: 14px; height: 2px; border-radius: 0; }
+    .legend .arrow-dashed::before { background: transparent; border-top: 2px dashed var(--faint); width: 14px; height: 0; }
+    .table { margin-top: 12px; font-family: var(--mono); font-size: 12px; width: 100%; border-collapse: collapse; }
+    .table th, .table td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    .table th { color: var(--faint); text-transform: uppercase; letter-spacing: 0.06em; font-size: 10.5px; font-weight: 600; }
+    .table td { color: var(--dim); }
+    .table td:first-child { color: var(--text); white-space: nowrap; }
+    .table td code { font-size: 11.5px; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px; }
+    .row.three { grid-template-columns: repeat(3, 1fr); }
+    .card { border: 1px solid var(--line); background: var(--raise); padding: 14px 16px; }
+    .card h3 { margin: 0 0 6px; font-size: 11.5px; letter-spacing: 0.08em; text-transform: uppercase; font-family: var(--mono); color: var(--dim); font-weight: 600; }
+    .card p { margin: 0; font-size: 13px; color: var(--dim); max-width: none; }
+    .card p + p { margin-top: 8px; }
+    .card.warn { border-color: var(--warn); }
+    .card.warn h3 { color: var(--warn); }
+    .tag { display: inline-block; font-family: var(--mono); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em; padding: 1px 6px; border: 1px solid var(--line); margin-right: 6px; color: var(--dim); }
+    .tag.accent { color: var(--accent); border-color: var(--accent); }
+    .tag.warn { color: var(--warn); border-color: var(--warn); }
+    .stack { display: grid; grid-template-columns: 220px 1fr; gap: 6px 18px; margin-top: 12px; font-size: 13.5px; }
+    .stack .k { font-family: var(--mono); color: var(--faint); font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.08em; padding-top: 2px; }
+    .stack .v { color: var(--dim); }
+    .stack .v strong { color: var(--text); font-weight: 600; }
+    .crumb { font-family: var(--mono); font-size: 11px; color: var(--faint); margin-top: 6px; }
+    .crumb a { color: var(--accent); text-decoration: none; }
+    .crumb a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="eyebrow">FlowScope · Kubernetes architecture · aks-corp-eus-01</div>
+    <h1>FlowScope on AKS, end-to-end<span style="color:var(--accent)">.</span></h1>
+    <p>How the FlowScope Helm chart lays down on your real cluster — node pools, AGIC ingress, Workload Identity to Key Vault, ACR pulls, and the external ClickHouse VM. Derived from live <code>az</code> inspection of <code>aks-corp-eus-01</code> on 2026-05-13, not a generic template.</p>
+    <p class="crumb">sibling: <a href="architecture.html">architecture.html</a> · <a href="snmp-credential-resolution.html">snmp-credential-resolution.html</a> · <a href="claude.html">claude.html</a></p>
+
+    <section>
+      <h2>Cluster snapshot</h2>
+      <div class="stack">
+        <div class="k">cluster</div>
+        <div class="v"><strong>aks-corp-eus-01</strong> · rg <code>rg-aks-corp-eus-01</code> · eastus · Kubernetes <strong>1.34.6</strong> · SKU Base / tier Standard</div>
+
+        <div class="k">api server</div>
+        <div class="v"><strong>private cluster</strong> · private DNS zone <code>privatelink.eastus.azmk8s.io</code> (in <code>rg-prv-dns</code>) · no public FQDN</div>
+
+        <div class="k">identity</div>
+        <div class="v">User-assigned MI <code>id-aks-corp-eus-01</code> · <strong>OIDC issuer enabled</strong> · securityProfile <code>workloadIdentity.enabled: true</code></div>
+
+        <div class="k">cni</div>
+        <div class="v">Azure CNI · Azure dataplane · <strong>Azure Network Policy</strong> · service CIDR <code>10.0.0.0/16</code> · DNS <code>10.0.0.10</code></div>
+
+        <div class="k">egress</div>
+        <div class="v"><code>outboundType: loadBalancer</code> · 1 managed outbound IP on Standard LB · UDR on every subnet (forced-tunnel-ready)</div>
+
+        <div class="k">addons</div>
+        <div class="v"><strong>AGIC</strong> (<code>agic-aks-corp-eus-01</code> in <code>snet-agic</code>) · <strong>azureKeyvaultSecretsProvider</strong> (rotation 2m) · <strong>azurepolicy</strong></div>
+      </div>
+    </section>
+
+    <section>
+      <h2>System flow</h2>
+      <div class="diagram">
+        <svg viewBox="0 0 1200 1060" role="img" aria-label="FlowScope on AKS — clean tiered architecture">
+          <defs>
+            <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="#a6adba" />
+            </marker>
+            <marker id="arr-dim" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="#5d6776" />
+            </marker>
+            <marker id="arr-warn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="#e8c45a" />
+            </marker>
+            <marker id="arr-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="#4ec98c" />
+            </marker>
+            <style>
+              .node rect, .node path { stroke: #232b39; stroke-width: 1.5; }
+              .node text { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; fill: #e6e9ef; }
+              .tier-label { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; fill: #5d6776; font-size: 10.5px; letter-spacing: 0.18em; text-transform: uppercase; font-weight: 600; }
+              .sub-label  { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; fill: #a6adba; font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; font-weight: 600; }
+              .azure    rect { fill: #16243a; stroke: #6da9e8; }
+              .azure    text { fill: #6da9e8; }
+              .azure    .sub { fill: #b8d1ef; font-weight: 400; }
+              .ns       rect { fill: #2a1e15; stroke: #ff7a47; }
+              .ns       text { fill: #ff7a47; font-weight: 600; }
+              .ns       .sub { fill: #d6b8a3; font-weight: 400; }
+              .store    rect { fill: #112a1d; stroke: #4ec98c; }
+              .store    text { fill: #4ec98c; font-weight: 600; }
+              .store    .sub { fill: #b8e6cd; font-weight: 400; }
+              .secret   rect { fill: #2a2510; stroke: #e8c45a; }
+              .secret   text { fill: #e8c45a; }
+              .secret   .sub { fill: #f2dc94; font-weight: 400; }
+              .util     rect { fill: #1a212c; stroke: #5d6776; }
+              .util     text { fill: #a6adba; }
+              .util     .sub { fill: #8a93a3; font-weight: 400; }
+              .util.ghost rect { stroke-dasharray: 3 3; }
+              .pool     rect { fill: #1a212c; stroke: #2c3a52; stroke-width: 1.5; }
+              .pool     text { fill: #d6dde8; }
+              .pool     .sub { fill: #8a93a3; font-weight: 400; }
+              .pool.active rect { stroke: #ff7a47; }
+              .pool.active text { fill: #ff7a47; }
+              .pool.active .sub { fill: #d6b8a3; }
+              .lbl-edge { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; fill: #8a93a3; font-size: 10.5px; }
+              .lbl-warn { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; fill: #e8c45a; font-size: 10.5px; }
+              .lbl-ok   { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; fill: #4ec98c; font-size: 10.5px; }
+              .edge     { stroke: #8a93a3; stroke-width: 1.6; fill: none; }
+              .edge-dashed { stroke: #5d6776; stroke-width: 1.4; fill: none; stroke-dasharray: 4 4; }
+              .edge-warn { stroke: #e8c45a; stroke-width: 1.6; fill: none; }
+              .edge-ok  { stroke: #4ec98c; stroke-width: 1.6; fill: none; }
+              .tier-band rect { fill: transparent; stroke: #232b39; stroke-dasharray: 3 3; }
+              .cluster-box { fill: rgba(176, 138, 245, 0.04); stroke: #5a4884; stroke-width: 1.4; stroke-dasharray: 5 4; }
+              .subnet-box { fill: rgba(109, 169, 232, 0.03); stroke: #2c4970; stroke-width: 1; stroke-dasharray: 2 3; }
+            </style>
+          </defs>
+
+          <!-- ================= TIER 1: EXTERNAL ================= -->
+          <g class="tier-band"><rect x="20" y="20" width="1160" height="120" rx="6" /></g>
+          <text x="34" y="40" class="tier-label">external</text>
+
+          <g class="node ns">
+            <rect x="120" y="50" width="280" height="70" rx="6" />
+            <text x="260" y="80" text-anchor="middle" font-size="13">network exporters</text>
+            <text x="260" y="100" text-anchor="middle" font-size="11" class="sub">NetFlow v5/v9 · IPFIX · sFlow</text>
+          </g>
+
+          <g class="node ns">
+            <rect x="440" y="50" width="240" height="70" rx="6" />
+            <text x="560" y="80" text-anchor="middle" font-size="13">gNMI publishers</text>
+            <text x="560" y="100" text-anchor="middle" font-size="11" class="sub">OpenConfig · gRPC</text>
+          </g>
+
+          <g class="node util">
+            <rect x="740" y="50" width="320" height="70" rx="6" />
+            <text x="900" y="80" text-anchor="middle" font-size="13">operator browsers</text>
+            <text x="900" y="100" text-anchor="middle" font-size="11" class="sub">HTTPS · X-Auth-Token</text>
+          </g>
+
+          <!-- ================= TIER 2: AZURE INGRESS ================= -->
+          <g class="tier-band"><rect x="20" y="160" width="1160" height="120" rx="6" /></g>
+          <text x="34" y="180" class="tier-label">azure ingress · in vnet-aks-corp-eus-01</text>
+
+          <g class="node azure">
+            <rect x="80" y="190" width="520" height="72" rx="6" />
+            <text x="340" y="216" text-anchor="middle" font-size="13">Standard Load Balancer · UDP</text>
+            <text x="340" y="237" text-anchor="middle" font-size="11" class="sub">ports 2055 · 6343 · 4739</text>
+            <text x="340" y="254" text-anchor="middle" font-size="11" class="sub">provisioned by ingest Service (separate from AGIC)</text>
+          </g>
+
+          <g class="node secret">
+            <rect x="640" y="190" width="480" height="72" rx="6" />
+            <text x="880" y="216" text-anchor="middle" font-size="13">Application Gateway v2 · WAF</text>
+            <text x="880" y="237" text-anchor="middle" font-size="11" class="sub">agic-aks-corp-eus-01 · snet-agic 10.120.220.64/27</text>
+            <text x="880" y="254" text-anchor="middle" font-size="11" class="sub">policy: waf-observability-collector</text>
+          </g>
+
+          <!-- ================= TIER 3: AKS CLUSTER ================= -->
+          <rect class="cluster-box" x="40" y="300" width="1120" height="570" rx="10" />
+          <text x="58" y="320" class="tier-label">aks · aks-corp-eus-01 · private · k8s 1.34.6 · zones 1/2/3</text>
+          <text x="1142" y="320" text-anchor="end" class="tier-label">snet-pod 10.120.248.0/21 · azure cni</text>
+
+          <!-- addon strip -->
+          <text x="60" y="343" class="sub-label">cluster addons</text>
+          <g class="node azure">
+            <rect x="60" y="350" width="200" height="42" rx="5" />
+            <text x="160" y="376" text-anchor="middle" font-size="11.5">kube-apiserver</text>
+          </g>
+          <g class="node secret">
+            <rect x="280" y="350" width="240" height="42" rx="5" />
+            <text x="400" y="376" text-anchor="middle" font-size="11.5">Workload Identity · OIDC</text>
+          </g>
+          <g class="node azure">
+            <rect x="540" y="350" width="180" height="42" rx="5" />
+            <text x="630" y="376" text-anchor="middle" font-size="11.5">AGIC controller</text>
+          </g>
+          <g class="node secret">
+            <rect x="740" y="350" width="200" height="42" rx="5" />
+            <text x="840" y="376" text-anchor="middle" font-size="11.5">Secrets Store CSI</text>
+          </g>
+          <g class="node azure">
+            <rect x="960" y="350" width="180" height="42" rx="5" />
+            <text x="1050" y="376" text-anchor="middle" font-size="11.5">Azure Policy</text>
+          </g>
+
+          <!-- node pools strip -->
+          <text x="60" y="418" class="sub-label">node pools · autoscaled · zones 1/2/3</text>
+          <g class="node pool">
+            <rect x="60" y="426" width="346" height="84" rx="6" />
+            <text x="233" y="450" text-anchor="middle" font-size="12.5">systempool</text>
+            <text x="233" y="470" text-anchor="middle" font-size="11" class="sub">Standard_D4s_v5 · 1–5 nodes</text>
+            <text x="233" y="487" text-anchor="middle" font-size="10.5" class="sub">CoreDNS · CSI · AGIC · addons</text>
+          </g>
+          <g class="node pool active">
+            <rect x="426" y="426" width="346" height="84" rx="6" stroke-width="2" />
+            <text x="599" y="450" text-anchor="middle" font-size="12.5">application — flowscope home</text>
+            <text x="599" y="470" text-anchor="middle" font-size="11" class="sub">Standard_E8s_v5 · 3–5 nodes</text>
+            <text x="599" y="487" text-anchor="middle" font-size="10.5" class="sub">memory-optimized · pin via nodeSelector</text>
+          </g>
+          <g class="node pool">
+            <rect x="792" y="426" width="346" height="84" rx="6" />
+            <text x="965" y="450" text-anchor="middle" font-size="12.5">metrics</text>
+            <text x="965" y="470" text-anchor="middle" font-size="11" class="sub">Standard_D32ads_v5 · 3–6 nodes</text>
+            <text x="965" y="487" text-anchor="middle" font-size="10.5" class="sub">Prometheus + Thanos sidecar</text>
+          </g>
+
+          <!-- namespace flowscope -->
+          <rect class="subnet-box" x="60" y="540" width="800" height="300" rx="6" />
+          <text x="74" y="560" class="sub-label">namespace · flowscope</text>
+
+          <!-- row 1: deployments -->
+          <g class="node ns">
+            <rect x="80" y="580" width="240" height="80" rx="6" />
+            <text x="200" y="603" text-anchor="middle" font-size="12.5">Deployment · ingest</text>
+            <text x="200" y="622" text-anchor="middle" font-size="10.5" class="sub">replicas 2 · UDP 2055/6343/4739</text>
+            <text x="200" y="638" text-anchor="middle" font-size="10.5" class="sub">Svc type=LoadBalancer</text>
+            <text x="200" y="653" text-anchor="middle" font-size="10.5" class="sub">metrics :9100 (TCP)</text>
+          </g>
+          <g class="node ns">
+            <rect x="340" y="580" width="240" height="80" rx="6" />
+            <text x="460" y="603" text-anchor="middle" font-size="12.5">Deployment · api</text>
+            <text x="460" y="622" text-anchor="middle" font-size="10.5" class="sub">replicas 2 · Svc ClusterIP :8080</text>
+            <text x="460" y="638" text-anchor="middle" font-size="10.5" class="sub">/healthz · WS /api/stream</text>
+            <text x="460" y="653" text-anchor="middle" font-size="10.5" class="sub">REST + WebSocket</text>
+          </g>
+          <g class="node ns">
+            <rect x="600" y="580" width="240" height="80" rx="6" />
+            <text x="720" y="603" text-anchor="middle" font-size="12.5">Deployment · alert</text>
+            <text x="720" y="622" text-anchor="middle" font-size="10.5" class="sub">leader-elected (CH lease)</text>
+            <text x="720" y="638" text-anchor="middle" font-size="10.5" class="sub">ttl 30s · renew 10s</text>
+            <text x="720" y="653" text-anchor="middle" font-size="10.5" class="sub">→ outbound webhook</text>
+          </g>
+
+          <!-- row 2: SA, init, planned -->
+          <g class="node secret">
+            <rect x="80" y="680" width="240" height="70" rx="6" />
+            <text x="200" y="704" text-anchor="middle" font-size="12.5">ServiceAccount · flowscope</text>
+            <text x="200" y="722" text-anchor="middle" font-size="10.5" class="sub">azure.workload.identity/client-id</text>
+            <text x="200" y="738" text-anchor="middle" font-size="10.5" class="sub">pod label use=true</text>
+          </g>
+          <g class="node util">
+            <rect x="340" y="680" width="240" height="70" rx="6" />
+            <text x="460" y="704" text-anchor="middle" font-size="12.5">initContainer · flowscope-init</text>
+            <text x="460" y="722" text-anchor="middle" font-size="10.5" class="sub">schema migrations</text>
+            <text x="460" y="738" text-anchor="middle" font-size="10.5" class="sub">ALTER TABLE … MODIFY TTL</text>
+          </g>
+          <g class="node util ghost">
+            <rect x="600" y="680" width="240" height="70" rx="6" />
+            <text x="720" y="704" text-anchor="middle" font-size="12.5">snmp · gnmi — planned</text>
+            <text x="720" y="722" text-anchor="middle" font-size="10.5" class="sub">binaries exist in cmd/</text>
+            <text x="720" y="738" text-anchor="middle" font-size="10.5" class="sub">no chart templates yet</text>
+          </g>
+
+          <!-- footer label for namespace -->
+          <text x="74" y="827" class="sub-label">pinned to application pool (nodeSelector)</text>
+
+          <!-- sidebar: cluster-wide observability + ingress -->
+          <rect class="subnet-box" x="880" y="540" width="260" height="300" rx="6" />
+          <text x="894" y="560" class="sub-label">cluster-wide</text>
+
+          <g class="node secret">
+            <rect x="895" y="580" width="230" height="70" rx="6" />
+            <text x="1010" y="604" text-anchor="middle" font-size="12.5">Ingress · flowscope-api</text>
+            <text x="1010" y="622" text-anchor="middle" font-size="10.5" class="sub">ingress.class=azure</text>
+            <text x="1010" y="638" text-anchor="middle" font-size="10.5" class="sub">→ api Service</text>
+          </g>
+
+          <g class="node util">
+            <rect x="895" y="670" width="230" height="70" rx="6" />
+            <text x="1010" y="694" text-anchor="middle" font-size="12.5">kube-prometheus-stack</text>
+            <text x="1010" y="712" text-anchor="middle" font-size="10.5" class="sub">scrapes /metrics</text>
+            <text x="1010" y="728" text-anchor="middle" font-size="10.5" class="sub">on metrics pool</text>
+          </g>
+
+          <g class="node util">
+            <rect x="895" y="760" width="230" height="70" rx="6" />
+            <text x="1010" y="784" text-anchor="middle" font-size="12.5">Thanos sidecar + store</text>
+            <text x="1010" y="802" text-anchor="middle" font-size="10.5" class="sub">ships TSDB blocks</text>
+            <text x="1010" y="818" text-anchor="middle" font-size="10.5" class="sub">→ object storage</text>
+          </g>
+
+          <!-- ================= TIER 4: STATE PLANE ================= -->
+          <g class="tier-band"><rect x="20" y="890" width="1160" height="150" rx="6" /></g>
+          <text x="34" y="910" class="tier-label">state plane · in vnet, outside cluster · via private endpoint</text>
+
+          <g class="node store">
+            <rect x="80" y="920" width="240" height="110" rx="6" />
+            <text x="200" y="947" text-anchor="middle" font-size="13">ClickHouse VM</text>
+            <text x="200" y="967" text-anchor="middle" font-size="11" class="sub">azl-corp-k8s-eus</text>
+            <text x="200" y="984" text-anchor="middle" font-size="11" class="sub">native :9000 · http :8123</text>
+            <text x="200" y="1003" text-anchor="middle" font-size="11" class="sub">single node · backup → RSV</text>
+          </g>
+
+          <g class="node secret">
+            <rect x="360" y="920" width="240" height="110" rx="6" />
+            <text x="480" y="947" text-anchor="middle" font-size="13">Key Vault</text>
+            <text x="480" y="967" text-anchor="middle" font-size="11" class="sub">kv-aks-corp-eus</text>
+            <text x="480" y="984" text-anchor="middle" font-size="11" class="sub">SNMP master · API token</text>
+            <text x="480" y="1003" text-anchor="middle" font-size="11" class="sub">reached via PE only</text>
+          </g>
+
+          <g class="node azure">
+            <rect x="640" y="920" width="240" height="110" rx="6" />
+            <text x="760" y="947" text-anchor="middle" font-size="13">Container Registry</text>
+            <text x="760" y="967" text-anchor="middle" font-size="11" class="sub">acrakscorpeus01</text>
+            <text x="760" y="984" text-anchor="middle" font-size="11" class="sub">flowscope-{ingest,api,alert,init}</text>
+            <text x="760" y="1003" text-anchor="middle" font-size="11" class="sub">AcrPull on id-aks-corp-eus-01</text>
+          </g>
+
+          <g class="node azure">
+            <rect x="920" y="920" width="200" height="110" rx="6" />
+            <text x="1020" y="947" text-anchor="middle" font-size="13">Thanos blob</text>
+            <text x="1020" y="967" text-anchor="middle" font-size="11" class="sub">strgthanosprodeus01</text>
+            <text x="1020" y="984" text-anchor="middle" font-size="11" class="sub">long-term metrics</text>
+            <text x="1020" y="1003" text-anchor="middle" font-size="11" class="sub">PE in snet-pep</text>
+          </g>
+
+          <!-- ============== ARROWS · strict orthogonal ============== -->
+
+          <!-- T1 → T2 -->
+          <!-- exporters → UDP LB -->
+          <path class="edge" d="M 260 120 L 260 190" marker-end="url(#arr)" />
+          <text x="266" y="160" class="lbl-edge">UDP</text>
+
+          <!-- gNMI → cluster top (dashed, planned destination inside) -->
+          <path class="edge-dashed" d="M 560 120 L 560 300" marker-end="url(#arr-dim)" />
+          <text x="566" y="220" class="lbl-edge">gRPC · OpenConfig</text>
+
+          <!-- operators → AGIC -->
+          <path class="edge" d="M 900 120 L 900 190" marker-end="url(#arr)" />
+          <text x="906" y="160" class="lbl-edge">HTTPS</text>
+
+          <!-- T2 → T3 (into cluster) -->
+          <!-- UDP LB → ingest Service -->
+          <path class="edge" d="M 340 262 L 340 570 L 200 570 L 200 580" marker-end="url(#arr)" />
+          <text x="346" y="284" class="lbl-edge">UDP → ingest Svc</text>
+
+          <!-- AGIC → api Service -->
+          <path class="edge" d="M 880 262 L 880 570 L 460 570 L 460 580" marker-end="url(#arr)" />
+          <text x="886" y="284" class="lbl-edge">HTTPS → api Svc :8080</text>
+
+          <!-- T3 → T4 (out of cluster, into state plane) -->
+          <!-- ingest → CH (straight) -->
+          <path class="edge" d="M 200 660 L 200 920" marker-end="url(#arr)" />
+          <text x="208" y="790" class="lbl-edge">native :9000</text>
+
+          <!-- api → CH (L through shared bus) -->
+          <path class="edge" d="M 460 660 L 460 885 L 240 885 L 240 920" marker-end="url(#arr)" />
+
+          <!-- alert → CH (L through shared bus) -->
+          <path class="edge" d="M 720 660 L 720 885 L 280 885 L 280 920" marker-end="url(#arr)" />
+
+          <!-- SA → KV (workload identity, warn color) -->
+          <path class="edge-warn" d="M 200 750 L 200 870 L 480 870 L 480 920" marker-end="url(#arr-warn)" />
+          <text x="304" y="864" class="lbl-warn">workload identity → KV</text>
+
+          <!-- Thanos sidecar → Thanos blob -->
+          <path class="edge-ok" d="M 1020 830 L 1020 920" marker-end="url(#arr-ok)" />
+          <text x="1028" y="880" class="lbl-ok">ship</text>
+
+        </svg>
+      </div>
+      <div class="legend">
+        <span class="pill azure">Azure managed</span>
+        <span class="pill ns">FlowScope workload</span>
+        <span class="pill store">persistent state</span>
+        <span class="pill secret">identity · secret · ingress</span>
+        <span class="pill util">utility / planned</span>
+        <span class="pill arrow">data flow</span>
+        <span class="pill arrow-dashed">control / out-of-band</span>
+      </div>
+    </section>
+
+    <section>
+      <h2>Node pools</h2>
+      <table class="table">
+        <thead><tr><th>name</th><th>mode</th><th>sku</th><th>scale</th><th>zones</th><th>placement intent</th></tr></thead>
+        <tbody>
+          <tr><td>systempool</td><td>System</td><td><code>Standard_D4s_v5</code></td><td>1–5</td><td>1, 2, 3</td><td>CoreDNS, kube-proxy, AGIC, CSI drivers, Azure Policy. Don't schedule FlowScope here.</td></tr>
+          <tr><td>application</td><td>User</td><td><code>Standard_E8s_v5</code></td><td>3–5</td><td>1, 2, 3</td><td>Memory-optimized — target pool for <code>ingest</code>, <code>api</code>, <code>alert</code>, and (planned) <code>snmp</code>/<code>gnmi</code>.</td></tr>
+          <tr><td>metrics</td><td>User</td><td><code>Standard_D32ads_v5</code></td><td>3–6</td><td>1, 2, 3</td><td>Heavy compute for the observability stack (Prometheus + Thanos sidecar). FlowScope pods scrape but don't run here.</td></tr>
+        </tbody>
+      </table>
+      <p style="margin-top:12px"><span class="tag accent">action</span> Add a <code>nodeSelector</code> / <code>nodeAffinity</code> to the FlowScope Deployments pinning them to <code>agentpool=application</code>. Without it, the cluster autoscaler could place ingest pods on systempool and starve add-ons.</p>
+    </section>
+
+    <section>
+      <h2>VNet · subnets · routing</h2>
+      <table class="table">
+        <thead><tr><th>subnet</th><th>CIDR</th><th>occupants</th><th>UDR</th><th>service endpoints</th></tr></thead>
+        <tbody>
+          <tr><td>snet-pod</td><td><code>10.120.248.0/21</code></td><td>AKS nodes + pods (Azure CNI)</td><td><code>rt-…-snet-pod</code></td><td>Microsoft.Storage</td></tr>
+          <tr><td>snet-agic</td><td><code>10.120.220.64/27</code></td><td>Application Gateway</td><td><code>rt-…-snet-agic</code></td><td>Microsoft.Storage</td></tr>
+          <tr><td>snet-pep</td><td><code>10.120.219.32/27</code></td><td>Private endpoints (ACR, KV, Thanos, OpenSearch)</td><td><code>rt-…-snet-pep</code></td><td>Microsoft.Storage</td></tr>
+          <tr><td>snet-kubectl</td><td><code>10.120.223.24/29</code></td><td>Jumpbox <code>azl-corp-k8s-eus</code> for cluster admin</td><td><code>rt-…-snet-kubectl</code></td><td>Microsoft.Storage</td></tr>
+        </tbody>
+      </table>
+      <p style="margin-top:12px">All four subnets carry a UDR — consistent with a hub-and-spoke pattern where 0.0.0.0/0 likely points at an Azure Firewall in another VNet. Plan accordingly: outbound from FlowScope pods (webhook delivery, NTP, image pulls if not via PE) flows through the firewall, not directly to the internet.</p>
+    </section>
+
+    <section>
+      <h2>Helm chart → cluster mapping</h2>
+      <table class="table">
+        <thead><tr><th>workload</th><th>kind</th><th>replicas</th><th>resources</th><th>exposure</th><th>notes</th></tr></thead>
+        <tbody>
+          <tr><td>ingest</td><td>Deployment + Service</td><td>2</td><td>500m / 512Mi → 2 / 1Gi</td><td><code>type: LoadBalancer</code> · UDP 2055/6343/4739</td><td>Creates a <strong>separate Standard LB</strong> from AGIC. Add <code>service.beta.kubernetes.io/azure-load-balancer-internal: "true"</code> if exporters live inside the VNet.</td></tr>
+          <tr><td>api</td><td>Deployment + Service + Ingress</td><td>2</td><td>200m / 256Mi → 1 / 512Mi</td><td>ClusterIP :8080 · Ingress class <code>azure</code></td><td>Behind AGIC + WAF. Probes <code>/healthz</code>. WebSocket <code>/api/stream</code> needs connection-draining annotation.</td></tr>
+          <tr><td>alert</td><td>Deployment</td><td>1 (or 2 with leader lease)</td><td>100m / 128Mi → 500m / 256Mi</td><td>none — internal only</td><td>ClickHouse-backed lease, TTL 30s / renew 10s. Failover bounded by TTL.</td></tr>
+          <tr><td>init</td><td>initContainer (api + ingest), optional Job</td><td>—</td><td>50m / 64Mi → 250m / 128Mi</td><td>—</td><td>Runs schema migrations + retention TTL before the data plane starts.</td></tr>
+          <tr><td>snmp</td><td><em>planned</em> Deployment</td><td>—</td><td>—</td><td>none</td><td>No chart template yet; binary exists at <code>cmd/snmp</code>. Will consume <code>FLOWSCOPE_SNMP_KEY_REF</code>.</td></tr>
+          <tr><td>gnmi</td><td><em>planned</em> Deployment</td><td>—</td><td>—</td><td>egress to device <code>:6030</code> gRPC</td><td>No chart template yet; binary exists at <code>cmd/gnmi</code>.</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>Identity · secrets · image pulls</h2>
+      <div class="row">
+        <div class="card">
+          <h3>Workload Identity path (recommended)</h3>
+          <p>Cluster has <code>oidcIssuerProfile.enabled: true</code> and <code>securityProfile.workloadIdentity.enabled: true</code> — it's ready. Flip <code>values.yaml</code> <code>secrets.backend: kv</code>, set <code>secrets.workloadIdentity.clientID</code> to the MI's client ID, and provision the federated credential mapping <code>system:serviceaccount:flowscope:flowscope</code> → <code>id-aks-corp-eus-01</code>.</p>
+          <p>FlowScope's <code>internal/secrets</code> picks up <code>FLOWSCOPE_SNMP_KEY_REF=kv:&lt;url&gt;</code> and uses <code>DefaultAzureCredential</code> against the injected token — no static credentials in the pod.</p>
+        </div>
+        <div class="card">
+          <h3>CSI driver path (alternate)</h3>
+          <p>The <code>azureKeyvaultSecretsProvider</code> addon is enabled with rotation every 2m. Use <code>secrets.backend: file</code> in <code>values.yaml</code> and project the secret as a file via a <code>SecretProviderClass</code>. Less code change, but rotation is poll-based, not push.</p>
+        </div>
+        <div class="card">
+          <h3>ACR pulls</h3>
+          <p>Pod images come from <code>acrakscorpeus01.azurecr.io</code> via private endpoint in <code>snet-pep</code>. The kubelet identity (<code>id-aks-corp-eus-01</code>) needs the <code>AcrPull</code> role on the registry — check this before the first deploy, otherwise pods will <code>ImagePullBackOff</code>.</p>
+        </div>
+        <div class="card">
+          <h3>No env-mounted keys in prod</h3>
+          <p>The default <code>secrets.backend: env</code> ships a raw K8s Secret. Fine for dev; use KV in prod. Per <a href="../CLAUDE.md">CLAUDE.md</a>: master keys must come from Key Vault via Workload Identity, never from env vars.</p>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Architectural callouts</h2>
+      <div class="row three">
+        <div class="card warn">
+          <h3>UDP cannot traverse AGIC</h3>
+          <p>Application Gateway is L7 HTTP/HTTPS only. NetFlow / sFlow / IPFIX go through a <strong>separate Standard LB</strong> provisioned by the <code>ingest</code> Service of type <code>LoadBalancer</code>. Plan IP allowance, NSGs, and exporter destinations against that LB, not AGIC.</p>
+        </div>
+        <div class="card warn">
+          <h3>ClickHouse DSN doesn't resolve in-cluster</h3>
+          <p><code>values.yaml</code> ships <code>clickhouse://flowscope:flowscope@clickhouse:9000/flowscope</code>, which is the docker-compose hostname. For AKS, point it at the ClickHouse VM via a headless <code>Service</code> with <code>ExternalName</code> (or a Private DNS A-record). Don't expose the VM publicly.</p>
+        </div>
+        <div class="card warn">
+          <h3>Single ClickHouse VM</h3>
+          <p>Per <code>cloud-init.yaml</code>, ClickHouse runs on a single VM with a single data disk. There is no replica or cluster. Backup via Recovery Services Vault is essential — and consider migrating to ClickHouse Cloud or a multi-node cluster before scale-out.</p>
+        </div>
+        <div class="card">
+          <h3>Pin to <code>application</code> pool</h3>
+          <p>Without a <code>nodeSelector</code> on FlowScope Deployments, autoscaler can land pods on <code>systempool</code> (and starve cluster add-ons) or <code>metrics</code> (mismatched SKU for ingest). Add <code>agentpool: application</code> selectors.</p>
+        </div>
+        <div class="card">
+          <h3>Zone-spread replicas</h3>
+          <p>Add <code>topologySpreadConstraints</code> with <code>topology.kubernetes.io/zone</code> on api + ingest. Pools are zone-balanced (1/2/3) — without spread constraints, 2 replicas can end up in the same zone.</p>
+        </div>
+        <div class="card">
+          <h3>Network policy in scope</h3>
+          <p>Cluster runs <code>networkPolicy: azure</code>. Default-allow today, but add NetworkPolicies in the <code>flowscope</code> namespace: ingest accepts UDP from anywhere, api accepts TCP only from the AGIC pods, alert accepts no inbound, all egress to ClickHouse + KV + ACR is explicit.</p>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Recommended next steps</h2>
+      <ol style="color:var(--dim); font-size:14px; max-width:88ch; padding-left:20px;">
+        <li>Add <code>nodeSelector: {agentpool: application}</code> + <code>topologySpreadConstraints</code> to every FlowScope Deployment.</li>
+        <li>Add the AGIC ingress template — currently missing from <code>deploy/helm/flowscope/templates/</code>. Annotate for WebSocket support.</li>
+        <li>Switch <code>secrets.backend</code> default to <code>kv</code> in <code>values-prod.yaml</code> overlay; provision the federated credential on <code>id-aks-corp-eus-01</code> for SA <code>flowscope:flowscope</code>.</li>
+        <li>Wire a <code>clickhouse</code> headless Service (or ExternalName) so the in-cluster DSN resolves to the VM's private IP.</li>
+        <li>Add the <code>service.beta.kubernetes.io/azure-load-balancer-internal: "true"</code> annotation on the ingest Service if exporters live inside the VNet.</li>
+        <li>Template the <code>snmp</code> and <code>gnmi</code> Deployments to bring the chart in line with the binaries shipped in <code>cmd/</code>.</li>
+        <li>Add NetworkPolicies for the <code>flowscope</code> namespace — default deny + targeted allows.</li>
+        <li>Confirm <code>id-aks-corp-eus-01</code> has <code>AcrPull</code> on <code>acrakscorpeus01</code>, and the Key Vault access policy / RBAC for the <code>flowscope</code> SA.</li>
+      </ol>
+    </section>
+
+    <section>
+      <h2>Related</h2>
+      <ul style="font-family: var(--mono); font-size: 13px; color: var(--dim); line-height: 1.9;">
+        <li><a href="architecture.html" style="color: var(--accent);">architecture.html</a> — end-to-end service diagram (cluster-agnostic)</li>
+        <li><a href="claude.html" style="color: var(--accent);">claude.html</a> — codebase layout &amp; working agreement</li>
+        <li><a href="snmp-credential-resolution.html" style="color: var(--accent);">snmp-credential-resolution.html</a> — SNMP credential resolution flow</li>
+        <li><a href="../deploy/helm/flowscope/" style="color: var(--accent);">deploy/helm/flowscope/</a> — chart source</li>
+        <li><a href="../deploy/infra/cloud-init.yaml" style="color: var(--accent);">deploy/infra/cloud-init.yaml</a> — ClickHouse VM bootstrap</li>
+      </ul>
+    </section>
+  </main>
+</body>
+</html>
